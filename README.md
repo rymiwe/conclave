@@ -2,6 +2,8 @@
 
 One brief goes to voters on separate vendors. The kind decides what those voters see, a judge returns one result, and a human decides what happens next.
 
+`scripts/conclave.sh` can update this clone from GitHub before each run. This is off by default; set `CONCLAVE_AUTO_UPDATE=1` to turn it on.
+
 ## Architecture
 
 The chair runs `scripts/conclave.sh` on the executor and does not judge. The builder runs only after the human says to build. The default ballot is every available leg from the lineup. Design excludes nobody. Review and mixed exclude the vendor that built the diff. Audit excludes that vendor when the brief names the author. On review, Opus native is a coverage leg, and its agreement with Fable is one vote. A capped pool is not seated. `--voters` replaces the lineup. The resolver picks model IDs at run time.
@@ -128,7 +130,7 @@ mkdir -p "$CONCLAVE_ROOT/tmp/council/smoke"
 "$CONCLAVE_ROOT/scripts/conclave.sh" smoke
 ```
 
-Before every invocation, including `--dry-run`, `scripts/conclave.sh` fetches this clone and compares HEAD to its upstream (`scripts/freshness-check.sh`). Up to date: it prints the short sha and date. Behind with a clean tree: it runs `git pull --ff-only` and prints `old..new`. Behind with a dirty tree, or diverged: it stops, nonzero, and pulls nothing. Fetch fails: it warns and continues, or stops when `CONCLAVE_REQUIRE_FRESH=1`. `CONCLAVE_SKIP_UPDATE_CHECK=1` bypasses the check. Test: `scripts/test-freshness.sh`.
+Before every invocation, including `--dry-run`, `scripts/conclave.sh` fetches this clone and compares HEAD to its upstream (`scripts/freshness-check.sh`). Up to date: it prints the short sha and date. Behind, by default: it warns with the count and pulls nothing. With `CONCLAVE_AUTO_UPDATE=1`, behind with a clean tree: it runs `git pull --ff-only` and prints `old..new`; behind with a dirty tree, or diverged: it stops, nonzero, and pulls nothing. Fetch fails: it warns and continues, or stops when `CONCLAVE_REQUIRE_FRESH=1`. `CONCLAVE_SKIP_UPDATE_CHECK=1` bypasses the check. Test: `scripts/test-freshness.sh`.
 
 `--dry-run` writes `preview/` and leaves the ballot untouched. Copy `tmp/council/examples/design-high-brief.md` for a first design run and pass `--difficulty low`. If `judgment.md` is missing after design or mixed, re-auth and run `--judge`. After review, run `--findings` once `findings.json` exists. Neither command launches voters. Review target flags are in `docs/review.md`. The full scratch layout is `tmp/council/README.md`.
 

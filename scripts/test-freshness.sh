@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Freshness check against temp local repos: up to date, behind clean,
-# behind dirty, diverged, fetch failure, skip.
+# behind dirty, diverged, fetch failure, skip, and the default without
+# CONCLAVE_AUTO_UPDATE (reports, never pulls or stops).
 set -u
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 . "$ROOT/scripts/freshness-check.sh"
@@ -25,6 +26,16 @@ fresh a; out="$(council_freshness_check "$T/a" 2>&1)"; rc=$?
 check "up to date: rc 0" "$rc" 0
 case "$out" in *"up to date"*"$(git -C "$T/a" rev-parse --short HEAD)"*) echo "ok up to date prints sha";; *) echo "FAIL up to date output: $out"; fail=1;; esac
 
+fresh n; advance n; echo dirty >>"$T/n/f"; before="$(git -C "$T/n" rev-parse HEAD)"
+out="$(council_freshness_check "$T/n" 2>&1)"; rc=$?
+check "default, behind dirty: rc 0" "$rc" 0
+check "default: HEAD unmoved" "$(git -C "$T/n" rev-parse HEAD)" "$before"
+case "$out" in *"behind origin/main by 1"*"git pull"*) echo "ok default reports behind";; *) echo "FAIL default output: $out"; fail=1;; esac
+git -C "$T/n" checkout -q f
+out="$(council_freshness_check "$T/n" 2>&1)"; rc=$?
+check "default, behind clean: rc 0, no pull" "$rc:$(git -C "$T/n" rev-parse HEAD)" "0:$before"
+
+export CONCLAVE_AUTO_UPDATE=1
 fresh b; advance b; mkdir -p "$T/b/tmp/council/x"; echo s >"$T/b/tmp/council/x/scratch"
 old="$(git -C "$T/b" rev-parse --short HEAD)"
 out="$(council_freshness_check "$T/b" 2>&1)"; rc=$?

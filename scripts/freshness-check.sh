@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Pre-run freshness check: fetch, compare HEAD to its upstream, fast-forward
-# only when that is safe. Sourced by conclave.sh; tests call it directly.
+# Pre-run freshness check: fetch and compare HEAD to its upstream. With
+# CONCLAVE_AUTO_UPDATE=1 it fast-forwards when that is safe and stops on a
+# dirty or diverged tree; without it, it only reports how far behind.
+# Sourced by conclave.sh; tests call it directly.
+#   CONCLAVE_AUTO_UPDATE=1        pull when behind (COUNCIL_AUTO_UPDATE still works)
 #   CONCLAVE_SKIP_UPDATE_CHECK=1  bypass (COUNCIL_SKIP_UPDATE_CHECK still works)
 #   CONCLAVE_REQUIRE_FRESH=1      a failed fetch stops the run instead of warning
 #     (COUNCIL_REQUIRE_FRESH still works). The new name wins when both are set.
@@ -9,9 +12,10 @@
 . "$(dirname "${BASH_SOURCE[0]}")/conclave-env.sh"
 
 council_freshness_check() {
-  local dir="$1" up behind ahead old new skip_name fresh_name
+  local dir="$1" up behind ahead old new skip_name fresh_name auto_name
   skip_name="$(conclave_env_name SKIP_UPDATE_CHECK)"
   fresh_name="$(conclave_env_name REQUIRE_FRESH)"
+  auto_name="$(conclave_env_name AUTO_UPDATE)"
   [ "$(conclave_env SKIP_UPDATE_CHECK 0)" = "1" ] && return 0
   if ! timeout "$(conclave_env FETCH_TIMEOUT 30)" git -C "$dir" fetch --quiet 2>/dev/null; then
     if [ "$(conclave_env REQUIRE_FRESH 0)" = "1" ]; then
@@ -31,6 +35,10 @@ EOF2
   old="$(git -C "$dir" rev-parse --short HEAD)"
   if [ "$behind" -eq 0 ]; then
     echo "conclave: up to date with $up at $old ($(git -C "$dir" log -1 --format=%cs HEAD))"
+    return 0
+  fi
+  if [ "$(conclave_env AUTO_UPDATE 0)" != "1" ]; then
+    echo "conclave: WARNING: checkout is behind $up by $behind; \`git pull\` to update, or set ${auto_name}=1." >&2
     return 0
   fi
   if [ "$ahead" -ne 0 ]; then
