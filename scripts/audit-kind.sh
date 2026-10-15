@@ -275,13 +275,21 @@ audit_write_lineup() {
         claude)
           if [ "${CLAUDE_SKU:-fable}" = "opus" ]; then
             model="opus"
+            ver="$(review_cli_version claude)"
+            cli="claude ($ver)"
+            pool="Claude"
+          elif [ "${CLAUDE_SKU:-fable}" = cursor-fable ]; then
+            model="${CURSOR_FABLE:-}"
+            ver="$(review_cli_version "$(conclave_env CURSOR_AGENT cursor-agent)")"
+            cli="cursor-agent ($ver)"
+            pool="Cursor"
           else
             model="${CLAUDE_REVIEW_MODEL:-fable}"
+            ver="$(review_cli_version claude)"
+            cli="claude ($ver)"
+            pool="Claude"
           fi
-          ver="$(review_cli_version claude)"
-          cli="claude ($ver)"
           meth="brief"
-          pool="Claude"
           pace="$(review_pace_cell claude)"
           ;;
         opus)
@@ -443,6 +451,8 @@ EOF
 audit_claude_model() {
   if [ "${CLAUDE_SKU:-fable}" = "opus" ]; then
     printf 'opus\n'
+  elif [ "${CLAUDE_SKU:-fable}" = cursor-fable ]; then
+    printf '%s\n' "${CURSOR_FABLE:-}"
   else
     printf 'fable\n'
   fi
@@ -461,6 +471,10 @@ audit_run_claude_brief() {
     echo "$voter: cannot cd to worktree" >"$DIR/voter-$voter.fail"
     return 1
   }
+  if [ "$voter" = claude ] && [ "${CLAUDE_SKU:-}" = cursor-fable ]; then
+    review_run_cursor_fable "$wt"
+    return
+  fi
   ec=0
   env CLAUDE_CODE_SUBAGENT_MODEL=opus \
     claude -p --model "$model" --effort high \
@@ -616,7 +630,12 @@ audit_launch() {
     }
     case "$v" in
       claude)
-        if ! command -v claude >/dev/null 2>&1; then
+        if [ "${CLAUDE_SKU:-}" = cursor-fable ]; then
+          if ! command -v "$(conclave_env CURSOR_AGENT cursor-agent)" >/dev/null 2>&1; then
+            echo "claude: cursor-agent not found" >"$DIR/voter-claude.fail"
+            continue
+          fi
+        elif ! command -v claude >/dev/null 2>&1; then
           echo "claude: CLI not found" >"$DIR/voter-claude.fail"
           continue
         fi

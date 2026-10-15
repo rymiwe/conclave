@@ -211,6 +211,45 @@ apply audit
 check "ask mode uses the fixed pair" [ "$VOTERS" = "claude,codex" ]
 check "ask mode says so" source_is "ballot: fallback (seat-usage asked; fixed default)"
 
+python3 - "$work/cursor.json" <<'PY'
+import json, sys
+doc = [{"role": "lineup", "mode": "default", "reason": "stub", "lineup": {"voters": [
+    {"family": "fable", "seat": "cursor", "effort": "high"},
+    {"family": "astra", "seat": "chatgpt", "effort": "high"},
+    {"family": "grok", "seat": "grok", "effort": "high"},
+    {"family": "wonder-full", "seat": "muse", "effort": "high"},
+]}}]
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(doc, fh)
+PY
+python3 - "$work/down.json" <<'PY'
+import json, sys
+doc = [{"role": "lineup", "mode": "default", "reason": "stub", "lineup": {"voters": [
+    {"family": "astra", "seat": "chatgpt", "effort": "high"},
+    {"family": "grok", "seat": "grok", "effort": "high"},
+    {"family": "wonder-full", "seat": "muse", "effort": "high"},
+]}, "downgrade": {"family": "fable", "reason": "no frontier pool with room: approve a downgraded leg"}}]
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(doc, fh)
+PY
+use_router "$work/cursor.json" 0
+CURSOR_FABLE="cursor-fable-test"
+apply design
+check "design launches cursor-fable when the seat is cursor" [ "$CLAUDE_SKU" = "cursor-fable" ]
+check "cursor seat keeps the lineup voters" [ "$VOTERS" = "claude,codex,grok,muse" ]
+check "resolved cursor id is not a downgrade prompt" [ -z "${BALLOT_DOWNGRADE_WHY:-}" ]
+unset CURSOR_FABLE
+apply design
+check "unresolved cursor id prompts for a downgrade" [ "$BALLOT_DOWNGRADE_WHY" = "Cursor Fable id cannot be resolved: approve a downgraded leg" ]
+check "unresolved cursor id does not fall back" [ "$VOTERS" = "claude,codex,grok,muse" ]
+
+use_router "$work/down.json" 0
+apply design
+check "downgrade prompt keeps the other voters" [ "$VOTERS" = "codex,grok,muse" ]
+check "downgrade prompt is not the fixed pair" [ "$VOTERS" != "claude,codex" ]
+check "downgrade prompt names the approval" [ "$BALLOT_DOWNGRADE_WHY" = "no frontier pool with room: approve a downgraded leg" ]
+check "downgrade prompt stays a lineup" source_is "ballot: lineup"
+
 use_router "$work/bad.json" 0
 apply design
 check "bad json uses the fixed pair" [ "$VOTERS" = "claude,codex" ]
@@ -259,6 +298,40 @@ check "design dry-run prints the lineup source" grep -qx '  ballot: lineup' <<<"
 check "design dry-run prints the voters" grep -qx '  voters: claude,codex,grok,muse' <<<"$out"
 check "routing.md names the lineup" grep -qx 'ballot: lineup' "$DIR/preview/routing.md"
 check "routing.md lists the voters" grep -qx 'voters: claude,codex,grok,muse' "$DIR/preview/routing.md"
+
+rm -rf "$DIR/preview"
+use_router "$work/cursor.json" 0
+printf '%s\n' 'kind: design' 'difficulty: low' '' '# Goal' 'Pick a storage layout.' >"$DIR/brief.md"
+capture "$ID" --dry-run --repo "$work/target"
+check "cursor seat dry-run exits 0" [ "$dry_ec" -eq 0 ]
+check "cursor seat dry-run is not review-only" bash -c '! grep -q "kind review only" <<<"$1"' _ "$out"
+check "design routing sku is cursor-fable" grep -qx 'sku: cursor-fable' "$DIR/preview/routing.md"
+
+rm -rf "$DIR/preview"
+use_router "$work/ask.json" 0
+capture "$ID" --dry-run --repo "$work/target"
+check "failed reading dry-run exits 0" [ "$dry_ec" -eq 0 ]
+check "failed reading dry-run prints claude,codex" grep -qx '  voters: claude,codex' <<<"$out"
+check "failed reading dry-run is the ask fallback" grep -qx '  ballot: fallback (seat-usage asked; fixed default)' <<<"$out"
+
+python3 - "$work/approved.json" <<'PY'
+import json, sys
+doc = [{"role": "lineup", "mode": "default", "reason": "stub", "lineup": {"voters": [
+    {"family": "fable", "seat": "claude", "effort": "max", "downgraded": True},
+    {"family": "astra", "effort": "high"},
+    {"family": "grok", "effort": "high"},
+    {"family": "wonder-full", "effort": "high"},
+]}}]
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(doc, fh)
+PY
+rm -rf "$DIR/preview"
+use_router "$work/approved.json" 0
+printf '%s\n' 'kind: design' 'difficulty: low' 'effort: max' '' '# Goal' 'Pick a storage layout.' >"$DIR/brief.md"
+capture "$ID" --dry-run --repo "$work/target"
+check "approved downgrade dry-run exits 0" [ "$dry_ec" -eq 0 ]
+check "approved downgrade effort stays max" grep -q 'claude=.* effort=max ' <<<"$out"
+check "approved downgrade routing keeps max" grep -qx 'effort: max' "$DIR/preview/routing.md"
 
 rm -rf "$DIR/preview"
 use_router "$work/all.json" 0

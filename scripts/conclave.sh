@@ -406,7 +406,8 @@ Options:
                          unless kind is audit and --voters names it.
   --record-review        Append the review phase for an existing run and exit.
                          Requires --run-id and --review-file. Does not launch voters.
-  --claude-model NAME    fable | opus | cursor-fable (last is review only)
+  --claude-model NAME    fable | opus | cursor-fable
+                         cursor-fable runs on Cursor for review, design, and mixed.
   --fable-overflow cursor  Retry a usage-limited Fable leg on Cursor (review only)
   --kind KIND            design | review | mixed | audit
   --difficulty LEVEL     low | med | high
@@ -647,6 +648,7 @@ clear_ballot_artifacts() {
   rm -f \
     "$DIR"/voter-*.md "$DIR"/voter-*.err "$DIR"/voter-*.ok \
     "$DIR"/voter-*.raw.md "$DIR"/voter-*.prompt.md "$DIR"/voter-*.model.txt \
+    "$DIR"/voter-*.stream.jsonl \
     "$DIR"/opinion-*.md \
     "$DIR"/judgment.md "$DIR"/judge-prompt.md "$DIR"/options.md \
     "$DIR"/header.json \
@@ -1092,6 +1094,7 @@ resolve_routing() {
     CLAUDE_EFFORT="$(normalize_effort "$HEADER_EFFORT")"
   fi
 
+  # An approved downgrade sets CLAUDE_EFFORT after this cap, from the lineup.
   if [ "$CLAUDE_EFFORT" = "max" ] || [ "$CLAUDE_EFFORT" = "xhigh" ]; then
     if [ "$FORCE_MAX" -eq 1 ] || { [ "$HEADER_EFFORT" = "max" ] && [ "$KIND" = "design" ] && [ "$DIFFICULTY" = "high" ]; }; then
       if [ "$CLAUDE_SKU" = "fable" ] && [ "$KIND" = "design" ] && [ "$DIFFICULTY" = "high" ]; then
@@ -1115,8 +1118,14 @@ resolve_routing() {
     cursor-fable) CLAUDE_MODEL_ALIAS="${CURSOR_FABLE:-}" ;;
     *) die "invalid claude sku: $CLAUDE_SKU (want fable|opus|cursor-fable)" ;;
   esac
-  if [ "$KIND" != review ] && { [ "$CLAUDE_SKU" = cursor-fable ] || [ -n "$FABLE_OVERFLOW" ]; }; then
-    die "cursor-fable and --fable-overflow are kind review only"
+  if [ -n "$FABLE_OVERFLOW" ] && [ "$KIND" != review ]; then
+    die "--fable-overflow is kind review only"
+  fi
+  if [ "$CLAUDE_SKU" = cursor-fable ] && [ "$KIND" != review ] && [ "$KIND" != design ] && [ "$KIND" != mixed ]; then
+    die "cursor-fable is review, design, or mixed only"
+  fi
+  if [ "$CLAUDE_SKU" = cursor-fable ] && [ -z "${CURSOR_FABLE:-}" ]; then
+    die "cursor-fable: Cursor Fable id is empty"
   fi
 
   # --- Codex (Astra on every kind) ---
@@ -1250,19 +1259,38 @@ if not isinstance(doc, dict):
 if doc.get("mode") == "ask" or not isinstance(doc.get("lineup"), dict):
     print("ask" if doc.get("mode") == "ask" else "bad")
     raise SystemExit(0)
+down = doc.get("downgrade")
 names = {"fable": "claude", "astra": "codex", "grok": "grok", "muse": "muse", "wonder-full": "muse"}
 out = []
+cursor = False
+downgraded = ""
 for row in doc["lineup"].get("voters") or []:
     if not isinstance(row, dict):
         continue
+    if row.get("family") == "fable" and row.get("seat") == "cursor":
+        cursor = True
+    if row.get("downgraded") and row.get("effort"):
+        downgraded = row["effort"]
     name = names.get(row.get("family"))
     if name and name not in out:
         out.append(name)
+if isinstance(down, dict) and down.get("reason"):
+    if not out:
+        print("bad")
+        raise SystemExit(0)
+    print("downgrade")
+    print(",".join(out))
+    print(down["reason"])
+    raise SystemExit(0)
 if not out:
     print("bad")
     raise SystemExit(0)
 print("ok")
 print(",".join(out))
+if cursor:
+    print("cursor-fable")
+if downgraded:
+    print("downgraded:" + downgraded)
 excl = doc.get("excluded")
 if isinstance(excl, dict) and (excl.get("why") or excl.get("vendor") or excl.get("name")):
     if excl.get("vendor"):
@@ -1277,7 +1305,7 @@ load_lineup_ballot() {
   # Never stops the run. The control plane already ran the lineup.
   # Review and mixed omit --author so the router defaults to its builder.
   # A brief author: header overrides that. Audit has no default author.
-  local bin raw parsed status legs args tail name why
+  local bin raw parsed status legs args tail name why line rest
   bin="$(conclave_env SEAT_USAGE "$HOME/.local/bin/seat-usage")"
   if [ -z "$bin" ] || [ ! -x "$bin" ]; then
     BALLOT_SOURCE=fallback
@@ -1300,13 +1328,34 @@ load_lineup_ballot() {
   status="${parsed%%$'\n'*}"
   case "$status" in
     ok)
-      legs="${parsed#*$'\n'}"
-      tail="${legs#*$'\n'}"
-      legs="${legs%%$'\n'*}"
-      if [ "$tail" != "$legs" ]; then
-        name="${tail%%$'\n'*}"
-        why="${tail#*$'\n'}"
-        if [ "$why" != "$tail" ]; then
+      rest="${parsed#*$'\n'}"
+      legs="${rest%%$'\n'*}"
+      rest="${rest#*$'\n'}"
+      if [ "$rest" = "$legs" ]; then
+        rest=""
+      fi
+      if [ "${rest%%$'\n'*}" = cursor-fable ]; then
+        CLAUDE_SKU="cursor-fable"
+        CLAUDE_MODEL_ALIAS="${CURSOR_FABLE:-}"
+        if [ "$rest" = cursor-fable ]; then
+          rest=""
+        else
+          rest="${rest#*$'\n'}"
+        fi
+      fi
+      line="${rest%%$'\n'*}"
+      if [[ "$line" == downgraded:* ]]; then
+        LINEUP_DOWNGRADED_EFFORT="${line#downgraded:}"
+        if [ "$rest" = "$line" ]; then
+          rest=""
+        else
+          rest="${rest#*$'\n'}"
+        fi
+      fi
+      if [ -n "$rest" ]; then
+        name="${rest%%$'\n'*}"
+        why="${rest#*$'\n'}"
+        if [ "$why" != "$rest" ]; then
           BALLOT_EXCLUDED_NAME="$name"
           BALLOT_EXCLUDED_WHY="$why"
         fi
@@ -1314,6 +1363,18 @@ load_lineup_ballot() {
       if [ -n "$legs" ]; then
         BALLOT_SOURCE=lineup
         BALLOT_SOURCE_NOTE=""
+        VOTERS="$legs"
+        return 0
+      fi
+      ;;
+    downgrade)
+      rest="${parsed#*$'\n'}"
+      legs="${rest%%$'\n'*}"
+      why="${rest#*$'\n'}"
+      if [ -n "$legs" ] && [ "$why" != "$rest" ]; then
+        BALLOT_SOURCE=lineup
+        BALLOT_SOURCE_NOTE=""
+        BALLOT_DOWNGRADE_WHY="$why"
         VOTERS="$legs"
         return 0
       fi
@@ -1358,12 +1419,21 @@ apply_kind_voters() {
   # When the claude leg is already Opus native, drop opus so it cannot run twice.
   BALLOT_EXCLUDED_NAME=""
   BALLOT_EXCLUDED_WHY=""
+  BALLOT_DOWNGRADE_WHY=""
+  LINEUP_DOWNGRADED_EFFORT=""
   if [ "$VOTERS_EXPLICIT" -eq 0 ]; then
     load_lineup_ballot
     # Opus is Anthropic too, so it sits out when Anthropic built the diff.
     if [ "$KIND" = "review" ] && [ "$BALLOT_SOURCE" = lineup ] \
       && [ "$BALLOT_EXCLUDED_NAME" != Anthropic ]; then
       review_add_opus_leg
+    fi
+    if [ "$CLAUDE_SKU" = cursor-fable ] && [ -z "${CURSOR_FABLE:-}" ] \
+      && [ -z "${BALLOT_DOWNGRADE_WHY:-}" ]; then
+      BALLOT_DOWNGRADE_WHY="Cursor Fable id cannot be resolved: approve a downgraded leg"
+    fi
+    if [ -n "${LINEUP_DOWNGRADED_EFFORT:-}" ]; then
+      CLAUDE_EFFORT="$LINEUP_DOWNGRADED_EFFORT"
     fi
   fi
   if [ "$KIND" != "review" ] && [ "$KIND" != "audit" ]; then
@@ -1845,6 +1915,10 @@ muse_capture_usage() {
 }
 
 run_claude() {
+  if [ "$CLAUDE_SKU" = cursor-fable ]; then
+    run_cursor_fable_packet
+    return
+  fi
   local out="$DIR/voter-claude.md"
   local err="$DIR/voter-claude.err"
   local prompt ec
@@ -1864,6 +1938,62 @@ run_claude() {
   fi
   if [ ! -s "$out" ]; then
     log_err "claude: empty output"
+    rm -f "$out"
+    return 1
+  fi
+  mark_voter_ok claude
+}
+
+run_cursor_fable_packet() {
+  # Design and mixed stay packet-first. Ask mode is read-only. The workspace
+  # is the packet, not the target repo. Review keeps its own worktree launcher.
+  local out="$DIR/voter-claude.md" err="$DIR/voter-claude.err"
+  local stream="$DIR/voter-claude.stream.jsonl" ec=0
+  if [ -z "${CURSOR_FABLE:-}" ] || [ ! -s "$PACKET/PROMPT.md" ]; then
+    log_err "claude: Cursor Fable id is unresolved: approve a downgraded leg"
+    rm -f "$out"
+    return 1
+  fi
+  (
+    cd -- "$PACKET" || exit 97
+    "$(conclave_env CURSOR_AGENT cursor-agent)" -p --mode ask \
+      --model "$CURSOR_FABLE" \
+      --output-format stream-json \
+      --trust --workspace "$PACKET" \
+      "$(cat "$PACKET/PROMPT.md")"
+  ) >"$stream" 2>"$err" || ec=$?
+  if [ "$ec" -ne 0 ]; then
+    log_err "claude: Cursor exit $ec; see voter-claude.err"
+    rm -f "$out"
+    return 1
+  fi
+  if ! python3 - "$DIR" "$CURSOR_FABLE" "$out" <<'PY'
+import json, re, sys
+from pathlib import Path
+d, model, out_path = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+lines = (d / "voter-claude.stream.jsonl").read_text(encoding="utf-8").split("\n")
+if lines and lines[-1] == "":
+    lines.pop()
+events = [json.loads(line) for line in lines if line]
+last = events[-1]
+if (last.get("type") != "result" or last.get("is_error") is not False
+        or not isinstance(last.get("result"), str) or not last["result"].strip()):
+    sys.stderr.write("claude: Cursor result missing\n")
+    raise SystemExit(1)
+init = next((e for e in events if e.get("type") == "system"), {})
+display = str(init.get("model") or "unknown")
+shown = re.sub(r"\s", "_", display)
+ok = "fable" in display.lower()
+proof = (f"claude: ok via=cursor model={model} display={shown}" if ok else
+         f"claude: FAIL via=cursor ran={shown} (lineup said {model})")
+(d / "voter-claude.model.txt").write_text(proof + "\n", encoding="utf-8")
+if not ok:
+    sys.stderr.write("claude: Cursor init model has no fable proof\n")
+    raise SystemExit(1)
+out_path.write_text(last["result"].strip() + "\n", encoding="utf-8")
+PY
+  then
+    log_err "claude: Cursor Fable output missing or model unproven; see voter-claude.stream.jsonl"
     rm -f "$out"
     return 1
   fi
@@ -2738,6 +2868,9 @@ if [ "$DRY_RUN" -eq 1 ]; then
     printf '  %s\n' "$(excluded_line)"
   fi
   printf '  voters: %s\n' "$VOTERS"
+  if [ -n "${BALLOT_DOWNGRADE_WHY:-}" ]; then
+    printf '  downgrade: %s\n' "$BALLOT_DOWNGRADE_WHY"
+  fi
   printf '  target=%s\n' "$REPO"
   printf '  claude=%s effort=%s | codex=%s effort=%s | %s effort=%s | judge=jev\n' \
     "$CLAUDE_MODEL_ALIAS" "$CLAUDE_EFFORT" \
@@ -2761,6 +2894,9 @@ PACKET_MIRROR="$DIR/packet"
 resolve_routing
 require_design_voters
 audit_reject_foreign_flags
+if [ -n "${BALLOT_DOWNGRADE_WHY:-}" ]; then
+  die "approve a downgraded leg: ${BALLOT_DOWNGRADE_WHY}"
+fi
 council_begin_run
 if [ "$KIND" = "review" ]; then
   attach_resolve
@@ -2812,7 +2948,12 @@ for v in "${VOTER_LIST[@]}"; do
   [ -n "$v" ] || continue
   case "$v" in
     claude)
-      if ! command -v claude >/dev/null 2>&1; then
+      if [ "$CLAUDE_SKU" = cursor-fable ]; then
+        if ! command -v "$(conclave_env CURSOR_AGENT cursor-agent)" >/dev/null 2>&1; then
+          log_err "claude: cursor-agent not found"
+          continue
+        fi
+      elif ! command -v claude >/dev/null 2>&1; then
         log_err "claude: CLI not found (command -v claude failed)"
         continue
       fi
