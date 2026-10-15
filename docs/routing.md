@@ -253,7 +253,7 @@ projects and never touch work code; every Bot shares that disk.
   a client.
 - One machine is the executor. Every other machine, the phone, and the car
   are clients.
-- No PII or CUI in dev or test. A cloud VM (Cloud Agent, Origin) earns
+- No production data in dev or test. A cloud VM (Cloud Agent, Origin) earns
   its place only when a job cannot run as a worktree on the executor, the
   VM bills a flat pool, and the org accepts a standing copy of the code
   off GitHub. Origin makes that copy permanent rather than per run, so it
