@@ -92,7 +92,7 @@ ask_voters_from_route() {
   python3 - "$ASK_ROUTE_JSON" <<'PY'
 import json, sys
 doc = json.loads(sys.argv[1])
-names = {"fable": "claude", "astra": "codex", "grok": "grok", "muse": "muse"}
+names = {"fable": "claude", "astra": "codex", "grok": "grok", "muse": "muse", "wonder-full": "muse"}
 out = []
 for row in doc.get("voters") or []:
     name = names.get(row.get("family"))
@@ -112,12 +112,12 @@ ask_route_fields() {
   python3 - "$ASK_ROUTE_JSON" "$1" <<'PY'
 import json, sys
 doc = json.loads(sys.argv[1])
-family = {"claude": "fable", "codex": "astra", "grok": "grok", "muse": "muse"}.get(sys.argv[2])
-if not family:
+wanted = {"claude": ("fable",), "codex": ("astra",), "grok": ("grok",), "muse": ("wonder-full", "muse")}.get(sys.argv[2])
+if not wanted:
     raise SystemExit(0)
 rows = list(doc.get("candidates") or []) + list(doc.get("voters") or [])
 for row in rows:
-    if row.get("family") == family:
+    if row.get("family") in wanted:
         print("\t".join(str(row.get(key) or "") for key in ("pace", "mode", "effort")))
         break
 PY

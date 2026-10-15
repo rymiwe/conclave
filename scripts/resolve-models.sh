@@ -7,7 +7,7 @@
 # Roles: Anthropic voter (launch alias), OpenAI voter and its binary,
 # opt-in Grok voter (CLI default), Cursor Fable fallback, the Cursor
 # stuck-builder (xhigh), the builder (newest Cursor Grok at high, Fast),
-# and the newest Muse Wonder model.
+# and the newest Muse Wonder full model. Plain Wonder is not this pin.
 # The chair is not resolved here: the Bot launches the newest Grok at high,
 # Fast variant (bot-standing-instruction.md appendix).
 # Exits 1 when CODEX or CODEX_REVIEW_MODEL is empty.
@@ -105,7 +105,7 @@ emit CODEX "$codex_bin"
 # xAI native: no pin; grok's default tracks its newest release.
 emit GROK_NATIVE_MODEL "$(grok models 2>/dev/null |
   sed -nE 's/^Default model: ([A-Za-z0-9.-]+).*/\1/p')"
-# Newest Wonder id. Empty when the listing fails; the leg skips.
+# Newest Wonder full id. Empty when the listing fails or has no full id; the leg skips.
 # CONCLAVE_MUSE_CATALOG (COUNCIL_MUSE_CATALOG is the alias) reads a saved
 # listing and does not start muse. Tests set it. A real run leaves it unset.
 muse_catalog="$(conclave_env MUSE_CATALOG)"

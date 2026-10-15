@@ -1250,7 +1250,7 @@ if not isinstance(doc, dict):
 if doc.get("mode") == "ask" or not isinstance(doc.get("lineup"), dict):
     print("ask" if doc.get("mode") == "ask" else "bad")
     raise SystemExit(0)
-names = {"fable": "claude", "astra": "codex", "grok": "grok", "muse": "muse"}
+names = {"fable": "claude", "astra": "codex", "grok": "grok", "muse": "muse", "wonder-full": "muse"}
 out = []
 for row in doc["lineup"].get("voters") or []:
     if not isinstance(row, dict):
@@ -1505,23 +1505,25 @@ muse_shadow_on() {
   [ "$(conclave_env MUSE_SHADOW 0)" = "1" ]
 }
 
-# MUSE_WONDER_MODEL is the newest Wonder id from resolve-models.sh.
-# A contributor id, a Spark id, or any id outside that family is refused.
+# MUSE_WONDER_MODEL is the newest Wonder full id from resolve-models.sh.
+# Wonder full is the frontier on this seat. Plain Wonder, Spark, and a
+# contributor id are refused.
 muse_pin_usable() {
-  local id="${MUSE_WONDER_MODEL:-}" token
+  local id="${MUSE_WONDER_MODEL:-}" token wonder=0 full=0
   [ -n "$id" ] || return 1
   case "$id" in
     *contributor*|*spark*) return 1 ;;
   esac
   local IFS='-'
   for token in $id; do
-    [ "$token" = "wonder" ] && return 0
+    [ "$token" = "wonder" ] && wonder=1
+    [ "$token" = "full" ] && full=1
   done
-  return 1
+  [ "$wonder" = 1 ] && [ "$full" = 1 ]
 }
 
 # Headless flags are the ones `muse exec --help` prints. cwd is the packet.
-# The model id is MUSE_WONDER_MODEL from resolve-models.sh and nowhere else.
+# The model id is the Wonder full pin from resolve-models.sh and nowhere else.
 # The shadow launch does not pass an effort. The named voter does.
 # --json is the CLI JSONL event stream. scripts/muse-usage.py reads it for
 # Meta's subscription_usage snapshot after muse exits. Limits: docs/routing.md.

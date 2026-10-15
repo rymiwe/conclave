@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Print the newest Muse model in the Wonder family, or nothing.
+"""Print the newest Wonder full model, or nothing.
 
-The family is the hyphen token "wonder". A Spark id or a contributor id
-is refused. Newest is the latest releaseDate. Equal dates keep catalog
-order, which is newest first.
+Wonder full is the frontier on the Muse seat, the way Astra is on
+ChatGPT. Plain Wonder is the other model on that seat, the way Sol is,
+and this does not print it. A Spark id or a contributor id is refused.
+Newest is the latest releaseDate among Wonder full ids. Equal dates
+keep catalog order. No Wonder full id prints nothing.
 
 --catalog FILE reads a saved listing and does not start muse. Without it,
 this asks `muse serve` for model/list and gives up after a few seconds.
@@ -23,13 +25,22 @@ from pathlib import Path
 LIST_TIMEOUT_S = 8
 
 
+def _tokens(model_id):
+    return model_id.strip().lower().split("-")
+
+
 def is_wonder(model_id):
     if not isinstance(model_id, str):
         return False
     low = model_id.strip().lower()
     if not low or "spark" in low or "contributor" in low:
         return False
-    return "wonder" in low.split("-")
+    return "wonder" in _tokens(model_id)
+
+
+def is_frontier(model_id):
+    """Wonder full. Plain Wonder shares the seat and is not the frontier."""
+    return is_wonder(model_id) and "full" in _tokens(model_id)
 
 
 def entries_of(payload):
@@ -49,13 +60,13 @@ def entries_of(payload):
 
 
 def newest_wonder(entries):
-    """The newest Wonder id, or "" when the listing has none."""
+    """The newest Wonder full id, or "" when the listing has none."""
     rows = []
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         model_id = entry.get("modelId")
-        if not is_wonder(model_id):
+        if not is_frontier(model_id):
             continue
         when = entry.get("releaseDate")
         when = when.strip() if isinstance(when, str) else ""

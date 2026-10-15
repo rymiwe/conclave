@@ -52,8 +52,8 @@ def check(cond, name):
 def pin():
     """A Wonder fixture. The resolver no longer stores a literal id."""
     text = RESOLVE.read_text(encoding="utf-8")
-    check("muse-models.py" in text and "muse-wonder-" not in text, "resolver asks for the newest Wonder id")
-    return "muse-wonder-1.0"
+    check("muse-models.py" in text and "muse-wonder-" not in text, "resolver asks for the newest Wonder full id")
+    return "muse-wonder-full-1.0"
 
 
 def snapshot(window_used=40, weekly_used=12.5, duration=300, window_reset=1759900000, weekly_reset=1760000000):

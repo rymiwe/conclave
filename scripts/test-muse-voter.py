@@ -39,7 +39,7 @@ def check(cond, name):
 
 
 def pin():
-    return "muse-wonder-1.0"
+    return "muse-wonder-full-1.0"
 
 
 SCHEMA = "## Findings\none\n## Approach\nlean\n## Would not do\nnone\n## Uncertainties\nnone\n"
@@ -269,10 +269,15 @@ def test_newest_wonder():
         {"modelId": "muse-wonder-full-1.0", "releaseDate": "2026-10-12"},
         {"modelId": "muse-wonder-2.0-contributor", "releaseDate": "2026-12-01"},
     ]
-    check(mm.newest_wonder(catalog) == "muse-wonder-1.0", "equal dates keep catalog order and skip spark")
-    newer = [{"modelId": "muse-wonder-1.0", "releaseDate": "2026-10-12"},
-             {"modelId": "muse-wonder-2.0", "releaseDate": "2026-12-01"}]
-    check(mm.newest_wonder(newer) == "muse-wonder-2.0", "a later releaseDate wins")
+    check(mm.newest_wonder(catalog) == "muse-wonder-full-1.0", "Wonder full wins a date tie with plain Wonder and skips spark")
+    newer = [{"modelId": "muse-wonder-full-1.0", "releaseDate": "2026-10-12"},
+             {"modelId": "muse-wonder-full-2.0", "releaseDate": "2026-12-01"}]
+    check(mm.newest_wonder(newer) == "muse-wonder-full-2.0", "a later Wonder full releaseDate wins")
+    later_plain = [{"modelId": "muse-wonder-1.0", "releaseDate": "2026-12-01"},
+                   {"modelId": "muse-wonder-full-1.0", "releaseDate": "2026-10-12"}]
+    check(mm.newest_wonder(later_plain) == "muse-wonder-full-1.0", "a later plain Wonder does not beat Wonder full")
+    check(mm.newest_wonder([{"modelId": "muse-wonder-1.0", "releaseDate": "2026-10-12"}]) == "",
+          "plain Wonder alone resolves nothing")
     check(mm.newest_wonder([]) == "", "an empty listing resolves nothing")
     proc = subprocess.run(
         [sys.executable, str(MUSE_MODELS), "--catalog", os.devnull],
@@ -290,8 +295,8 @@ def test_resolver_uses_catalog(tmp):
     )
     catalog = tmp / "catalog.json"
     catalog.write_text(json.dumps({"models": [
-        {"modelId": "muse-wonder-full-1.0", "releaseDate": "2026-10-12"},
         {"modelId": "muse-wonder-1.0", "releaseDate": "2026-10-12"},
+        {"modelId": "muse-wonder-full-1.0", "releaseDate": "2026-10-12"},
         {"modelId": "muse-spark-1.3", "releaseDate": "2026-11-01"},
     ]}), encoding="utf-8")
     jq = shutil.which("jq")
@@ -316,7 +321,7 @@ def test_resolver_uses_catalog(tmp):
         if line.startswith("MUSE_WONDER_MODEL="):
             emitted = line.split("=", 1)[1]
     check(proc.returncode == 0 and emitted == "muse-wonder-full-1.0",
-          f"resolver emits the catalog's newest Wonder id ({proc.returncode} {emitted!r} {proc.stderr[-200:]})")
+          f"resolver emits Wonder full ahead of an earlier plain Wonder ({proc.returncode} {emitted!r} {proc.stderr[-200:]})")
 
 
 def main():

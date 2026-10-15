@@ -75,7 +75,8 @@ cat >"$work/home/.codex/models_cache.json" <<'EOF'
 EOF
 cat >"$work/muse-catalog.json" <<'EOF'
 {"models":[
-  {"modelId":"muse-wonder-1.0","releaseDate":"2026-10-12"}
+  {"modelId":"muse-wonder-1.0","releaseDate":"2026-10-12"},
+  {"modelId":"muse-wonder-full-1.0","releaseDate":"2026-10-12"}
 ]}
 EOF
 

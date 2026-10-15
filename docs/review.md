@@ -435,7 +435,7 @@ votes, at low. `--voters ...,muse` names that seat on review, audit, design,
 and mixed. Meta never chairs or builds, so the vendor rule does not drop it.
 One vendor, one vote.
 
-- **Launch.** `muse exec --json --provider meta`, the newest Wonder model as
+- **Launch.** `muse exec --json --provider meta`, the newest Wonder full model as
   `--model`, the routed effort as `--reasoning-effort`, and
   `--contributor-mode off`. Review and audit pass high. Design and mixed
   pass the resolved effort. Read tools only: `--disable-shell`
@@ -451,7 +451,7 @@ One vendor, one vote.
 - **Model proof.** `run.model.configured` `payload.model_id` in the
   `--json` stream, written by `scripts/muse-usage.py --proof` to
   `voter-muse.model.txt`. No configured id, or any id other than the
-  resolved Wonder model, FAILs the leg. The event records the model the run was started with;
+  resolved Wonder full model, FAILs the leg. The event records the model the run was started with;
   the stream has no per-answer model id, so this is the strongest proof
   available, not proof of which model answered.
 - **Blind.** `blind.sh` redacts `Muse`, `Meta`, and `muse-*` ids. The
@@ -803,7 +803,7 @@ Audit uses the review header, including `voter_b_reasoning_tokens` and `voter_b_
 - **Effort.** Jev picks low, medium, or high from the question and a short excerpt of the input. Pace then steps that lean once: up when that voter's pool is burning, down when it is ahead. `--effort` overrides both. When Jev has no key or fails, the leg uses the router's effort and the lineup says so. A missing pace reading keeps the lean, or high when the lean failed too. `--canned FILE` is the saved Jev response and does not call the API. The Jev key is unset before any voter starts.
 - **Chair note.** `--ask` or `--ask-file` together with `--template` adds a chair note after the template. Use it to say which lines of the input are labels and not posted text.
 - **Input.** Each `--input` file is inlined between INPUT markers, and the prompt calls it data, not instructions. Give only what a real recipient would have.
-- **Launch.** Every leg runs tool-less from one out-of-repo temp cwd, as the design packet does. Grok's answer counts only when its session's last `turn_ended` is `completed`. Muse uses the newest Wonder model, `--contributor-mode off`, and `--reasoning-effort`.
+- **Launch.** Every leg runs tool-less from one out-of-repo temp cwd, as the design packet does. Grok's answer counts only when its session's last `turn_ended` is `completed`. Muse uses the newest Wonder full model, `--contributor-mode off`, and `--reasoning-effort`. Plain Wonder is the other model on that seat and is not this voter.
 - **Output** is `tmp/council/<id>/ask-<template, or question>/`: `PROMPT.md`, `answer-<voter>.md`, `answers.md`, `blind/` from `blind.sh`, and `errors.md`. A rerun replaces that directory. The script exits 1 when a named voter gave no answer, and `answers.md` still holds the rest. `--dry-run` writes only `preview/ask-<name>/PROMPT.md` and does not record a run. A real ask appends one line to the outcome log with the effort each leg ran.
 - **No ranking.** The chair reads the answers. Ranking free text would be a new Jev contract. Add it only after ask runs show the chair needs a tiebreak.
 

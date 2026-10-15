@@ -41,8 +41,8 @@ def check(cond, name):
 
 
 def pin():
-    """A Wonder fixture. Not read from the resolver."""
-    return "muse-wonder-1.0"
+    """A Wonder full fixture. Not read from the resolver."""
+    return "muse-wonder-full-1.0"
 
 
 def repo_has_no_hardcoded_wonder_id():
@@ -230,6 +230,27 @@ echo ok
 """)
     check(proc.returncode == 0 and not spark_args.exists(),
           f"a Spark id is not launched ({proc.returncode} {proc.stderr} exists={spark_args.exists()})")
+
+    plain_args = tmp / "plain-args"
+    write_stub(bindir / "muse", f"""#!/bin/sh
+printf '%s\\n' "$@" > {plain_args}
+echo ok
+""")
+    proc = bash(source_head() + f"""
+export CONCLAVE_MUSE_SHADOW=1
+export PATH="{bindir}:$PATH"
+MUSE_WONDER_MODEL=muse-wonder-1.0
+DIR="$(mktemp -d)"
+ERRORS_FILE="$DIR/errors.md"
+: >"$ERRORS_FILE"
+PIDS=""
+launch_muse_shadow
+[ "$(cat "$DIR/muse-shadow.status")" = skipped ]
+grep -qx 'muse: Wonder model unavailable; skipping shadow leg' "$ERRORS_FILE"
+echo ok
+""")
+    check(proc.returncode == 0 and not plain_args.exists(),
+          f"plain Wonder is not launched ({proc.returncode} {proc.stderr} exists={plain_args.exists()})")
 
     contrib_args = tmp / "contrib-args"
     write_stub(bindir / "muse", f"""#!/bin/sh

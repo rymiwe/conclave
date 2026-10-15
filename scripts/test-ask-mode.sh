@@ -156,7 +156,7 @@ run() { # runs conclave.sh with the fakes; stdout+stderr to $work/out, exit code
     SEAT_USAGE_RUNS="$work/runs.jsonl" \
     SEAT_STUB_JSON="${SEAT_STUB_JSON:-$work/route-on.json}" \
     MUSE_USAGE_PATH="$work/muse-usage.json" \
-    FAKE_MUSE_MODEL="muse-wonder-1.0" \
+    FAKE_MUSE_MODEL="muse-wonder-full-1.0" \
     FAKE_LOG="$work/log" \
     TYPESAFE_API_KEY=secret-should-not-leak \
     "$@" --canned "${LEAN_CANNED:-$work/lean-low.json}" >"$work/out" 2>&1 || ec=$?
