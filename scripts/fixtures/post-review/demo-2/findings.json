@@ -1,0 +1,8 @@
+{
+  "target": "example/widgets stack",
+  "findings": [
+    {"id": "f1", "claim": "Widget#reset leaves the cache warm.", "file": "app/widget.rb", "line": 13,
+     "cited_code": "@cache = nil", "evidence": "$ ruby -e 'w = Widget.new; w.reset; p w.cached?'\ntrue",
+     "repro_executed": true, "legs": {"A": "found", "B": "found"}}
+  ]
+}

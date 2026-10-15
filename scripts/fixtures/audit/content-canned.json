@@ -1,0 +1,15 @@
+{
+  "model": "jev-canned",
+  "answers": {
+    "f1": {
+      "choice": "post",
+      "confidence": 0.91,
+      "probabilities": {"post": 0.91, "hold": 0.05, "drop": 0.04}
+    },
+    "f2": {
+      "choice": "post",
+      "confidence": 0.69,
+      "probabilities": {"post": 0.69, "hold": 0.2, "drop": 0.11}
+    }
+  }
+}

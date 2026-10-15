@@ -1,0 +1,432 @@
+<title>Three Reviewers, One Stack</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,500..800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a ballot sheet. Narrow reading column, wide figure bands, one leg color per reviewer used everywhere. */
+:root{
+  --bg:#f3f5f7; --panel:#ffffff; --fg:#14181d; --muted:#5b6672; --rule:#d9dfe5; --soft:#e9edf1;
+  --fable:#6d4bd8; --opus:#c77a12; --astra:#0f8a7e;
+  --post:#1f8a4c; --held:#8a94a0; --warn:#b4432f;
+  --display:"Archivo","Arial Narrow",system-ui,sans-serif;
+  --body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0f1317; --panel:#171c22; --fg:#e7ecf1; --muted:#97a3af; --rule:#2a323b; --soft:#1f262e;
+  --fable:#a78bfa; --opus:#f0a944; --astra:#3cc3b4; --post:#4cc27e; --held:#6f7a86; --warn:#f07a62; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0f1317; --panel:#171c22; --fg:#e7ecf1; --muted:#97a3af; --rule:#2a323b; --soft:#1f262e;
+  --fable:#a78bfa; --opus:#f0a944; --astra:#3cc3b4; --post:#4cc27e; --held:#6f7a86; --warn:#f07a62; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:15px/1.6 var(--body);margin:0}
+.wrap{max-width:1040px;margin:0 auto;padding-inline:20px;padding-block:28px 64px;display:grid;gap:56px}
+h1,h2,h3{font-family:var(--display);font-stretch:85%;line-height:1.1;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,6vw,58px);font-weight:800;letter-spacing:-.01em}
+h2{font-size:clamp(24px,3.4vw,32px);font-weight:750}
+h3{font-size:18px;font-weight:700}
+p{margin:0;max-width:66ch}
+.eyebrow{font:500 12px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.sec{display:grid;gap:18px}
+.lede{font-size:18px;color:var(--fg)}
+.muted{color:var(--muted)}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.f{color:var(--fable)} .o{color:var(--opus)} .a{color:var(--astra)}
+.chip{display:inline-flex;align-items:center;gap:6px;font:500 12px/1 var(--mono);padding:5px 8px;border-radius:4px;background:var(--soft);white-space:nowrap}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex:none}
+.bg-f{background:var(--fable)} .bg-o{background:var(--opus)} .bg-a{background:var(--astra)} .bg-p{background:var(--post)} .bg-h{background:var(--held)}
+
+/* hero */
+.hero{display:grid;gap:22px}
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--rule);border:1px solid var(--rule)}
+.stat{background:var(--panel);padding:16px 18px;display:grid;gap:4px}
+.stat b{font:800 clamp(28px,4.4vw,40px)/1 var(--display);font-stretch:80%;font-variant-numeric:tabular-nums}
+.stat span{font-size:13px;color:var(--muted)}
+.takeaways{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+.take{border-top:3px solid var(--fg);padding-top:10px;display:grid;gap:6px;min-width:0}
+.take h3{font-size:17px}
+.take p{font-size:14px;color:var(--muted)}
+
+/* flow */
+.flow{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:24px;align-items:start}
+.panel{background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:18px}
+figure{margin:0;display:grid;gap:10px}
+figcaption{font-size:13px;color:var(--muted)}
+svg{max-width:100%;height:auto;display:block}
+.node rect{fill:var(--panel);stroke:var(--rule);stroke-width:1.5;transition:stroke .2s,fill .2s}
+.node text{fill:var(--fg);font:500 12px var(--body)}
+.node .sub{fill:var(--muted);font:400 10.5px var(--mono)}
+.node.on rect{stroke:var(--fg);stroke-width:2.5}
+.edge{stroke:var(--muted);stroke-width:1.4;fill:none}
+.elabel{fill:var(--muted);font:400 10px var(--mono)}
+.steps{list-style:none;margin:0;padding:0;display:grid;gap:4px;counter-reset:s}
+.steps li{counter-increment:s;padding:8px 10px;border-radius:4px;font-size:14px;display:grid;grid-template-columns:22px 1fr;gap:8px;cursor:pointer}
+.steps li::before{content:counter(s);font:600 12px/22px var(--mono);color:var(--muted)}
+.steps li.on{background:var(--soft)}
+.steps li.on::before{color:var(--fg)}
+.steps b{font-weight:600}
+.ctrl{display:flex;gap:8px;flex-wrap:wrap}
+button{font:500 13px var(--body);color:var(--fg);background:var(--panel);border:1px solid var(--rule);border-radius:4px;padding:7px 12px;cursor:pointer}
+button:hover{border-color:var(--fg)}
+button:focus-visible,.steps li:focus-visible{outline:2px solid var(--fable);outline-offset:2px}
+.rules{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+.rule{display:grid;gap:4px;font-size:14px;min-width:0}
+.rule b{font-family:var(--display);font-stretch:85%;font-size:16px}
+.rule span{color:var(--muted)}
+
+/* funnel */
+.funnel{display:grid;gap:8px}
+.frow{display:grid;grid-template-columns:200px minmax(0,1fr) 54px;gap:12px;align-items:center}
+.frow .lab{font-size:13px}
+.frow .bar{height:22px;background:var(--fg);border-radius:2px}
+.frow .n{font:600 14px var(--mono);text-align:right;font-variant-numeric:tabular-nums}
+.frow .why{grid-column:2/4;font-size:12.5px;color:var(--muted);margin-top:-4px}
+.split{display:flex;height:22px;border-radius:2px;overflow:hidden}
+
+/* legs */
+.legs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+.leg{background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:16px;display:grid;gap:12px;min-width:0}
+.leg header{display:grid;gap:2px}
+.leg header h3{display:flex;align-items:center;gap:8px}
+.leg header span{font:400 12px var(--mono);color:var(--muted)}
+.kv{display:grid;grid-template-columns:1fr auto;gap:6px 10px;font-size:13.5px;align-items:baseline}
+.kv dt{color:var(--muted)} .kv dd{margin:0;font:600 14px var(--mono);text-align:right;font-variant-numeric:tabular-nums}
+.meter{height:6px;background:var(--soft);border-radius:3px;overflow:hidden}
+.meter i{display:block;height:100%}
+.big{font:800 44px/1 var(--display);font-stretch:80%;font-variant-numeric:tabular-nums}
+.sev{display:flex;height:10px;border-radius:2px;overflow:hidden;gap:1px}
+.sev i:nth-child(1){background:var(--warn)} .sev i:nth-child(2){background:var(--opus);opacity:.75} .sev i:nth-child(3){background:var(--held)}
+.note{font-size:13px;color:var(--muted);border-left:2px solid var(--rule);padding-left:12px;max-width:none}
+
+/* grid */
+.scroll{overflow-x:auto}
+table.grid{border-collapse:separate;border-spacing:3px;font:500 12px var(--mono);font-variant-numeric:tabular-nums}
+.grid th{font-weight:500;color:var(--muted);padding:2px 4px;text-align:center;white-space:nowrap}
+.grid th.row{text-align:left;padding-right:10px}
+.grid td{width:34px;height:30px;text-align:center;border-radius:3px;position:relative}
+.grid td.u::after{content:"";position:absolute;inset:0;border:2px solid var(--fg);border-radius:3px}
+.grid td.stackcol{border-left:2px dashed var(--rule)}
+.legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12.5px;color:var(--muted)}
+.sw{display:inline-block;width:14px;height:14px;border-radius:3px;vertical-align:-2px;margin-right:5px}
+
+/* whole vs parts */
+.wp{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.wpc{background:var(--panel);border:1px solid var(--rule);border-radius:6px;padding:14px;display:grid;gap:4px;align-content:start;min-width:0}
+.wpc b{font:800 34px/1 var(--display);font-stretch:80%}
+.wpc span{font-size:13px;color:var(--muted)}
+.matrix td.desc{width:auto;min-width:240px;text-align:left;font:400 12.5px var(--body);padding-right:12px;color:var(--fg)}
+.matrix td.out{width:auto;padding:0 8px;white-space:nowrap}
+.pill{display:inline-block;font:600 11px var(--mono);padding:3px 7px;border-radius:10px;color:#fff}
+.pill.p{background:var(--post)} .pill.h{background:var(--held)}
+.c{display:inline-block;width:14px;height:14px;border-radius:50%}
+.c.p{background:var(--post)} .c.h{background:var(--held)} .c.r{background:transparent;border:2px solid var(--held)}
+.matrix tr.grp td{padding-top:10px;font:600 11px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);text-align:left}
+.verdict{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+
+.unk{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 24px}
+.unk div{display:grid;gap:2px;font-size:14px}
+.unk b{font-weight:600}
+.unk span{color:var(--muted)}
+footer{font-size:12.5px;color:var(--muted);border-top:1px solid var(--rule);padding-top:14px}
+
+@media (max-width:760px){
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .takeaways,.legs,.rules,.flow,.verdict,.unk{grid-template-columns:1fr}
+  .wp{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .frow{grid-template-columns:120px minmax(0,1fr) 40px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<main class="wrap">
+
+<section class="hero">
+  <div class="eyebrow">Review Conclave · one 16-PR feature stack · October 2026</div>
+  <h1>Three reviewers, one stack, and what each one caught</h1>
+  <p class="lede">We ran a review Conclave over a 16-PR stack: three AI reviewers from three vendors on every PR, a gate from a fourth, then one more pass over the whole stack at once. 114 findings came out. 61 were posted. Here is who found what, and what reviewing the whole stack added on top of reviewing each PR.</p>
+  <div class="stats">
+    <div class="stat"><b class="mono">16</b><span>PRs, 12,326 changed lines</span></div>
+    <div class="stat"><b class="mono">114</b><span>distinct findings</span></div>
+    <div class="stat"><b class="mono">61</b><span>posted, in 16 reviews</span></div>
+    <div class="stat"><b class="mono">9</b><span>found by all three reviewers</span></div>
+  </div>
+  <div class="takeaways">
+    <div class="take"><h3>Our brief did most of the finding</h3><p><span class="f">Fable</span> on our written brief found 99 of 114 and was the only source of 40 of the 61 posted. A follow-up put <span class="o">Opus</span> and <span class="a">Astra</span> on the same brief: most of that lead came from the brief, not the model.</p></div>
+    <div class="take"><h3>The reviewers barely overlap</h3><p>Any two of them share about a fifth of what they find. Dropping one loses its findings, so overlap alone is no reason to cut a seat.</p></div>
+    <div class="take"><h3>The whole stack earns a small, cheap pass</h3><p>One Conclave over the whole stack, about 7% of review time, found the one bug no PR review could see and pushed a held bug past the gate. A check at the top of the stack kept 11 already-fixed findings from posting.</p></div>
+  </div>
+</section>
+
+<section class="sec" id="how">
+  <div class="eyebrow">How a Conclave works</div>
+  <h2>Three vendors look, a fourth decides what is worth saying, a person decides what goes out</h2>
+  <div class="flow">
+    <figure class="panel">
+      <svg viewBox="0 0 620 360" role="img" aria-label="A brief goes to three reviewers in parallel, each in its own copy of the code. Their reports are blinded, merged by the chair into one findings list, gated by Jev, and a person decides what posts.">
+        <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>
+        <g style="color:var(--muted)">
+          <path class="edge" d="M118,60 L188,60" marker-end="url(#ar)"/>
+          <path class="edge" d="M60,84 L60,180 L188,180" marker-end="url(#ar)"/>
+          <path class="edge" d="M60,180 L60,300 L188,300" marker-end="url(#ar)"/>
+          <text class="elabel" x="126" y="52">brief</text>
+          <text class="elabel" x="66" y="172">diff only</text>
+          <text class="elabel" x="66" y="292">diff only</text>
+          <path class="edge" d="M330,60 L380,60 L380,165" marker-end="url(#ar)"/>
+          <path class="edge" d="M330,180 L370,180" marker-end="url(#ar)"/>
+          <path class="edge" d="M330,300 L380,300 L380,195" marker-end="url(#ar)"/>
+          <path class="edge" d="M448,180 L470,180" marker-end="url(#ar)"/>
+          <path class="edge" d="M534,205 L534,236" marker-end="url(#ar)"/>
+          <path class="edge" d="M534,288 L534,312" marker-end="url(#ar)"/>
+          <text class="elabel" x="540" y="226">findings</text>
+          <text class="elabel" x="540" y="304">post / hold</text>
+        </g>
+        <g class="node" data-s="1"><rect x="8" y="36" width="110" height="48" rx="5"/><text x="63" y="57" text-anchor="middle">Chair writes</text><text x="63" y="73" text-anchor="middle">the brief</text></g>
+        <g class="node" data-s="2"><rect x="190" y="34" width="140" height="52" rx="5" style="stroke:var(--fable)"/><text x="260" y="56" text-anchor="middle" style="fill:var(--fable)">Fable 5.1</text><text class="sub" x="260" y="73" text-anchor="middle">Anthropic · our brief</text></g>
+        <g class="node" data-s="2"><rect x="190" y="154" width="140" height="52" rx="5" style="stroke:var(--opus)"/><text x="260" y="176" text-anchor="middle" style="fill:var(--opus)">Opus 5.5</text><text class="sub" x="260" y="193" text-anchor="middle">Anthropic · built-in review</text></g>
+        <g class="node" data-s="2"><rect x="190" y="274" width="140" height="52" rx="5" style="stroke:var(--astra)"/><text x="260" y="296" text-anchor="middle" style="fill:var(--astra)">GPT-6 Astra</text><text class="sub" x="260" y="313" text-anchor="middle">OpenAI · built-in review</text></g>
+        <g class="node" data-s="3"><rect x="372" y="156" width="76" height="48" rx="5"/><text x="410" y="177" text-anchor="middle">Blind</text><text class="sub" x="410" y="193" text-anchor="middle">A · B · C</text></g>
+        <g class="node" data-s="4"><rect x="472" y="156" width="124" height="48" rx="5"/><text x="534" y="177" text-anchor="middle">Chair merges</text><text class="sub" x="534" y="193" text-anchor="middle">Grok 4.7 · no vote</text></g>
+        <g class="node" data-s="5"><rect x="472" y="238" width="124" height="48" rx="5"/><text x="534" y="259" text-anchor="middle">Jev gates</text><text class="sub" x="534" y="275" text-anchor="middle">Jev 1.13 · TypeSafe</text></g>
+        <g class="node" data-s="6"><rect x="472" y="314" width="124" height="40" rx="5"/><text x="534" y="338" text-anchor="middle">A person decides</text></g>
+        <text class="sub" x="190" y="20" style="fill:var(--muted);font:400 10.5px var(--mono)">each reviewer in its own copy of the code, all at high effort</text>
+      </svg>
+      <figcaption>Each reviewer works alone. Only Fable reads the brief; the built-in reviews get the diff and their own method.</figcaption>
+    </figure>
+    <div class="panel" style="display:grid;gap:12px">
+      <ol class="steps" id="steps">
+        <li data-s="1" tabindex="0"><span><b>Brief.</b> The chair writes what to look for: the ticket, the risks, the rubric.</span></li>
+        <li data-s="2" tabindex="0"><span><b>Three reviewers, in parallel.</b> Each gets its own copy of the code and cannot see the others.</span></li>
+        <li data-s="3" tabindex="0"><span><b>Blind.</b> Reports are shuffled into A, B, C with model names removed.</span></li>
+        <li data-s="4" tabindex="0"><span><b>Merge.</b> The chair turns three reports into one findings list. It does not vote and gives no lean.</span></li>
+        <li data-s="5" tabindex="0"><span><b>Gate.</b> Jev, a classifier from a fourth company, marks each finding post, hold or second look.</span></li>
+        <li data-s="6" tabindex="0"><span><b>Decide.</b> A person reads the gated list and decides what is posted, and how.</span></li>
+      </ol>
+      <div class="ctrl"><button id="prev" type="button">Back</button><button id="next" type="button">Step through</button><button id="all" type="button">Show all</button></div>
+    </div>
+  </div>
+  <div class="rules">
+    <div class="rule"><b>Separate the roles by vendor</b><span>The vendor that built the code or chairs the review does not vote on it. That keeps anyone from grading their own work.</span></div>
+    <div class="rule"><b>Blinding is not enough</b><span>On 39 past blinded reports, report format alone named the vendor 35 times. Separation does the work blinding can't.</span></div>
+    <div class="rule"><b>For a stack, two extra steps</b><span>After the 16 per-PR Conclaves: a check of every finding against the top of the stack, then one Conclave on the whole stack as a single diff.</span></div>
+  </div>
+</section>
+
+<section class="sec" id="funnel">
+  <div class="eyebrow">From 114 findings to 16 reviews</div>
+  <h2>Most findings were posted, but in far fewer pieces</h2>
+  <div class="panel funnel" id="funnelbox"></div>
+  <p class="note">Every finding that passed the gate came with a test that reproduces it, and 57 of the 58 kept were distinct defects. So the cut changed how they were delivered, not how many: one review per PR, high and medium severity as line comments, low severity as a checklist in the summary.</p>
+</section>
+
+<section class="sec" id="legs">
+  <div class="eyebrow">The three reviewers</div>
+  <h2>On the big run: Fable finds the most, Astra is the most precise</h2>
+  <div class="legs" id="legcards"></div>
+  <p class="note">Minutes per posted finding comes out about equal: Fable spends more time and finds proportionally more. Severity mix is also similar, about half high. Fable on PRs 11 to 16 ran through Cursor at extra-high effort after the weekly allowance on Max ran low; it found about one more per PR there but posted no more, and those PRs were also larger.</p>
+  <div class="panel" style="display:grid;gap:14px">
+    <h3>What each pair shares</h3>
+    <figure>
+      <svg viewBox="0 0 620 120" role="img" aria-label="Pairwise overlap, shared findings over the union: Fable and Opus 18 percent, Fable and Astra 20 percent, Opus and Astra 19 percent. All three found 9 of 114.">
+        <g font-family="var(--mono)" font-size="12">
+          <text x="0" y="24" fill="currentColor" style="fill:var(--fg)">Fable · Opus</text>
+          <rect x="150" y="12" width="400" height="16" rx="2" style="fill:var(--soft)"/><rect x="150" y="12" width="72" height="16" rx="2" style="fill:var(--fg)"/>
+          <text x="560" y="24" style="fill:var(--fg)">18%</text>
+          <text x="0" y="60" style="fill:var(--fg)">Fable · Astra</text>
+          <rect x="150" y="48" width="400" height="16" rx="2" style="fill:var(--soft)"/><rect x="150" y="48" width="80" height="16" rx="2" style="fill:var(--fg)"/>
+          <text x="560" y="60" style="fill:var(--fg)">20%</text>
+          <text x="0" y="96" style="fill:var(--fg)">Opus · Astra</text>
+          <rect x="150" y="84" width="400" height="16" rx="2" style="fill:var(--soft)"/><rect x="150" y="84" width="76" height="16" rx="2" style="fill:var(--fg)"/>
+          <text x="560" y="96" style="fill:var(--fg)">19%</text>
+        </g>
+      </svg>
+      <figcaption>Shared findings as a share of everything either one found. All three agreed on 9 of 114.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="sec" id="grid">
+  <div class="eyebrow">Every ballot</div>
+  <h2>Findings per reviewer, PR by PR</h2>
+  <div class="panel" style="display:grid;gap:12px">
+    <div class="scroll"><table class="grid" id="ballots"></table></div>
+    <div class="legend"><span><i class="sw" style="background:var(--fable);opacity:.85"></i>shade = findings by that reviewer</span><span><i class="sw" style="border:2px solid var(--fg)"></i>outlined = posted something only it found</span><span>Max / Cursor = which route Fable ran on</span></div>
+  </div>
+  <p class="note">Every reviewer finds about half as much per 100 changed lines on large PRs as on small ones (under 700 lines). Fable's lead stays about 3.5 times either way.</p>
+</section>
+
+<section class="sec" id="whole">
+  <div class="eyebrow">The whole versus the sum of its parts</div>
+  <h2>The stack pass found less, but found what the parts could not</h2>
+  <p>The per-PR Conclaves produced 102 findings. One more Conclave over the whole stack, all 11,990 lines as one diff, produced 12. That pass was never going to replace the parts. The question is what it added that they could not.</p>
+  <div class="wp">
+    <div class="wpc"><b>1</b><span>bug posted that no PR review saw: a step that credits passed exams is never called by any later PR</span></div>
+    <div class="wpc"><b>1</b><span>bug the stack view pushed past the gate after the PR-level review held it</span></div>
+    <div class="wpc"><b>4</b><span>more cross-PR findings seen only in the whole, held for a person to check</span></div>
+    <div class="wpc"><b>11</b><span>findings the top-of-stack check showed a later PR had already fixed, never posted</span></div>
+  </div>
+  <div class="panel" style="display:grid;gap:12px">
+    <h3>Each of the stack pass's 12 findings, and where the PR reviews saw it</h3>
+    <div class="scroll"><table class="grid matrix" id="matrix"></table></div>
+    <div class="legend"><span><i class="c p" style="vertical-align:-2px;margin-right:5px"></i>a PR review found it and Jev passed it</span><span><i class="c h" style="vertical-align:-2px;margin-right:5px"></i>found, Jev held it</span><span><i class="c r" style="vertical-align:-2px;margin-right:5px"></i>found, held as unproven</span><span>no dot = no PR review found it</span></div>
+  </div>
+  <div class="verdict">
+    <div class="panel" style="display:grid;gap:8px"><h3>What the whole added</h3>
+      <p class="muted" style="font-size:14px">Connections: bugs that only exist when two PRs meet, like a value one PR stores and a later PR never reads. Confidence: one bug the PR-level gate held cleared it once the reviewers could see the code on both sides. Clean-up: the check at the top of the stack removed 11 findings that a later PR had fixed and showed that 7 PR-level findings were the same bug, posted once on the PR that introduced it.</p></div>
+    <div class="panel" style="display:grid;gap:8px"><h3>What it cost</h3>
+      <p class="muted" style="font-size:14px">The stack ballot took 0.38 of the run's 5.66 reviewer-hours, about 7%, and 12 minutes of wall time with the three reviewers in parallel. It produced 2 of the 61 posted findings that the parts would not have posted on their own, plus 4 cross-PR leads still waiting on a person. For one extra Conclave, that is a good trade. It is no substitute for the PR-level Conclaves, which found 102.</p></div>
+  </div>
+</section>
+
+<section class="sec" id="method">
+  <div class="eyebrow">Follow-up test · 4 PRs</div>
+  <h2>Most of the gap was the brief, not the model</h2>
+  <p>Fable always ran on our written brief; Opus and Astra ran their built-in reviews. So we re-ran four PRs with Opus and Astra on the same brief, next to all three original reviewers, gated together by Jev.</p>
+  <div class="panel" style="display:grid;gap:12px">
+    <div class="scroll"><table class="grid" style="border-spacing:0 6px;font-size:13px">
+      <tr><th class="row">reviewer · method</th><th style="text-align:left;min-width:260px">findings Jev passed</th><th>precision</th><th>only this one</th><th>wall min</th></tr>
+      <tr><th class="row"><i class="dot bg-f"></i> Fable · brief</th><td style="width:auto;text-align:left"><div class="meter" style="height:14px"><i style="width:100%;background:var(--fable)"></i></div></td><td>84%</td><td>5</td><td>42</td></tr><tr><th class="row"><i class="dot bg-o"></i> Opus · brief</th><td style="width:auto;text-align:left"><div class="meter" style="height:14px"><i style="width:66.7%;background:var(--opus)"></i></div></td><td>78%</td><td>0</td><td>24</td></tr><tr><th class="row"><i class="dot bg-o"></i> Opus · built-in</th><td style="width:auto;text-align:left"><div class="meter" style="height:14px"><i style="width:33.3%;background:var(--opus);opacity:.55"></i></div></td><td>100%</td><td>2</td><td>9</td></tr><tr><th class="row"><i class="dot bg-a"></i> Astra · brief</th><td style="width:auto;text-align:left"><div class="meter" style="height:14px"><i style="width:47.6%;background:var(--astra)"></i></div></td><td>91%</td><td>1</td><td>17</td></tr><tr><th class="row"><i class="dot bg-a"></i> Astra · built-in</th><td style="width:auto;text-align:left"><div class="meter" style="height:14px"><i style="width:28.6%;background:var(--astra);opacity:.55"></i></div></td><td>86%</td><td>1</td><td>17</td></tr>
+    </table></div>
+    <div class="legend"><span>Bar length = findings Jev passed: Fable 21, Opus brief 14, Opus built-in 7, Astra brief 10, Astra built-in 6</span></div>
+  </div>
+  <div class="takeaways">
+    <div class="take"><h3>The brief doubles a model's output</h3><p>On our brief, Opus found twice what its built-in review found, and Astra two-thirds more. Brief and built-in share only about a fifth of findings for the same model.</p></div>
+    <div class="take"><h3>Fable still leads, by less</h3><p>On the same brief, Fable passed 21 to Opus's 14. On the big run the gap was about 3 to 1; here it is 1.4 to 1. Fable and Opus on the brief overlap 65%, and Opus found nothing Fable missed.</p></div>
+    <div class="take"><h3>Built-in reviews still add a little</h3><p>Opus built-in found 2 and Astra built-in 1 that no reviewer on the brief caught. Opus built-in takes about 9 minutes.</p></div>
+  </div>
+  <p class="note">Four PRs only. Astra's built-in numbers on the big run understate it: its shell could not run Ruby on 16 of 17 ballots, so it reviewed without running tests. That is fixed now; the next reviews will show its real numbers.</p>
+</section>
+
+<section class="sec" id="unknown">
+  <div class="eyebrow">What this run cannot tell us yet</div>
+  <h2>Three open questions</h2>
+  <div class="unk">
+    
+    <div><b>Were the posted comments right?</b><span>The real precision is what the author fixes, disputes or ignores. That gets checked on October 12.</span></div>
+    <div><b>Does effort matter?</b><span>Six PRs ran Fable at extra-high instead of high, and they were also the larger PRs. The two can't be separated here.</span></div>
+    <div><b>Does it generalize?</b><span>One author, one stack, one domain, and a four-PR follow-up. The two earlier, smaller reviews had Opus finding the most.</span></div>
+  </div>
+</section>
+
+<footer><span style="display:block;margin-bottom:6px"><b>Models:</b> Fable 5.1 (<span class="mono">claude-fable-5-1</span> at high on Max; <span class="mono">claude-fable-5-1-thinking-xhigh</span> on Cursor for PRs 11 to 16) · Opus 5.5 (<span class="mono">claude-opus-5-5</span>) · GPT-6 Astra (<span class="mono">gpt-6-astra</span>) · chair Grok 4.7 (<span class="mono">grok-4.7-high-fast</span>) · gate Jev 1.13 (<span class="mono">jev-1.13.0</span>, TypeSafe).</span>Data from the Conclave's own ballot files: 16 per-PR ballots and 1 whole-stack ballot, counts per reviewer, Jev's gate, and the human cut. "Posted" means it went out in a review. Reviewer names are model families; every reviewer ran at high effort except Fable on PRs 11 to 16 (extra-high). The cost of the top-of-stack check was not recorded.</footer>
+</main>
+
+<script>
+const R=[
+[595,'Max',[5,5,4,3,515],[2,2,1,1,144],[2,2,2,1,313]],
+[306,'Max',[3,3,3,3,647],[0,0,0,0,217],[0,0,0,0,269]],
+[514,'Max',[6,5,4,3,660],[2,2,2,1,121],[2,2,1,0,268]],
+[546,'Max',[2,2,2,2,739],[1,0,0,0,271],[0,0,0,0,404]],
+[626,'Max',[7,7,7,5,726],[1,1,1,0,130],[1,1,1,0,254]],
+[1124,'Max',[8,3,0,0,704],[3,2,0,0,165],[3,1,0,0,411]],
+[345,'Max',[5,5,1,0,659],[2,2,1,0,142],[1,1,0,0,289]],
+[1127,'Max',[5,5,5,3,519],[2,1,1,0,154],[2,2,2,0,268]],
+[591,'Max',[7,3,4,3,608],[3,0,1,0,140],[2,2,2,2,256]],
+[798,'Max',[5,0,1,0,337],[1,0,0,0,159],[1,0,1,0,213]],
+[1229,'Cursor',[4,3,2,2,869],[2,1,0,0,113],[1,1,0,0,164]],
+[1984,'Cursor',[5,3,3,2,1444],[0,0,0,0,146],[1,1,1,0,184]],
+[1021,'Cursor',[6,2,2,1,850],[3,1,1,0,115],[2,1,1,0,178]],
+[231,'Cursor',[5,4,4,3,778],[1,1,1,0,40],[1,1,1,0,98]],
+[561,'Cursor',[9,7,2,0,1226],[2,2,2,0,170],[4,3,2,0,277]],
+[728,'Cursor',[8,5,6,5,1198],[2,0,0,0,248],[1,1,1,0,203]],
+[11990,'Max',[9,6,6,5,705],[4,0,0,0,477],[1,1,1,0,196]]
+];
+const LEGS=[{k:'f',n:'Fable',ver:'Fable 5.1 · claude-fable-5-1',v:'Anthropic',m:'our written brief',c:'--fable',sev:[27,21,8]},{k:'o',n:'Opus',ver:'Opus 5.5 · claude-opus-5-5',v:'Anthropic',m:'built-in /code-review',c:'--opus',sev:[6,3,2]},{k:'a',n:'Astra',ver:'GPT-6 Astra · gpt-6-astra',v:'OpenAI',m:'built-in codex review',c:'--astra',sev:[8,6,2]}];
+const tot=i=>[0,1,2,3,4].map(j=>R.reduce((s,r)=>s+r[2+i][j],0));
+
+// funnel
+(function(){
+  const rows=[
+    ['Found by any reviewer',114,'across 16 PR Conclaves and the whole-stack Conclave'],
+    ['Still present at the top of the stack',103,'11 were already fixed by a later PR'],
+    ['Marked worth posting',76,'Jev passed 61; the top-of-stack check raised 15 that Jev held'],
+    ['Kept after the cut',58,'Jev passes, plus 4 raised ones with a test that reproduces them, minus 7 duplicates'],
+    ['Posted',61,'58 findings plus 3 minor notes, in 16 reviews']];
+  const box=document.getElementById('funnelbox');
+  rows.forEach(([l,n,w],i)=>{
+    const d=document.createElement('div');d.className='frow';
+    d.innerHTML=`<span class="lab">${l}</span><div class="bar" style="width:${n/114*100}%;opacity:${1-i*.12}"></div><span class="n">${n}</span><span class="why">${w}</span>`;
+    box.appendChild(d);
+  });
+  const d=document.createElement('div');d.className='frow';
+  d.innerHTML=`<span class="lab">Delivered as</span><div class="split" style="width:${61/114*100}%"><i style="flex:46;background:var(--fg)"></i><i style="flex:4;background:var(--muted)"></i><i style="flex:11;background:var(--held)"></i></div><span class="n">16</span><span class="why">46 line comments · 4 in a review body (lines the PR didn't change) · 11 summary checklist items · 16 reviews</span>`;
+  box.appendChild(d);
+})();
+
+// leg cards
+(function(){
+  const box=document.getElementById('legcards');
+  LEGS.forEach((L,i)=>{
+    const t=tot(i), jevp=Math.round(t[1]/t[0]*100), mins=(t[4]/60/t[2]).toFixed(1);
+    const s=L.sev, ss=s[0]+s[1]+s[2];
+    const el=document.createElement('article');el.className='leg';
+    el.innerHTML=`<header><h3><i class="dot" style="background:var(${L.c})"></i>${L.n}</h3><span>${L.ver}</span><span>${L.v} · ${L.m} · high</span></header>
+      <div style="display:grid;gap:2px"><span class="big" style="color:var(${L.c})">${t[3]}</span><span class="muted" style="font-size:13px">posted findings no other reviewer found</span></div>
+      <dl class="kv"><dt>Found</dt><dd>${t[0]}</dd><dt>Passed Jev</dt><dd>${jevp}%</dd></dl>
+      <div class="meter"><i style="width:${jevp}%;background:var(${L.c})"></i></div>
+      <dl class="kv"><dt>Posted</dt><dd>${t[2]}</dd><dt>Reviewer time</dt><dd>${(t[4]/3600).toFixed(1)} h</dd><dt>Minutes per posted</dt><dd>${mins}</dd></dl>
+      <div style="display:grid;gap:4px"><div class="sev" aria-label="Posted severity: ${s[0]} high, ${s[1]} medium, ${s[2]} low"><i style="flex:${s[0]}"></i><i style="flex:${s[1]}"></i><i style="flex:${s[2]}"></i></div><span class="mono muted" style="font-size:11.5px">${s[0]} high · ${s[1]} medium · ${s[2]} low</span></div>`;
+    box.appendChild(el);
+  });
+})();
+
+// ballot grid
+(function(){
+  const t=document.getElementById('ballots');
+  let h='<tr><th class="row"></th>'+R.map((r,i)=>`<th${i==16?' class="stackcol"':''}>${i<16?i+1:'all'}</th>`).join('')+'</tr>';
+  h+='<tr><th class="row">route</th>'+R.map((r,i)=>`<th${i==16?' class="stackcol"':''} style="font-size:10px">${r[1]=='Max'?'Max':'Cur'}</th>`).join('')+'</tr>';
+  h+='<tr><th class="row">lines</th>'+R.map((r,i)=>`<th${i==16?' class="stackcol"':''} style="font-size:10px">${r[0]>=1000?(r[0]/1000).toFixed(1)+'k':r[0]}</th>`).join('')+'</tr>';
+  LEGS.forEach((L,li)=>{
+    h+=`<tr><th class="row"><i class="dot" style="background:var(${L.c});margin-right:6px"></i>${L.n}</th>`;
+    R.forEach((r,i)=>{const v=r[2+li];const a=Math.min(v[0]/9,1);
+      h+=`<td class="${v[3]>0?'u':''}${i==16?' stackcol':''}" style="background:color-mix(in srgb, var(${L.c}) ${Math.round(a*85)}%, var(--soft));color:${a>.5?'#fff':'var(--fg)'}" title="${L.n}: found ${v[0]}, posted ${v[2]}, posted alone ${v[3]}">${v[0]}</td>`;});
+    h+='</tr>';
+  });
+  t.innerHTML=h;
+})();
+
+// whole-vs-parts matrix
+(function(){
+  const F=[
+   ['grp','Posted from the stack pass'],
+   ['A requalification after a failed periodic shows the wrong expiration, or none','High','p',{7:'p',15:'p'},'f'],
+   ['Passed exams never carry over to a requalification; nothing calls the credit step','Medium','p',{},'f'],
+   ['A completion dated after a copied training deadline cannot be saved','Medium','p',{15:'p',16:'r'},'fa'],
+   ['Saving an incomplete result closes the evaluation, so a second sortie cannot be added','Medium','p',{16:'h'},'f'],
+   ['Exams the board shows as open are refused at save past a fixed six-month span','Medium','p',{15:'p',16:'h'},'f'],
+   ['Sample histories cannot be corrected, and one sample cannot be issued','Low','p',{9:'p'},'f'],
+   ['grp','Held for a person'],
+   ['A correction can switch a periodic result to an optional check and drop the expiration','High','h',{16:'h'},'o'],
+   ['Clearing a mistaken authority note on a correction leaves the old note in place','High','h',{},'o'],
+   ['Assigning an evaluation from a profile opened outside the unit board can fail','Medium','h',{13:'r'},'o'],
+   ['Evaluations created in the app never show a scheduled ride','Medium','h',{},'f'],
+   ['Helpers and stored columns that later screens never read','Low','h',{},'fo'],
+   ['No tests for the combined flow across the stack','Low','h',{},'f']];
+  const t=document.getElementById('matrix');
+  let h='<tr><th class="row">finding (stack pass)</th><th>sev</th>'+Array.from({length:16},(_,i)=>`<th>${i+1}</th>`).join('')+'<th>stack</th></tr>';
+  F.forEach(r=>{
+    if(r[0]=='grp'){h+=`<tr class="grp"><td colspan="19">${r[1]}</td></tr>`;return;}
+    const [d,s,out,cp,legs]=r;
+    const ld=[...legs].map(k=>`<i class="dot bg-${k}" title="${{f:'Fable',o:'Opus',a:'Astra'}[k]}"></i>`).join(' ');
+    h+=`<tr><td class="desc">${d}</td><td class="mono" style="font-size:11px;color:${s=='High'?'var(--warn)':'var(--muted)'}">${s[0]}</td>`;
+    for(let i=1;i<=16;i++){h+=`<td>${cp[i]?`<i class="c ${cp[i]}"></i>`:''}</td>`;}
+    h+=`<td class="out"><span class="pill ${out}">${out=='p'?'posted':'held'}</span> ${ld}</td></tr>`;
+  });
+  t.innerHTML=h;
+})();
+
+// stepper
+(function(){
+  const steps=[...document.querySelectorAll('#steps li')], nodes=[...document.querySelectorAll('.node')];
+  let cur=0;
+  function show(s){cur=s;
+    steps.forEach(li=>li.classList.toggle('on',s&&+li.dataset.s===s));
+    nodes.forEach(n=>{const on=!s||+n.dataset.s===s;n.classList.toggle('on',!!s&&+n.dataset.s===s);n.style.opacity=on?1:.35;});
+  }
+  document.getElementById('next').onclick=()=>show(cur>=6?1:cur+1);
+  document.getElementById('prev').onclick=()=>show(cur<=1?6:cur-1);
+  document.getElementById('all').onclick=()=>show(0);
+  steps.forEach(li=>{li.onclick=()=>show(+li.dataset.s);li.onkeydown=e=>{if(e.key=='Enter'||e.key==' '){e.preventDefault();show(+li.dataset.s)}}});
+  show(0);
+})();
+</script>

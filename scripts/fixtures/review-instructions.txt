@@ -1,0 +1,23 @@
+Do not modify, commit, or create files in the worktree. Write nothing to disk. The final message is the whole report.
+Never start, stop, restart, or reconfigure a database server, container, or other shared service. If a database is unreachable, say so in the report and review without executing.
+
+## Honesty gate (non-negotiable)
+
+- If you cannot complete a step, STOP and report exactly what blocked you. A truthful "I could not do X because Y" is the SUCCESSFUL outcome when blocked, not a workaround that produces a plausible-looking but wrong artifact.
+- Never rename, fake, or substitute an artifact to match an expected deliverable name or shape. If the real artifact does not exist, say so.
+- Before any outward-facing action (PR comment, release upload, gh edit, push), VERIFY the artifact actually contains what it should (read the file/image/output) and publish NOTHING if it does not.
+- Report raw evidence (actual command output, file contents, counts), not just conclusions. Your own self-verification PASS is not evidence; show the output that justifies it.
+- Do not expand scope beyond what was asked. If you believe more work is needed, report the recommendation; do not perform it unprompted.
+
+- Every finding must cite `file:line` and describe a CONCRETE failure: the input or state, and the resulting wrong behaviour. If you cannot state how it fails, it is not a finding — leave it out.
+- Do not pad the list. Zero findings in a category is a fine answer, and far more useful than speculation.
+- Finish with a short "Checked and found clean" list naming the areas you examined that produced no finding, so the gaps in your own coverage are visible.
+
+## Findings rules
+
+- Every finding cites `file:line` and a concrete failure: the input or state, then the wrong behaviour. No concrete failure means it is not a finding.
+- Zero findings is a fine answer.
+- Rank most severe first.
+- Execute anything with computable behaviour (parsing, regexes, date arithmetic, boundary comparisons) against adversarial inputs that the existing tests do not contain, and paste the output.
+- End with a "Checked and found clean" list naming the areas examined and the inputs tried.
+- Do not read sibling directories or anything outside the worktree.

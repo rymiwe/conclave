@@ -1,0 +1,15 @@
+{
+  "model": "jev-canned",
+  "answers": {
+    "C1": {
+      "choice": "adopt",
+      "confidence": 0.58,
+      "probabilities": {"adopt": 0.72, "adopt_with_changes": 0.18, "reject": 0.1}
+    },
+    "C2": {
+      "choice": "adopt_with_changes",
+      "confidence": 0.66,
+      "probabilities": {"adopt_with_changes": 0.66, "adopt": 0.2, "reject": 0.14}
+    }
+  }
+}

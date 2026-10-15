@@ -1,0 +1,17 @@
+{
+  "ballot": "demo-1",
+  "commit_id": "1111111111111111111111111111111111111111",
+  "event": "COMMENT",
+  "body": "Four notes on the widget change. The earlier fix is [#6](https://github.com/example/widgets/pull/6).",
+  "body_findings": ["f4"],
+  "comments": [
+    {"finding": "f1", "path": "app/widget.rb", "line": 3, "expect": "items.count",
+     "body": "**Requested:** `size` counts deleted items."},
+    {"finding": "f2", "path": "app/widget.rb", "line": 40,
+     "body": "**Question:** should the label follow the locale?"},
+    {"finding": "f3", "path": "lib/other.rb", "line": 1,
+     "body": "**Advisory:** `call` has no nil guard."},
+    {"finding": "demo-2:f1", "path": "app/widget.rb", "line": 13, "severity": "Medium",
+     "body": "**Requested:** `reset` leaves the cache warm."}
+  ]
+}

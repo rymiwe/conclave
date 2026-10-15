@@ -1,0 +1,31 @@
+{
+  "target": "scripts/fixtures/audit/page.html",
+  "findings": [
+    {
+      "id": "f1",
+      "claim": "The page says the price is $12 today.",
+      "file": "page.html",
+      "line": 4,
+      "cited_code": "The price is $12 today.",
+      "evidence": "no run was made",
+      "repro_executed": false,
+      "verdict": "false-claim",
+      "url": "file:scripts/fixtures/audit/page.html",
+      "quote": "The price is $12 today.",
+      "legs": {"A": "found", "B": "found"}
+    },
+    {
+      "id": "f2",
+      "claim": "A step says hello world and cannot be completed.",
+      "file": "page.html",
+      "line": 6,
+      "cited_code": "hello world",
+      "evidence": "no run was made",
+      "repro_executed": false,
+      "verdict": "broken-step",
+      "url": "file:scripts/fixtures/audit/page.html",
+      "quote": "hello world",
+      "legs": {"A": "found", "B": "missed"}
+    }
+  ]
+}

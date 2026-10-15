@@ -1,0 +1,5 @@
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"ignored-delta"}
+
+event: response.subscription_usage
+data: {"subscription":{"tier":"everyday","label":"usage-capture-sentinel","weekly":{"used_percent":12.5,"resets_at":1760000000},"window":{"used_percent":40,"window_duration_mins":300,"resets_at":1759900000}}}

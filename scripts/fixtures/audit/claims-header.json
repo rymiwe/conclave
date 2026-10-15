@@ -1,0 +1,14 @@
+{
+  "kind": "audit",
+  "branch": "none",
+  "pr": "none",
+  "voter_a_model": "unproven",
+  "voter_b_model": "unproven",
+  "builder_model": "unknown",
+  "target": "scripts/fixtures/audit/page.html",
+  "target_type": "claims",
+  "snapshot_sha256": "fixture",
+  "target_drift": "n/a",
+  "redaction_kept": "none",
+  "gate": "findings"
+}

@@ -1,0 +1,19 @@
+{
+  "target": "example/widgets#7",
+  "findings": [
+    {"id": "f1", "claim": "Widget#size counts deleted items.", "file": "app/widget.rb", "line": 3,
+     "cited_code": "items.count", "severity": "High",
+     "evidence": "$ ruby -Ilib -e 'w = Widget.new; w.items << Item.new(deleted: true); p w.size'\n1",
+     "repro_executed": true, "legs": {"A": "found", "B": "missed"}},
+    {"id": "f2", "claim": "Widget#label ignores the locale.", "file": "app/widget.rb", "line": 40,
+     "cited_code": "\"Widget\"",
+     "evidence": "$ bin/check-label\n```\nlabel=Widget locale=fr\n```",
+     "repro_executed": true, "legs": {"A": "found", "B": "found"}},
+    {"id": "f3", "claim": "Other.call has no nil guard.", "file": "lib/other.rb", "line": 1,
+     "cited_code": "def call(x)", "evidence": "no run was made",
+     "repro_executed": false, "legs": {"A": "missed", "B": "found"}},
+    {"id": "f4", "claim": "The changelog skips this change.", "file": "CHANGELOG.md", "line": 1,
+     "cited_code": "", "evidence": "$ grep -c size CHANGELOG.md\n0",
+     "repro_executed": true, "legs": {"A": "found", "B": "missed"}}
+  ]
+}

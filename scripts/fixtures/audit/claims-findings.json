@@ -1,0 +1,31 @@
+{
+  "target": "scripts/fixtures/audit/page.html",
+  "findings": [
+    {
+      "id": "f3",
+      "claim": "The page says A & B shipped.",
+      "file": "page.html",
+      "line": 5,
+      "cited_code": "A & B shipped.",
+      "evidence": "no run was made",
+      "repro_executed": false,
+      "verdict": "Inaccurate",
+      "url": "file:scripts/fixtures/audit/page.html",
+      "quote": "A & B shipped.",
+      "legs": {"A": "found", "B": "cleared"}
+    },
+    {
+      "id": "f4",
+      "claim": "The page's hello is misleading.",
+      "file": "page.html",
+      "line": 6,
+      "cited_code": "She said hello and left.",
+      "evidence": "no run was made",
+      "repro_executed": true,
+      "verdict": "Misleading",
+      "url": "file:scripts/fixtures/audit/page.html",
+      "quote": "She said \"hello\" and left.",
+      "legs": {"A": "found", "B": "found"}
+    }
+  ]
+}

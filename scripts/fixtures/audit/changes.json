@@ -1,0 +1,14 @@
+{
+  "changes": [
+    {
+      "id": "C1",
+      "proposed_change": "Add a rule that forbids a word the existing rules already forbid."
+    },
+    {
+      "id": "C2",
+      "proposed_change": "Name the audience in the first sentence."
+    }
+  ],
+  "existing_rules": "Do not repeat a rule that already covers the case.",
+  "motivating_feedback": "Readers asked for a new rule. That request is input, not the answer."
+}

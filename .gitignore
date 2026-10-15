@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Conclave scratch (keep README + examples)
+tmp/council/**
+!tmp/council/README.md
+!tmp/council/examples/
+!tmp/council/examples/**
+
+# Session handoffs live in the private dotfiles repo, never here
+.claude/handoffs/

@@ -1,0 +1,9 @@
+[
+  {
+    "filename": "app/widget.rb",
+    "patch": "@@ -1,2 +1,5 @@\n class Widget\n+  def size\n+    items.count\n+  end\n end\n@@ -10,2 +12,3 @@\n   def reset\n+    @cache = nil\n   end"
+  },
+  {
+    "filename": "assets/logo.png"
+  }
+]
