@@ -1243,62 +1243,8 @@ excluded_line() {
 lineup_parse_voters() {
   # $1 is seat-usage --route lineup --json. A stub may print the object.
   # Prints "ok" and a comma list, "ask", or "bad".
-  python3 - "$1" <<'PY'
-import json, sys
-raw = sys.argv[1]
-try:
-    doc = json.loads(raw)
-except json.JSONDecodeError:
-    print("bad")
-    raise SystemExit(0)
-if isinstance(doc, list):
-    doc = doc[0] if doc else {}
-if not isinstance(doc, dict):
-    print("bad")
-    raise SystemExit(0)
-if doc.get("mode") == "ask" or not isinstance(doc.get("lineup"), dict):
-    print("ask" if doc.get("mode") == "ask" else "bad")
-    raise SystemExit(0)
-down = doc.get("downgrade")
-names = {"fable": "claude", "astra": "codex", "grok": "grok", "muse": "muse", "wonder-full": "muse"}
-out = []
-cursor = False
-downgraded = ""
-for row in doc["lineup"].get("voters") or []:
-    if not isinstance(row, dict):
-        continue
-    if row.get("family") == "fable" and row.get("seat") == "cursor":
-        cursor = True
-    if row.get("downgraded") and row.get("effort"):
-        downgraded = row["effort"]
-    name = names.get(row.get("family"))
-    if name and name not in out:
-        out.append(name)
-if isinstance(down, dict) and down.get("reason"):
-    if not out:
-        print("bad")
-        raise SystemExit(0)
-    print("downgrade")
-    print(",".join(out))
-    print(down["reason"])
-    raise SystemExit(0)
-if not out:
-    print("bad")
-    raise SystemExit(0)
-print("ok")
-print(",".join(out))
-if cursor:
-    print("cursor-fable")
-if downgraded:
-    print("downgraded:" + downgraded)
-excl = doc.get("excluded")
-if isinstance(excl, dict) and (excl.get("why") or excl.get("vendor") or excl.get("name")):
-    if excl.get("vendor"):
-        print(excl.get("name") or excl.get("vendor"))
-    else:
-        print("none")
-    print(excl.get("why") or "")
-PY
+  # The family/seat map lives in scripts/lineup.py. A missing seat is bad.
+  python3 "$ROOT/scripts/lineup.py" "$1"
 }
 
 load_lineup_ballot() {
