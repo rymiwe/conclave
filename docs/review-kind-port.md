@@ -7,18 +7,6 @@ in the dotfiles repo, about 1,700 lines plus `blind.sh`, `resolve-models.sh`,
 skill is deleted and the "until the port lands" sentence in CLAUDE.md goes
 with it. See `docs/routing.md` for the decisions this implements.
 
-## Decisions already made
-
-- Two voters: Fable through `claude` (always, high effort, Opus subagents
-  through `CLAUDE_CODE_SUBAGENT_MODEL=opus`) and Astra through `codex`.
-  Grok only with `--voters claude,codex,grok`, never by default.
-- Jev judges; the human decides a split. Blinding stays on.
-- Roles are families; the resolver picks IDs. No model names in prose.
-- The script is host-agnostic: a chair on Claude Code, `cursor-agent`, or
-  Grok Build runs the same commands.
-- Design and mixed kinds stay packet-first and tool-less. Review kind is
-  the only kind where voters get tools and a worktree.
-
 ## Carry over, on purpose
 
 1. **Per-voter worktrees** from a synthesized base (`reset --soft`), one
