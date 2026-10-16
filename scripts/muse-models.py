@@ -161,6 +161,10 @@ def from_catalog(path):
 
 
 def main(argv):
+    if argv and argv[0] == "--accept":
+        if len(argv) != 2:
+            raise SystemExit("usage: muse-models.py --accept ID")
+        return 0 if is_frontier(argv[1]) else 1
     catalog = None
     i = 0
     while i < len(argv):

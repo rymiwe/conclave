@@ -1575,21 +1575,9 @@ muse_shadow_on() {
   [ "$(conclave_env MUSE_SHADOW 0)" = "1" ]
 }
 
-# MUSE_WONDER_MODEL is the newest Wonder full id from resolve-models.sh.
-# Wonder full is the frontier on this seat. Plain Wonder, Spark, and a
-# contributor id are refused.
+# The pin rule is muse-models.py --accept. This only forwards the exit status.
 muse_pin_usable() {
-  local id="${MUSE_WONDER_MODEL:-}" token wonder=0 full=0
-  [ -n "$id" ] || return 1
-  case "$id" in
-    *contributor*|*spark*) return 1 ;;
-  esac
-  local IFS='-'
-  for token in $id; do
-    [ "$token" = "wonder" ] && wonder=1
-    [ "$token" = "full" ] && full=1
-  done
-  [ "$wonder" = 1 ] && [ "$full" = 1 ]
+  python3 "$ROOT/scripts/muse-models.py" --accept "${MUSE_WONDER_MODEL:-}" >/dev/null 2>&1
 }
 
 # Headless flags are the ones `muse exec --help` prints. cwd is the packet.
