@@ -86,7 +86,7 @@ import json, sys
 dest = sys.argv[1]
 families = sys.argv[2:]
 doc = [{"role": "lineup", "mode": "default", "reason": "stub", "lineup": {
-    "voters": [{"family": fam, "effort": "high", "seat": fam, "vendor": "v"} for fam in families]
+    "voters": [{"family": fam, "effort": "high", "seat": {"fable": "claude", "astra": "chatgpt", "grok": "grok", "muse": "muse"}[fam], "vendor": "v"} for fam in families]
 }}]
 with open(dest, "w", encoding="utf-8") as fh:
     json.dump(doc, fh)
@@ -99,7 +99,7 @@ write_lineup "$work/pair.json" fable astra
 write_lineup "$work/one.json" muse
 printf '%s\n' '[{"role":"lineup","mode":"ask","reason":"Fable reading unknown","lineup":null}]' >"$work/ask.json"
 printf '%s\n' 'not json' >"$work/bad.json"
-printf '%s\n' '[{"role":"lineup","mode":"default","reason":"stub","lineup":{"voters":[{"family":"astra"},{"family":"grok"},{"family":"muse"}]},"excluded":{"vendor":"anthropic","name":"Anthropic","family":"opus","why":"Opus built the diff"}}]' >"$work/anthropic-built.json"
+printf '%s\n' '[{"role":"lineup","mode":"default","reason":"stub","lineup":{"voters":[{"family":"astra","seat":"chatgpt"},{"family":"grok","seat":"grok"},{"family":"muse","seat":"muse"}]},"excluded":{"vendor":"anthropic","name":"Anthropic","family":"opus","why":"Opus built the diff"}}]' >"$work/anthropic-built.json"
 
 COUNCIL_SOURCE_ONLY=1
 # shellcheck disable=SC1091
@@ -318,9 +318,9 @@ python3 - "$work/approved.json" <<'PY'
 import json, sys
 doc = [{"role": "lineup", "mode": "default", "reason": "stub", "lineup": {"voters": [
     {"family": "fable", "seat": "claude", "effort": "max", "downgraded": True},
-    {"family": "astra", "effort": "high"},
-    {"family": "grok", "effort": "high"},
-    {"family": "wonder-full", "effort": "high"},
+    {"family": "astra", "seat": "chatgpt", "effort": "high"},
+    {"family": "grok", "seat": "grok", "effort": "high"},
+    {"family": "wonder-full", "seat": "muse", "effort": "high"},
 ]}}]
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
     json.dump(doc, fh)
@@ -367,9 +367,9 @@ import json, sys
 doc = [{"role": "lineup", "mode": "default", "reason": "stub",
         "excluded": {"vendor": "xai", "name": "xAI", "family": "grok", "why": "Grok built the diff"},
         "lineup": {"voters": [
-            {"family": "fable", "effort": "high"},
-            {"family": "astra", "effort": "high"},
-            {"family": "muse", "effort": "high"},
+            {"family": "fable", "seat": "claude", "effort": "high"},
+            {"family": "astra", "seat": "chatgpt", "effort": "high"},
+            {"family": "muse", "seat": "muse", "effort": "high"},
         ]}}]
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
     json.dump(doc, fh)
@@ -391,10 +391,10 @@ doc = [{"role": "lineup", "mode": "default", "reason": "stub",
         "excluded": {"vendor": None, "name": None, "family": None,
                      "why": "design judges a packet the chair framed"},
         "lineup": {"voters": [
-            {"family": "fable", "effort": "high"},
-            {"family": "astra", "effort": "high"},
-            {"family": "grok", "effort": "high"},
-            {"family": "muse", "effort": "high"},
+            {"family": "fable", "seat": "claude", "effort": "high"},
+            {"family": "astra", "seat": "chatgpt", "effort": "high"},
+            {"family": "grok", "seat": "grok", "effort": "high"},
+            {"family": "muse", "seat": "muse", "effort": "high"},
         ]}}]
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
     json.dump(doc, fh)
