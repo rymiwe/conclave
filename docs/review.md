@@ -26,7 +26,7 @@ copies and `PROMPT.md` under `preview/` only.
 | Phase | Who | What |
 |---|---|---|
 | 0 | `scripts/conclave.sh <id> --dry-run` | Lineup, target, diff shape. Writes only `tmp/council/<id>/preview/`. Local listings only: no voter prompt, no Jev call. |
-| 1 | `scripts/conclave.sh <id>` | One worktree per voter, read-only baseline. The default ballot is the lineup. Review adds Opus native. Fable is on the reviewer brief. The other seated legs run native, in parallel. Opus native is a coverage leg on review kind; its agreement with Fable is one vote. Then model check, baseline compare, `scripts/blind.sh`, stop. |
+| 1 | `scripts/conclave.sh <id>` | One worktree per voter, read-only baseline. The default ballot is the lineup. <!-- ballot-rule:start -->Review adds Opus native unless Anthropic built the diff.<!-- ballot-rule:end --> Fable is on the reviewer brief. The other seated legs run native, in parallel. Opus native is a coverage leg on review kind; its agreement with Fable is one vote. Then model check, baseline compare, `scripts/blind.sh`, stop. |
 | 2 | Chair | Read only `blind/leg-*.md`. Write `findings.json`. Do not read `blind/key.txt` yet. |
 | 3 | `scripts/conclave.sh <id> --findings` | One Jev `choice` per finding, or no call when there are no findings. Writes `judgment.md` (fixed header, then the convergence table) and `decide.md` beside it. `convergence.md` is the same table without the header. |
 | 4 | Chair | Fill `decide.md`: replace every `TODO(chair)`. The what-breaks line says what breaks and for whom, with no code identifiers. Then draft comments. `scripts/check-comment-links.py` checks citations. The script writes no comment prose and posts nothing. |

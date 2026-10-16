@@ -88,7 +88,7 @@ rejected pairs.
   `seat-usage --route lineup --kind KIND` for the default ballot. Review and
   mixed add `--author` only when the brief has `author:`. Audit does the same,
   and excludes nobody when that header is absent. Families map to legs: fable
-  to claude, astra to codex, grok, muse. Review adds the Opus coverage leg.
+  to claude, astra to codex, grok, muse. <!-- ballot-rule:start -->Review adds Opus native unless Anthropic built the diff.<!-- ballot-rule:end -->
   `--voters` still wins. When that call is missing, fails, or returns mode ask,
   the script uses the fixed default (Fable and Astra; review also adds Opus)
   and says so in the lineup and in `routing.md`. The same places name the
