@@ -2464,6 +2464,7 @@ Next step (chair, not this script):
   Then draft comments. Every ticket id, #N, bare SHA, and file:line in a
   comment must sit inside a markdown link:
     scripts/check-comment-links.py <comments.md>
+  That check rejects an internal word in a public comment and names the plain replacement.
   Show every draft in full in chat, as it would go out, in the message
   that asks whether to post. A file path is not a preview.
   The script does not write comment prose and does not post.
