@@ -866,6 +866,7 @@ class Runner:
                       'Read only blind/leg-*.md for reports; never voter-* files; never blind/key.txt until the convergence table exists. '
                       + instructions + f'Replace every TODO(chair) in {ballot / "decide.md"}. '
                       f'Draft comments into {ballot / "comments.md"}, each labelled in bold **Question:**, **Requested:**, or **Advisory:**. '
+                      'Write as a plain engineer, with no internal tooling words. scripts/check-comment-links.py rejects them. '
                       'Drafts must pass scripts/check-comment-links.py. That check rejects an internal word in a public comment and names the plain replacement. '
                       + span + 'Write only in the ballot directory. Post nothing. ' + NO_SHALLOW)
             self.chair(row['ballot'] + '-chair-b', prompt, self.repo, row, 'chair_b', session)
