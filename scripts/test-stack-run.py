@@ -923,9 +923,19 @@ DIR="$2" ERRORS_FILE="$2/errors.md" BRIEF="$2/voter-claude.brief.md" FLAG_KIND=d
 load_models() { CODEX_REVIEW_MODEL=test; }
 resolve_routing
 '''
-    for sku, overflow in (('cursor-fable',''), ('fable','cursor')):
-        p = run(['bash','-c',routing,'bash',str(SCRIPTS / 'council.sh'),str(d),sku,overflow], env=env)
-        check(p.returncode != 0 and 'kind review only' in p.stderr, f'non-review kind rejects {sku} overflow={overflow} ({p.stderr.strip()})')
+    # Design accepts cursor-fable. The id is a fixture, so a host CURSOR_FABLE
+    # cannot change the result. Overflow on a non-review kind stays rejected.
+    routed = {key: value for key, value in env.items() if key != 'CURSOR_FABLE'}
+    with_id = dict(routed, CURSOR_FABLE='claude-fable-test')
+    p = run(['bash','-c',routing,'bash',str(SCRIPTS / 'council.sh'),str(d),'cursor-fable',''], env=with_id)
+    check(p.returncode == 0 and 'kind review only' not in p.stderr,
+          f'design accepts cursor-fable when the id is set ({p.stderr.strip()})')
+    p = run(['bash','-c',routing,'bash',str(SCRIPTS / 'council.sh'),str(d),'cursor-fable',''], env=routed)
+    check(p.returncode != 0 and 'Cursor Fable id is empty' in p.stderr,
+          f'explicit cursor-fable with an empty id is rejected ({p.stderr.strip()})')
+    p = run(['bash','-c',routing,'bash',str(SCRIPTS / 'council.sh'),str(d),'fable','cursor'], env=routed)
+    check(p.returncode != 0 and 'kind review only' in p.stderr,
+          f'non-review kind rejects fable overflow=cursor ({p.stderr.strip()})')
 
 
 def test_fetch_race(tmp: Path, mod) -> None:
