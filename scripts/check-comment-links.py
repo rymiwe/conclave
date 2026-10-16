@@ -14,6 +14,7 @@ Standard tokens (UTF-8, SHA-256, ISO-8601) are not ticket ids.
 """
 from __future__ import annotations
 
+import importlib.util
 import re
 import sys
 from pathlib import Path
@@ -170,21 +171,36 @@ def problems(text: str) -> list[str]:
     return found
 
 
+def _words():
+    path = Path(__file__).resolve().parent / "comment_words.py"
+    spec = importlib.util.spec_from_file_location("comment_words", path)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"cannot load {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def main() -> None:
     if len(sys.argv) != 2 or sys.argv[1] in ("-h", "--help"):
         raise SystemExit(
             "usage: check-comment-links.py <comments.md>\n"
             "exit 0 when every ticket id, #N, bare SHA, and file:line "
-            "sits inside a markdown link"
+            "sits inside a markdown link, and the comment uses no internal word"
         )
     path = Path(sys.argv[1])
     if not path.is_file():
         raise SystemExit(f"not a file: {path}")
-    found = problems(path.read_text(encoding="utf-8"))
-    if found:
-        print(f"{path}: {len(found)} citation(s) outside a markdown link")
-        for line in found:
-            print(f"  {line}")
+    text = path.read_text(encoding="utf-8")
+    found = problems(text)
+    words = _words().word_hits(text)
+    if found or words:
+        if found:
+            print(f"{path}: {len(found)} citation(s) outside a markdown link")
+            for line in found:
+                print(f"  {line}")
+        for line, span, say in words:
+            print(f'{path}:{line}: public comment contains "{span}"; say "{say}".')
         raise SystemExit(1)
     print(f"{path}: ok")
 

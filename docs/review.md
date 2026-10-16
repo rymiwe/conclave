@@ -1270,9 +1270,9 @@ A finding that is held stays in the report and does not become a comment.
 2. **One review-level comment** for what cannot attach to a line. A few
    sentences. If nothing qualifies, skip it.
 
-Write as the user. No model names, no "multi-vendor", no tooling notes.
+Write as the user.
 Every ticket id, `#N`, bare SHA, and `file:line` sits inside a markdown link.
-`scripts/check-comment-links.py` fails the draft otherwise. A pure decimal
+`scripts/check-comment-links.py` fails the draft otherwise, and when a public comment uses an internal word. The error names the plain replacement. A pure decimal
 run of digits is not treated as a SHA, and neither is an all-letter hex
 word. A SHA in this check includes a hex letter and a decimal digit.
 

@@ -324,6 +324,8 @@ def main() -> int:
     for label, text in [("body", body)] + [(f"comment {c['path']}:{c['line']}", c["body"]) for c in inline]:
         for p in links.problems(text):
             errors.append(f"{label}: {p} outside a markdown link")
+        for line, span, say in links._words().word_hits(text):
+            errors.append(f'{label}: line {line}: public comment contains "{span}"; say "{say}".')
     if errors:
         for e in errors:
             print(f"  {e}", file=sys.stderr)
