@@ -207,6 +207,15 @@ def main():
         none_id = run_py(["--phase", "before", "--path", str(path), "--run-id", ""])
         check(none_id.returncode == 2, "empty run-id exits 2")
 
+        # council_voter_started records a voter only when its program is on PATH.
+        voter_bin = tmp / "voter-bin"
+        voter_bin.mkdir()
+        for name in ("claude", "codex", "grok"):
+            prog = voter_bin / name
+            prog.write_text("#!/bin/sh\nexit 0\n")
+            prog.chmod(0o755)
+        os.environ["PATH"] = f"{voter_bin}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}"
+
         # Bash: the trap appends after, subshells do not, and the exit status stays.
         shell = tmp / "drive.sh"
         shell.write_text(f"""#!/bin/bash
