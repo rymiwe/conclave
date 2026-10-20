@@ -54,6 +54,17 @@ argv = sys.argv[1:]
 text = "\n".join(argv)
 with (rec / "calls").open("a", encoding="utf-8") as fh:
     fh.write("---\n" + text + "\n")
+watched = (
+    "TYPESAFE_API_KEY",
+    "JEV_API_KEY",
+    "COUNCIL_SAVED_TYPESAFE",
+    "COUNCIL_SAVED_JEV",
+)
+with (rec / "env").open("a", encoding="utf-8") as fh:
+    fh.write("---\nrecorded\n")
+    for key in watched:
+        if key in os.environ:
+            fh.write(key + "=" + os.environ[key] + "\n")
 data = sys.stdin.buffer.read()
 if "/usage" in argv:
     (rec / "usage-argv").write_text(text + "\n", encoding="utf-8")
@@ -91,6 +102,7 @@ def base_env(home: Path, bindir: Path, extra=None):
         "CONCLAVE_ARGON_MODEL", "COUNCIL_ARGON_MODEL",
         "CONCLAVE_ARGON_TIMEOUT", "COUNCIL_ARGON_TIMEOUT",
         "TYPESAFE_API_KEY", "JEV_API_KEY",
+        "COUNCIL_SAVED_TYPESAFE", "COUNCIL_SAVED_JEV",
         "CONCLAVE_SEAT_USAGE", "COUNCIL_SEAT_USAGE",
     ):
         env.pop(key, None)
@@ -98,6 +110,8 @@ def base_env(home: Path, bindir: Path, extra=None):
     env["PATH"] = f"{bindir}:{Path(jq_bin()).parent}:/usr/bin:/bin"
     env["CONCLAVE_JEV_OP"] = "/bin/false"
     env["CONCLAVE_ARGON"] = "1"
+    # A stub or a missing path. Never command -v, and never ~/.local/bin/agy.
+    env["CONCLAVE_AGY"] = str(home / "no-such-agy")
     if extra:
         env.update(extra)
     return env
@@ -298,7 +312,9 @@ def test_skips(tmp: Path, env_base):
                 encoding="utf-8")
             (d / f"voter-{voter}.ok").write_text("", encoding="utf-8")
         env = dict(env_base)
-        if not missing:
+        if missing:
+            env["CONCLAVE_AGY"] = str(d / "no-such-agy")
+        else:
             write_stub(bindir / "agy")
             env["CONCLAVE_AGY"] = str(bindir / "agy")
         env.update({
@@ -468,9 +484,12 @@ printf 'effort=%s\\n' "$RAN_ARGON_EFFORT"
           f"record treats a resolvable agy as started ({proc.stdout} {proc.stderr})")
     empty = tmp / "empty-bin"
     empty.mkdir()
+    record_home = tmp / "record-home"
+    record_home.mkdir()
     env2 = dict(env_base)
-    env2["PATH"] = "/usr/bin:/bin"
-    env2.pop("CONCLAVE_AGY", None)
+    env2["HOME"] = str(record_home)
+    env2["PATH"] = f"{empty}:/usr/bin:/bin"
+    env2["CONCLAVE_AGY"] = str(empty / "agy")
     proc = bash(HEAD + "council_voter_started argon && echo started || echo not-started\n", env2)
     check("not-started" in proc.stdout, f"missing agy is not started ({proc.stdout} {proc.stderr})")
     path = tmp / "runs.jsonl"
@@ -506,6 +525,160 @@ def test_smoke_seam():
     check("CONCLAVE_SOURCE_ONLY=1" in text and "argon_preflight" in text and "run_argon" in text,
           "smoke seam uses the ballot preflight and run")
     check('mktemp -d /tmp/argon-smoke' in text, "smoke packet lives under /tmp")
+    check(
+        "unset TYPESAFE_API_KEY JEV_API_KEY COUNCIL_SAVED_TYPESAFE COUNCIL_SAVED_JEV" in text,
+        "smoke unsets judge keys before preflight",
+    )
+
+
+def test_judge_key_hidden(tmp: Path, env_base):
+    d = tmp / "keys"
+    packet = d / "packet"
+    bindir = d / "bin"
+    rec = d / "rec"
+    packet.mkdir(parents=True)
+    bindir.mkdir()
+    (packet / "PROMPT.md").write_text("prompt\n", encoding="utf-8")
+    stream = d / "stream.jsonl"
+    stream_file(stream, "SUCCESS", SCHEMA, usage={"input_tokens": 2, "output_tokens": 1})
+    write_stub(bindir / "agy")
+    sentinels = {
+        "TYPESAFE_API_KEY": "sentinel-typesafe-9f3a",
+        "JEV_API_KEY": "sentinel-jev-9f3a",
+        "COUNCIL_SAVED_TYPESAFE": "sentinel-saved-typesafe-9f3a",
+        "COUNCIL_SAVED_JEV": "sentinel-saved-jev-9f3a",
+    }
+    env = dict(env_base)
+    env.update(sentinels)
+    env.update({
+        "CONCLAVE_AGY": str(bindir / "agy"),
+        "AGY_RECORD": str(rec),
+        "AGY_STREAM": str(stream),
+        "AGY_USAGE_OUT": USAGE_OK,
+        "AGY_USAGE_RC": "0",
+        "AGY_RUN_RC": "0",
+    })
+    proc = bash(HEAD + f"""
+DIR={d}
+PACKET={packet}
+ERRORS_FILE={d}/errors.md
+: >"$ERRORS_FILE"
+KIND=design
+ARGON_EFFORT=low
+VOTERS=argon
+if ! argon_preflight >/dev/null; then echo preflight-failed; exit 1; fi
+run_argon
+""", env)
+    seen = (rec / "env").read_text(encoding="utf-8") if (rec / "env").is_file() else ""
+    check(proc.returncode == 0 and seen.count("recorded") >= 2,
+          f"preflight and run both reached the stub ({proc.returncode} {seen!r} {proc.stderr[-300:]})")
+    for value in sentinels.values():
+        check(value not in seen, f"agy did not see {value} ({seen!r})")
+
+    rec2 = d / "rec-smoke"
+    env["AGY_RECORD"] = str(rec2)
+    before = set(Path("/tmp").glob("argon-smoke.*"))
+    try:
+        smoke = subprocess.run(
+            ["bash", str(SCRIPTS / "argon-smoke.sh"), "What is two plus two?"],
+            text=True, capture_output=True, env=env)
+    finally:
+        for path in set(Path("/tmp").glob("argon-smoke.*")) - before:
+            shutil.rmtree(path, ignore_errors=True)
+    seen2 = (rec2 / "env").read_text(encoding="utf-8") if (rec2 / "env").is_file() else ""
+    check(smoke.returncode == 0 and seen2.count("recorded") >= 2,
+          f"smoke reached the stub ({smoke.returncode} {smoke.stderr[-300:]} {smoke.stdout[-200:]})")
+    for value in sentinels.values():
+        check(value not in seen2, f"smoke agy did not see {value} ({seen2!r})")
+
+
+def test_skipped_argon_not_required(tmp: Path, env):
+    def reports(d: Path):
+        d.mkdir()
+        (d / "voter-claude.json").write_text(
+            json.dumps({"result": "first leg report"}) + "\n", encoding="utf-8")
+        (d / "voter-claude.model.txt").write_text("claude: ok model=fable\n", encoding="utf-8")
+        (d / "voter-codex.md").write_text("second leg report\n", encoding="utf-8")
+        (d / "voter-codex.model.txt").write_text("codex: ok model=astra\n", encoding="utf-8")
+
+    def run_kind(kind, blind_body):
+        d = tmp / f"count-{kind}"
+        reports(d)
+        return bash(HEAD + f"""
+DIR={d}
+ERRORS_FILE={d}/errors.md
+: >"$ERRORS_FILE"
+KIND={kind}
+VOTERS=claude,codex,argon
+VOTERS_EXPLICIT=1
+REVIEW_FAIL=0
+note_argon_kind_skip
+review_count_reports
+printf 'expected=%s present=%s missing=[%s]\\n' \
+  "$REVIEW_REPORTS_EXPECTED" "$REVIEW_REPORTS_PRESENT" "$REVIEW_REPORTS_MISSING"
+printf 'listed=[%s]\\n' "$(review_report_voters | paste -sd, -)"
+{blind_body}
+printf 'fail=%s\\n' "$REVIEW_FAIL"
+if [ -d "$DIR/blind" ]; then
+  printf 'legs=%s\\n' "$(find "$DIR/blind" -maxdepth 1 -name 'leg-*.md' | wc -l | tr -d ' ')"
+  if grep -q 'voter-argon' "$DIR/blind/key.txt"; then echo key-has-argon; else echo key-clean; fi
+else
+  echo legs=0
+fi
+printf 'skip<<\\n'
+cat "$DIR/voter-argon.skipped"
+printf 'skip>>\\n'
+if [ -f "$DIR/model-check.md" ] && grep -q 'report check: argon missing' "$DIR/model-check.md"; then
+  echo argon-missing-in-check
+else
+  echo argon-not-in-check
+fi
+""", env)
+
+    proc = run_kind("review", "if review_blind; then echo blind-ok; else echo blind-bad; fi")
+    out = proc.stdout
+    check("expected=2 present=2 missing=[]" in out and "listed=[claude,codex]" in out,
+          f"review count omits skipped argon ({out} {proc.stderr[-300:]})")
+    check("blind-ok" in out and "fail=0" in out and "legs=2" in out and "key-clean" in out,
+          f"review blinds the other legs ({out})")
+    check("argon: kind review is not supported" in out and "skip<<" in out,
+          f"review keeps the skip reason ({out})")
+    errors = (tmp / "count-review" / "errors.md").read_text(encoding="utf-8")
+    check("not judgeable" not in errors and "no report to blind" not in errors
+          and "argon: kind review is not supported" in errors and "argon-not-in-check" in out,
+          f"review does not fail because of argon ({errors!r} {out})")
+
+    proc = run_kind("audit", """
+AUDIT_KEPT=none
+AUDIT_TYPE=content
+audit_check_reports
+if audit_blind; then echo blind-ok; else echo blind-bad; fi
+""")
+    out = proc.stdout
+    check("expected=2 present=2 missing=[]" in out and "blind-ok" in out and "fail=0" in out
+          and "legs=2" in out and "key-clean" in out and "argon-not-in-check" in out,
+          f"audit count and blind omit skipped argon ({out} {proc.stderr[-400:]})")
+    check("argon: kind audit is not supported" in out, f"audit keeps the skip reason ({out})")
+    errors = (tmp / "count-audit" / "errors.md").read_text(encoding="utf-8")
+    check("not judgeable" not in errors and "no report to blind" not in errors
+          and "report check: argon missing" not in errors,
+          f"audit does not fail because of argon ({errors!r})")
+
+    bare = tmp / "count-bare"
+    reports(bare)
+    proc = bash(HEAD + f"""
+DIR={bare}
+ERRORS_FILE={bare}/errors.md
+: >"$ERRORS_FILE"
+KIND=review
+VOTERS=claude,codex,argon
+REVIEW_FAIL=0
+review_count_reports
+printf 'bare-expected=%s bare-present=%s bare-missing=[%s]\\n' \
+  "$REVIEW_REPORTS_EXPECTED" "$REVIEW_REPORTS_PRESENT" "$REVIEW_REPORTS_MISSING"
+""", env)
+    check("bare-expected=3 bare-present=2 bare-missing=[argon]" in proc.stdout,
+          f"argon without a skip file is still required ({proc.stdout} {proc.stderr[-200:]})")
 
 
 def write_exe(path: Path, body: str):
@@ -625,6 +798,8 @@ def main():
             test_record(tmp, env)
             test_clear(tmp, env)
             test_smoke_seam()
+            test_judge_key_hidden(tmp, env)
+            test_skipped_argon_not_required(tmp, env)
             test_dry_run(tmp)
     finally:
         shutil.rmtree(home, ignore_errors=True)

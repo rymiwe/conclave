@@ -2022,7 +2022,14 @@ argon_preflight() {
   out="$(mktemp)"
   err="$(mktemp)"
   ec=0
-  timeout 60 "$bin" -p "/usage" >"$out" 2>"$err" || ec=$?
+  # Judge keys never reach agy. SOURCE_ONLY returns before the ballot unset,
+  # and COUNCIL_SAVED_* may still hold a copy.
+  timeout 60 env \
+    -u TYPESAFE_API_KEY \
+    -u JEV_API_KEY \
+    -u COUNCIL_SAVED_TYPESAFE \
+    -u COUNCIL_SAVED_JEV \
+    "$bin" -p "/usage" >"$out" 2>"$err" || ec=$?
   if [ "$ec" -ne 0 ]; then
     if [ -s "$out" ]; then
       cat "$out"
@@ -2096,7 +2103,12 @@ run_argon() {
     set -o pipefail
     cd -- "$PACKET" || exit 97
     jq -cn --rawfile c "$PACKET/PROMPT.md" '{event:"user",message:{role:"user",content:$c}}' \
-      | "$bin" \
+      | env \
+          -u TYPESAFE_API_KEY \
+          -u JEV_API_KEY \
+          -u COUNCIL_SAVED_TYPESAFE \
+          -u COUNCIL_SAVED_JEV \
+          "$bin" \
           --model "$model" \
           --disable-slash-commands \
           --sandbox \

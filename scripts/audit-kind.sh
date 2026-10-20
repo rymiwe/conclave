@@ -426,6 +426,7 @@ audit_build_worktrees() {
   while IFS= read -r v; do
     case "$v" in
       claude|opus|codex|grok|muse) review_make_leg "$ref" "$ref" >/dev/null ;;
+      # Stay in $VOTERS. review_report_voters omits the skipped leg.
       argon) note_argon_kind_skip ;;
       *) log_err "unknown voter '$v' (supported: claude, opus, codex, grok, muse)" ;;
     esac
@@ -743,7 +744,7 @@ audit_check_reports() {
         ;;
     esac
   done <<EOF
-$(review_voters)
+$(review_report_voters)
 EOF
 }
 

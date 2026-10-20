@@ -15,6 +15,8 @@ ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 export CONCLAVE_SOURCE_ONLY=1
 # shellcheck disable=SC1091
 . "$ROOT/scripts/conclave.sh"
+# SOURCE_ONLY returns before conclave.sh unsets the judge key.
+unset TYPESAFE_API_KEY JEV_API_KEY COUNCIL_SAVED_TYPESAFE COUNCIL_SAVED_JEV
 
 tmp="$(mktemp -d /tmp/argon-smoke.XXXXXX)"
 DIR="$tmp/ballot"
