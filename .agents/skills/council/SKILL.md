@@ -45,6 +45,7 @@ Print-only and mutual-blind. The default ballot is every available leg from the 
 | Codex | Astra |
 | Grok | Seated unless that vendor built the diff, or wrote the audit target when `author:` names it. A capped pool is not seated. On audit it reads the brief and web search stays on. `--voters` can name it on any kind |
 | Muse | Seated unless a Muse window is capped. Ahead of pace still votes, at low. `--voters ...,muse` names it on any kind. Its opinion goes to Jev like any other, and the shadow does not run beside it. See `docs/review.md`, "Muse" |
+| Argon | Design and mixed only, via `agy` on the Google AI Pro subscription. Seated unless `CONCLAVE_ARGON=0` (`COUNCIL_ARGON` is the alias). The lineup does not seat it. `--voters` wins. Review and audit skip a named argon. A missing `agy`, a failed usage check, a 0% Argon pool, or a bad answer skips the leg and does not fail the run. `agy` must be signed in. Do not opt in to data sharing. Do not mark the repo trusted in `agy` |
 
 | Role | Who |
 |------|-----|

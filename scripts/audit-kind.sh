@@ -259,6 +259,9 @@ audit_write_lineup() {
     fi
     printf 'captured_at: %s\n' "$AUDIT_CAPTURED"
     printf 'voters: %s\n' "$VOTERS"
+    if voter_is_named argon; then
+      argon_unsupported_reason audit
+    fi
     printf '%s\n' "$(ballot_source_line)"
     if [ -n "${BALLOT_EXCLUDED_WHY:-}" ]; then
       printf '%s\n' "$(excluded_line)"
@@ -272,6 +275,7 @@ audit_write_lineup() {
     printf '%s\n' '|---|---|---|---|---|---|'
     while IFS= read -r v; do
       case "$v" in
+        argon) continue ;;
         claude)
           if [ "${CLAUDE_SKU:-fable}" = "opus" ]; then
             model="opus"
@@ -422,6 +426,7 @@ audit_build_worktrees() {
   while IFS= read -r v; do
     case "$v" in
       claude|opus|codex|grok|muse) review_make_leg "$ref" "$ref" >/dev/null ;;
+      argon) note_argon_kind_skip ;;
       *) log_err "unknown voter '$v' (supported: claude, opus, codex, grok, muse)" ;;
     esac
   done <<EOF

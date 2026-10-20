@@ -105,6 +105,8 @@ COUNCIL_SOURCE_ONLY=1
 # shellcheck disable=SC1091
 . "$ROOT/scripts/council.sh"
 unset COUNCIL_SOURCE_ONLY CONCLAVE_SOURCE_ONLY
+# Argon is seated by Conclave on design and mixed. This file checks the lineup.
+export CONCLAVE_ARGON=0
 ID="lineupballot$$"
 DIR="$ROOT/tmp/council/$ID"
 
@@ -276,6 +278,7 @@ dry() {
   env -u COUNCIL_SKIP_UPDATE_CHECK -u COUNCIL_CODEX_BIN -u COUNCIL_SEAT_USAGE \
     -u CONCLAVE_VOTER -u COUNCIL_VOTER \
     HOME="$work/home" PATH="$work/bin:$PATH" \
+    CONCLAVE_ARGON=0 \
     CONCLAVE_SKIP_UPDATE_CHECK=1 \
     CONCLAVE_CODEX_BIN="$work/bin/codex" \
     CONCLAVE_SEAT_USAGE="$CONCLAVE_SEAT_USAGE" \

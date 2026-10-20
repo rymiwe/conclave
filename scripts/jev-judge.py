@@ -344,7 +344,8 @@ def format_judgment_header(
     voter_c_model is included only when the run named an opt-in Grok voter.
     coverage_opus_model is included only when the Opus coverage leg ran.
     muse_model (and muse_seconds on review and audit) only when muse voted.
-    That key does not replace voter_a_model, voter_b_model, or voter_c_model.
+    argon_model when Argon voted. argon_skipped when that leg was named and skipped.
+    Those keys do not replace voter_a_model, voter_b_model, or voter_c_model.
     voter_b_reasoning_tokens and voter_b_effort always follow voter_b_model.
     Review and audit put each leg's wall seconds directly after its model line:
     voter_a_seconds, voter_b_seconds, voter_c_seconds, coverage_opus_seconds.
@@ -390,6 +391,10 @@ def format_judgment_header(
         lines.append(f"muse_model: {meta['muse_model']}")
         if timed:
             lines.append(f"muse_seconds: {_header_text(meta.get('muse_seconds'))}")
+    if meta.get("argon_model"):
+        lines.append(f"argon_model: {meta['argon_model']}")
+    if meta.get("argon_skipped"):
+        lines.append(f"argon_skipped: {meta['argon_skipped']}")
     lines.extend(
         [
             f"builder_model: {meta.get('builder_model') or 'unknown'}",

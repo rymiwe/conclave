@@ -34,6 +34,7 @@ All logins are device-auth: post the URL and code, never a token.
 | `cursor-agent` | Cursor's installer | `cursor-agent login` | `cursor-agent models` lists the newest `grok-*` and `claude-fable-*` |
 | `grok` | xAI installer to `~/.local/bin/grok` | `grok login` (a Grok subscription) | `grok models` prints a default model |
 | `muse` | Meta installer at `https://dev.meta.ai/install.sh`, binary at `~/.local/bin/muse` | `muse login` | `muse exec --help` shows the headless command. The shadow leg is off unless `CONCLAVE_MUSE_SHADOW=1` |
+| `agy` | Google Antigravity CLI, binary on PATH or at `~/.local/bin/agy`. `CONCLAVE_AGY` overrides it (`COUNCIL_AGY` is the alias) | Sign in before a ballot. `agy -p "/usage"` prints the pool rows | Design and mixed seat Argon unless `CONCLAVE_ARGON=0`. Do not opt in to data sharing. Do not mark the repo trusted in `agy`. `CONCLAVE_ARGON_MODEL` overrides the model id. `CONCLAVE_ARGON_TIMEOUT` is the print timeout in seconds (default 900) |
 
 When the shadow leg runs, `muse exec --json` is the event stream. `scripts/muse-usage.py` stores a `subscription_usage` snapshot at `~/.cache/quartermaster/muse-usage.json` when that event is in the stream. The write is a temp file renamed into place. A missing event or a write error leaves the council run unchanged. `docs/routing.md` records the limits of that stream.
 
