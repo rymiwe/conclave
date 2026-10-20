@@ -990,7 +990,9 @@ turn and is not used. A parent rollout with no `token_count` does not compete.
 The effort is `turn_context.payload.effort` from that same file. A missing
 or unparseable value is `unknown`. Each leg's wall time follows its model
 line: `voter_a_seconds`, `voter_b_seconds`, `voter_c_seconds`, and
-`coverage_opus_seconds`, the last two only when that leg ran. The script
+`coverage_opus_seconds`, the last two only when that leg ran. Design and
+mixed add `argon_model` when Argon voted, or `argon_skipped` with the
+one-line reason when that leg was named and skipped. The script
 takes epoch seconds before and after each leg and writes
 `voter-<v>.seconds`. A failed leg still records its time. A missing value is
 `unknown`. Design and mixed carry no seconds. Review writes `stack` after `pr`. See

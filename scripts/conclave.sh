@@ -73,6 +73,8 @@ CODEX_EFFORT=""
 CODEX_MODEL=""
 GROK_EFFORT=""
 MUSE_EFFORT=""
+ARGON_EFFORT=""
+ARGON_PREFLIGHT_OK=0
 PACKET=""
 PACKET_TMP=""
 ROUTING_OUT=""
@@ -399,10 +401,13 @@ Options:
   --max                  Allow max/xhigh where the table permits (design+high)
   --voters LIST          Default ballot is seat-usage --route lineup.
                          Families map to claude, codex, grok, and muse.
+                         Design and mixed also seat argon unless CONCLAVE_ARGON=0
+                         (COUNCIL_ARGON is the alias). Review and audit do not.
                          Review adds the opus coverage leg. A missing router,
                          a failed run, or mode ask uses claude,codex
                          (review: claude,opus,codex) and the lineup says so.
-                         This list replaces that ballot. opus is review-only
+                         This list replaces that ballot. Argon votes only when
+                         the list names it. opus is review-only
                          unless kind is audit and --voters names it.
   --record-review        Append the review phase for an existing run and exit.
                          Requires --run-id and --review-file. Does not launch voters.
@@ -483,13 +488,29 @@ when that stream includes one (MUSE_USAGE_PATH overrides the path). A missing
 snapshot or a write error leaves the run unchanged. See docs/routing.md.
 --voters ...,muse makes Muse a named voter instead, on every kind. Its
 opinion goes to Jev like any other. The shadow does not run beside it. With
-no --voters, the ballot is the lineup: every available leg. Design excludes
-nobody. Review and mixed exclude the vendor that built the diff. Audit
-excludes that vendor when the brief names the author. The chair's vendor
-still votes. The lineup says who sat out and why. A capped pool is not
-seated. A pool ahead of pace still votes. When seat-usage is missing,
-fails, or returns mode ask, the fixed default is used and the lineup says so. A named voter
-passes the routed effort. Review and audit pass high. See docs/review.md.
+no --voters, the ballot is the lineup: every available leg. Design and mixed
+also seat Argon (family argon, agy on the Google AI Pro subscription) unless
+CONCLAVE_ARGON=0 (COUNCIL_ARGON is the alias). The lineup router does not
+seat it. --voters wins: Argon votes only when that list names it. Review and
+audit do not seat Argon. Naming it there skips the leg with
+"argon: kind <k> is not supported; Argon votes on design and mixed only".
+Design excludes nobody. Review and mixed exclude the vendor that built the
+diff. Audit excludes that vendor when the brief names the author. The
+chair's vendor still votes. The lineup says who sat out and why. A capped
+pool is not seated. A pool ahead of pace still votes. When seat-usage is
+missing, fails, or returns mode ask, the fixed default is used and the
+lineup says so. A named voter passes the routed effort. Review and audit
+pass high. Argon follows that same resolved effort: low, medium, or high
+(gemini-4-argon-low, gemini-4-argon-medium, gemini-4-argon-high).
+CONCLAVE_ARGON_MODEL overrides the id. CONCLAVE_AGY is the binary
+(default: command -v agy, else ~/.local/bin/agy). CONCLAVE_ARGON_TIMEOUT
+is the print timeout in seconds (default 900). See docs/review.md.
+agy must be signed in. Do not opt in to data sharing. Do not mark this
+repo trusted in agy. The leg is packet-first: cwd is the out-of-repo packet,
+--sandbox, --disable-slash-commands, and no permission skip. A missing agy,
+a failed "agy -p /usage", an Argon row at 0% remaining, or a bad answer
+writes voter-argon.skipped and does not fail the run. The remaining voters
+still need two valid opinions. --judge does not fail because the leg was skipped.
 --attach and an attach: header copy regular files
 from the target repo or this clone into that packet, and put their contents
 in PROMPT.md under Attached files. A relative path is resolved against the
@@ -503,6 +524,7 @@ Writes under tmp/council/<id>/:
   routing.md
   review-snapshot.md        # design and mixed; names the target path and short HEAD
   voter-claude.md / voter-codex.md / voter-grok.md
+  voter-argon.md            # design and mixed; voter-argon.skipped when the leg is skipped
   voter-muse.md             # shadow verdict, or the muse voter's ballot when --voters names it
   opinion-1.md … opinion-N.md   # one per named voter; design and mixed need at least two
   judgment.md               # only when Jev returns a Decision
@@ -649,6 +671,7 @@ clear_ballot_artifacts() {
     "$DIR"/voter-*.md "$DIR"/voter-*.err "$DIR"/voter-*.ok \
     "$DIR"/voter-*.raw.md "$DIR"/voter-*.prompt.md "$DIR"/voter-*.model.txt \
     "$DIR"/voter-*.stream.jsonl \
+    "$DIR"/voter-*.skipped \
     "$DIR"/opinion-*.md \
     "$DIR"/judgment.md "$DIR"/judge-prompt.md "$DIR"/options.md \
     "$DIR"/header.json \
@@ -693,8 +716,11 @@ publish_voter_opinions() {
   OPINION_N=0
   MISSING_VOTERS=""
   local v raw
-  for v in claude codex grok muse; do
+  for v in claude codex grok muse argon; do
     voter_is_named "$v" || continue
+    if [ "$v" = argon ] && [ -s "$DIR/voter-argon.skipped" ]; then
+      continue
+    fi
     raw="$DIR/voter-$v.md"
     if voter_ballot_ok "$v"; then
       OPINION_N=$((OPINION_N + 1))
@@ -708,8 +734,11 @@ publish_voter_opinions() {
 
 named_voters_missing() {
   local v missing=""
-  for v in claude codex grok muse; do
+  for v in claude codex grok muse argon; do
     voter_is_named "$v" || continue
+    if [ "$v" = argon ] && [ -s "$DIR/voter-argon.skipped" ]; then
+      continue
+    fi
     voter_ballot_ok "$v" && continue
     missing="${missing:+$missing }$v"
   done
@@ -1202,6 +1231,8 @@ resolve_routing() {
 
   # Muse follows Grok's resolved effort. Review and audit launches pass high.
   MUSE_EFFORT="$GROK_EFFORT"
+  # Argon follows the same resolved effort. The model id maps low, medium, and high.
+  ARGON_EFFORT="$GROK_EFFORT"
 
   apply_kind_voters
 }
@@ -1387,6 +1418,7 @@ apply_kind_voters() {
       die "opus is a review coverage leg; design and mixed reject it in --voters (listed ${VOTERS})"
     fi
     OPUS_LEG_SKIPPED=0
+    seat_argon
     return 0
   fi
   OPUS_LEG_SKIPPED=0
@@ -1401,6 +1433,29 @@ apply_kind_voters() {
       out="${out:+$out,}$v"
     done
     VOTERS="$out"
+  fi
+  seat_argon
+}
+
+seat_argon() {
+  # Conclave adds this leg. The lineup router does not.
+  # Design and mixed seat it beside the lineup unless CONCLAVE_ARGON=0
+  # (COUNCIL_ARGON is the alias). --voters wins: an explicit list is not edited.
+  # Review and audit do not seat it. A named argon on those kinds is skipped later.
+  if [ "${KIND:-}" = "review" ] || [ "${KIND:-}" = "audit" ]; then
+    return 0
+  fi
+  if [ "${VOTERS_EXPLICIT:-0}" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$(conclave_env ARGON 1)" = "0" ]; then
+    return 0
+  fi
+  voter_is_named argon && return 0
+  if [ -n "${VOTERS:-}" ]; then
+    VOTERS="${VOTERS},argon"
+  else
+    VOTERS="argon"
   fi
 }
 
@@ -1445,6 +1500,7 @@ config: model_reasoning_effort=$CODEX_EFFORT
 
 model: $GROK_NATIVE_MODEL (standard; never Fast)
 reasoning_effort: $GROK_EFFORT
+$(argon_routing_section)
 
 ## Judge (Decision authority)
 
@@ -1476,7 +1532,9 @@ anonymize() {
     -e '/^[[:space:]]*Powered by/Id' \
     -e 's/\b(Claude Code|Claude|Anthropic|Codex CLI|Codex|OpenAI|GPT-[0-9a-z.-]+|Grok( [0-9.]+)?|xAI|Fable( [0-9.]+)?|Opus( [0-9.]+)?|Astra)\b/[voter]/gI' \
     -e 's/\bmuse-[a-z0-9.-]*[a-z0-9]/[voter]/gI' \
+    -e 's/\bgemini-[a-z0-9.-]*[a-z0-9]/[voter]/gI' \
     -e 's/\b(Muse( Wonder)?|Meta)\b/[voter]/g' \
+    -e 's/\b(Gemini|Argon|Google|Antigravity|agy)\b/[voter]/gI' \
     "$1"
 }
 
@@ -1848,6 +1906,306 @@ muse_capture_usage() {
     >/dev/null 2>&1 || true
 }
 
+argon_routing_section() {
+  voter_is_named argon || return 0
+  cat <<EOF
+
+## Argon voter
+
+model: $(argon_model_id)
+effort: ${ARGON_EFFORT:-}
+binary: agy
+pool: Google AI Pro
+notes: design and mixed only. Packet-first and fail-soft. A missing agy, a failed usage check, a 0% Argon pool, or a bad answer skips the leg.
+EOF
+}
+
+argon_agy_bin() {
+  # CONCLAVE_AGY wins (COUNCIL_AGY is the alias). Else PATH, else ~/.local/bin/agy.
+  local bin
+  bin="$(conclave_env AGY)"
+  if [ -n "$bin" ]; then
+    printf '%s\n' "$bin"
+    return 0
+  fi
+  bin="$(command -v agy 2>/dev/null || true)"
+  if [ -n "$bin" ]; then
+    printf '%s\n' "$bin"
+    return 0
+  fi
+  printf '%s\n' "${HOME:-}/.local/bin/agy"
+}
+
+argon_model_id() {
+  # CONCLAVE_ARGON_MODEL is a full id. Otherwise the resolved effort picks one.
+  local override effort
+  override="$(conclave_env ARGON_MODEL)"
+  if [ -n "$override" ]; then
+    printf '%s\n' "$override"
+    return 0
+  fi
+  effort="${ARGON_EFFORT:-${GROK_EFFORT:-medium}}"
+  case "$effort" in
+    low) printf 'gemini-4-argon-low\n' ;;
+    med|medium) printf 'gemini-4-argon-medium\n' ;;
+    *) printf 'gemini-4-argon-high\n' ;;
+  esac
+}
+
+argon_print_timeout() {
+  local t
+  t="$(conclave_env ARGON_TIMEOUT 900)"
+  case "$t" in
+    ''|*[!0-9]*) t=900 ;;
+  esac
+  printf '%s\n' "$t"
+}
+
+argon_unsupported_reason() {
+  # $1 is the kind. The recorded sentence for review and audit.
+  printf 'argon: kind %s is not supported; Argon votes on design and mixed only\n' "$1"
+}
+
+argon_zero_rows() {
+  # Argon usage rows whose remaining percent is 0%. Other percents are ignored.
+  awk -F '\t' '
+    {
+      gsub(/\r/, "", $0)
+      pool = $1
+      pct = $3
+      gsub(/^[ \t]+|[ \t]+$/, "", pool)
+      gsub(/^[ \t]+|[ \t]+$/, "", pct)
+      if (tolower(pool) ~ /gemini 4 argon/ && pct ~ /^0%$/) print
+    }
+  '
+}
+
+argon_write_skipped() {
+  # $1 is the verbatim reason. First line of the file is the marker.
+  local reason="$1"
+  {
+    printf 'argon: skipped\n'
+    printf '%s\n' "$reason"
+  } >"$DIR/voter-argon.skipped"
+  rm -f "$DIR/voter-argon.md" "$DIR/voter-argon.ok" "$DIR/voter-argon.model.txt"
+}
+
+argon_skip() {
+  # $1 is the verbatim reason. Logged and stored. The leg is not fatal.
+  local reason="$1" line
+  argon_write_skipped "$reason"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    log_err "$line"
+  done <<EOF
+$reason
+EOF
+}
+
+note_argon_kind_skip() {
+  # Review and audit. Idempotent so a worktree retry does not log twice.
+  [ -n "${DIR:-}" ] || return 0
+  voter_is_named argon || return 0
+  [ -s "$DIR/voter-argon.skipped" ] && return 0
+  argon_skip "$(argon_unsupported_reason "${KIND:-}")"
+}
+
+argon_preflight() {
+  # 0 when the leg may launch. 1 and the verbatim reason on stdout when it may not.
+  # agy -p /usage is not a model call. A model turn never runs here.
+  local bin out err ec row
+  bin="$(argon_agy_bin)"
+  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+    printf 'agy: not found: %s\n' "${bin:-agy}"
+    return 1
+  fi
+  out="$(mktemp)"
+  err="$(mktemp)"
+  ec=0
+  # Judge keys never reach agy. SOURCE_ONLY returns before the ballot unset,
+  # and COUNCIL_SAVED_* may still hold a copy.
+  timeout 60 env \
+    -u TYPESAFE_API_KEY \
+    -u JEV_API_KEY \
+    -u COUNCIL_SAVED_TYPESAFE \
+    -u COUNCIL_SAVED_JEV \
+    "$bin" -p "/usage" </dev/null >"$out" 2>"$err" || ec=$?
+  if [ "$ec" -ne 0 ]; then
+    if [ -s "$out" ]; then
+      cat "$out"
+    fi
+    if [ -s "$err" ]; then
+      cat "$err"
+    fi
+    if [ ! -s "$out" ] && [ ! -s "$err" ]; then
+      printf 'agy: /usage exit %s\n' "$ec"
+    fi
+    rm -f "$out" "$err"
+    return 1
+  fi
+  row="$(argon_zero_rows <"$out" || true)"
+  rm -f "$out" "$err"
+  if [ -n "$row" ]; then
+    printf '%s\n' "$row"
+    return 1
+  fi
+  return 0
+}
+
+argon_dry_status() {
+  # Dry-run only. Prints the preflight. Does not write the ballot.
+  voter_is_named argon || return 0
+  local reason=""
+  if reason="$(argon_preflight)"; then
+    printf '  argon=%s effort=%s (packet-first, fail-soft)\n' "$(argon_model_id)" "${ARGON_EFFORT:-}"
+    return 0
+  fi
+  printf '  argon: skipped\n'
+  printf '%s\n' "$reason" | sed 's/^/  /'
+}
+
+prepare_argon_leg() {
+  # Live design and mixed, after the ballot clear. One usage check, then launch or skip.
+  ARGON_PREFLIGHT_OK=0
+  voter_is_named argon || return 0
+  local reason=""
+  if reason="$(argon_preflight)"; then
+    ARGON_PREFLIGHT_OK=1
+    printf '  argon=%s effort=%s (packet-first, fail-soft)\n' "$(argon_model_id)" "${ARGON_EFFORT:-}"
+    return 0
+  fi
+  argon_skip "$reason"
+  printf '  argon: skipped\n'
+}
+
+run_argon() {
+  # Packet-first. The prompt is PROMPT.md on stdin as one stream-json user event.
+  # cwd is the packet. A failure writes voter-argon.skipped and returns 0.
+  local bin model timeout stream err raw out ec parse_ec reason
+  bin="$(argon_agy_bin)"
+  model="$(argon_model_id)"
+  timeout="$(argon_print_timeout)"
+  stream="$DIR/voter-argon.stream.jsonl"
+  err="$DIR/voter-argon.err"
+  raw="$DIR/voter-argon.raw.md"
+  out="$DIR/voter-argon.md"
+  rm -f "$out" "$DIR/voter-argon.ok" "$DIR/voter-argon.model.txt" "$stream" "$raw"
+  if [ -z "${PACKET:-}" ] || [ ! -f "$PACKET/PROMPT.md" ]; then
+    argon_skip "argon: packet prompt missing"
+    return 0
+  fi
+  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+    argon_skip "agy: not found: ${bin:-agy}"
+    return 0
+  fi
+  ec=0
+  (
+    set -o pipefail
+    cd -- "$PACKET" || exit 97
+    jq -cn --rawfile c "$PACKET/PROMPT.md" '{event:"user",message:{role:"user",content:$c}}' \
+      | env \
+          -u TYPESAFE_API_KEY \
+          -u JEV_API_KEY \
+          -u COUNCIL_SAVED_TYPESAFE \
+          -u COUNCIL_SAVED_JEV \
+          "$bin" \
+          --model "$model" \
+          --disable-slash-commands \
+          --sandbox \
+          --print-timeout "${timeout}s" \
+          --input-format stream-json \
+          --output-format stream-json \
+          -p=
+  ) >"$stream" 2>"$err" || ec=$?
+  if [ "$ec" -ne 0 ]; then
+    reason="$(cat "$err" 2>/dev/null || true)"
+    if [ -z "$reason" ]; then
+      reason="$(cat "$stream" 2>/dev/null || true)"
+    fi
+    if [ -z "$reason" ]; then
+      reason="agy: exit ${ec}"
+    fi
+    argon_skip "$reason"
+    return 0
+  fi
+  parse_ec=0
+  local parse_reason
+  parse_reason="$(mktemp)"
+  python3 - "$stream" "$raw" "$parse_reason" <<'PY' || parse_ec=$?
+import json, sys
+stream_path, raw_path, reason_path = sys.argv[1:4]
+result = None
+try:
+    lines = open(stream_path, encoding="utf-8", errors="replace").read().splitlines()
+except OSError as exc:
+    open(reason_path, "w", encoding="utf-8").write(str(exc))
+    raise SystemExit(1)
+for line in lines:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        ev = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if isinstance(ev, dict) and ev.get("event") == "result":
+        result = ev.get("result")
+def as_text(value):
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    return json.dumps(value)
+if not isinstance(result, dict):
+    open(reason_path, "w", encoding="utf-8").write("no result event\n")
+    raise SystemExit(1)
+status = result.get("status")
+if status != "SUCCESS":
+    err = as_text(result.get("error")).strip() or "status %s" % (status,)
+    open(reason_path, "w", encoding="utf-8").write(err if err.endswith("\n") else err + "\n")
+    raise SystemExit(1)
+response = result.get("response")
+if not isinstance(response, str) or not response.strip():
+    err = as_text(result.get("error")).strip() or "empty response"
+    open(reason_path, "w", encoding="utf-8").write(err if err.endswith("\n") else err + "\n")
+    raise SystemExit(1)
+open(raw_path, "w", encoding="utf-8").write(response if response.endswith("\n") else response + "\n")
+PY
+  if [ "$parse_ec" -ne 0 ]; then
+    reason="$(cat "$parse_reason" 2>/dev/null || true)"
+    rm -f "$parse_reason"
+    [ -n "$reason" ] || reason="no result event"
+    argon_skip "$reason"
+    return 0
+  fi
+  rm -f "$parse_reason"
+  if ! python3 - "$raw" "$out" <<'PY'
+import re, sys
+raw_path, out_path = sys.argv[1], sys.argv[2]
+text = open(raw_path, encoding="utf-8", errors="replace").read()
+text = re.sub(r'(?m)(?<!^)(?<![\n])(## (?:Findings|Approach|Would not do|Uncertainties)\b)', r'\n\1', text)
+m = re.search(r'(?m)^## Findings\b', text)
+if not m:
+    sys.exit(2)
+body = text[m.start():].strip() + "\n"
+for h in ["## Findings", "## Approach", "## Would not do", "## Uncertainties"]:
+    if not re.search(rf'(?m)^{re.escape(h)}\b', body):
+        sys.exit(2)
+open(out_path, "w", encoding="utf-8").write(body)
+PY
+  then
+    argon_skip "argon: output missing required schema headings"
+    return 0
+  fi
+  printf 'argon: ok model=%s\n' "$model" >"$DIR/voter-argon.model.txt"
+  if ! mark_voter_ok argon; then
+    rm -f "$DIR/voter-argon.model.txt"
+    argon_write_skipped "argon: output missing required schema headings"
+    return 0
+  fi
+  return 0
+}
+
 run_claude() {
   if [ "$CLAUDE_SKU" = cursor-fable ]; then
     run_cursor_fable_packet
@@ -2137,6 +2495,20 @@ if "muse" in named:
     if timed:
         sec = d / "voter-muse.seconds"
         meta["muse_seconds"] = (sec.read_text(encoding="utf-8").strip() if sec.is_file() else "") or "unknown"
+if "argon" in named:
+    d = Path(os.environ.get("HDR_DIR") or ".")
+    skipped = d / "voter-argon.skipped"
+    if skipped.is_file():
+        lines = []
+        for ln in skipped.read_text(encoding="utf-8", errors="replace").splitlines():
+            ln = ln.strip()
+            if ln and ln != "argon: skipped":
+                lines.append(ln)
+        meta["argon_skipped"] = lines[0] if lines else "argon: skipped"
+    else:
+        proof = d / "voter-argon.model.txt"
+        text = proof.read_text(encoding="utf-8").strip() if proof.is_file() else ""
+        meta["argon_model"] = text.split("model=", 1)[1].split()[0] if text.startswith("argon: ok model=") else "unproven"
 for key, env in (
     ("target", "HDR_AUDIT_TARGET"),
     ("target_type", "HDR_AUDIT_TYPE"),
@@ -2230,6 +2602,9 @@ council_voter_started() {
     muse)
       command -v muse >/dev/null 2>&1
       ;;
+    argon)
+      [ -x "$(argon_agy_bin)" ]
+      ;;
     *)
       return 1
       ;;
@@ -2255,6 +2630,7 @@ council_launch_efforts() {
   RAN_CODEX_EFFORT="${CODEX_EFFORT:-}"
   RAN_GROK_EFFORT="${GROK_EFFORT:-}"
   RAN_MUSE_EFFORT="${MUSE_EFFORT:-}"
+  RAN_ARGON_EFFORT="${ARGON_EFFORT:-}"
   RAN_OPUS_EFFORT=""
   case "${KIND:-}" in
     review)
@@ -2352,6 +2728,8 @@ council_record_outcome() {
     --ran-opus-effort "${RAN_OPUS_EFFORT:-}" \
     --ran-muse-model "${MUSE_WONDER_MODEL:-}" \
     --ran-muse-effort "${RAN_MUSE_EFFORT:-}" \
+    --ran-argon-model "$(argon_model_id)" \
+    --ran-argon-effort "${RAN_ARGON_EFFORT:-}" \
     "${muse_args[@]}" \
     || true
 }
@@ -2816,6 +3194,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   else
     printf '  muse-shadow=off\n'
   fi
+  argon_dry_status
   cat "$ROUTING_OUT"
   exit 0
 fi
@@ -2871,6 +3250,7 @@ save_ballot_voters
 # Keep routing-time log_err lines; do not truncate errors.md again here.
 build_review_snapshot
 prepare_packet_workspace
+prepare_argon_leg
 
 IFS=',' read -r -a VOTER_LIST <<EOF
 $VOTERS
@@ -2918,8 +3298,14 @@ for v in "${VOTER_LIST[@]}"; do
       council_bg run_muse_voter
       PIDS="$PIDS $!"
       ;;
+    argon)
+      # Preflight already ran. A skip is not a missing ballot.
+      [ "${ARGON_PREFLIGHT_OK:-0}" = 1 ] || continue
+      council_bg run_argon
+      PIDS="$PIDS $!"
+      ;;
     *)
-      log_err "unknown voter '$v' (supported: claude, codex, grok, muse)"
+      log_err "unknown voter '$v' (supported: claude, codex, grok, muse, argon)"
       ;;
   esac
 done

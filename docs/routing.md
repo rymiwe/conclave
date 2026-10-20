@@ -108,6 +108,16 @@ rejected pairs.
   A missing `muse` binary, an auth failure, or an unavailable Wonder model
   skips it and does not fail the run. The lineup seats Muse unless a Muse
   window is capped. Ahead of pace still votes.
+  Design and mixed also seat Argon (family `argon`, vendor Google) beside
+  that lineup. The router does not. `CONCLAVE_ARGON=0` turns it off
+  (`COUNCIL_ARGON` is the alias). `--voters` wins. Review and audit do not
+  seat it. `CONCLAVE_AGY` is the `agy` binary. `CONCLAVE_ARGON_MODEL`
+  overrides the model id. `CONCLAVE_ARGON_TIMEOUT` is the print timeout in
+  seconds (default 900). The effort follows the resolved voter effort:
+  low, medium, or high. `agy` must be signed in. Do not opt in to data
+  sharing. Do not mark the repo trusted in `agy`. A missing binary, a
+  failed `agy -p /usage`, an Argon row at 0% remaining, or a bad answer
+  writes `voter-argon.skipped` and does not fail the run.
 - Review launches stay as they are. The Fable brief, Opus native, the
   Grok review, and Muse pass high. Codex passes `CODEX_EFFORT`. Opus
   native never inherits the host's `effortLevel`. Audit passes high on every leg, including Codex, Muse, and the
@@ -174,7 +184,9 @@ with it. Cursor Auto and T3 come out of the Conclave repo.
   read-only review finding, not a build threshold.
 - `judgment.md` opens with a fixed header (kind, decision, confidence,
   confidence_of, model ID per role, branch, PR link; `none` where a field
-  does not apply). `confidence` is Jev's confidence in its own choice.
+  does not apply). When Argon voted, the header adds `argon_model`. When
+  that leg was named and skipped, it adds `argon_skipped` with the one-line
+  reason. `confidence` is Jev's confidence in its own choice.
   `confidence_of` names that choice. Design and mixed use `voters propose
   the same plan`, `voters share a plan with minor changes`, or `voters
   propose different plans`. Review findings, and an audit findings gate,

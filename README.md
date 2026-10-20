@@ -6,7 +6,7 @@ One brief goes to voters on separate vendors. The kind decides what those voters
 
 ## Architecture
 
-The chair runs `scripts/conclave.sh` on the executor and does not judge. The builder runs only after the human says to build. The default ballot is every available leg from the lineup. Design excludes nobody. Review and mixed exclude the vendor that built the diff. Audit excludes that vendor when the brief names the author. On review, Opus native is a coverage leg, and its agreement with Fable is one vote. A capped pool is not seated. `--voters` replaces the lineup. The resolver picks model IDs at run time.
+The chair runs `scripts/conclave.sh` on the executor and does not judge. The builder runs only after the human says to build. The default ballot is every available leg from the lineup. Design excludes nobody. Review and mixed exclude the vendor that built the diff. Audit excludes that vendor when the brief names the author. On review, Opus native is a coverage leg, and its agreement with Fable is one vote. A capped pool is not seated. `--voters` replaces the lineup. On design and mixed, Conclave also seats Argon, a third voter leg via `agy` on the Google AI Pro subscription, unless `CONCLAVE_ARGON=0`. The lineup does not seat it. A missing `agy`, a failed usage check, a 0% Argon pool, or a bad answer skips that leg and the run continues. The resolver picks model IDs at run time.
 
 ```mermaid
 flowchart TB
@@ -22,6 +22,7 @@ flowchart TB
     Script["scripts/conclave.sh<br/>Pool: none"]
     VoterA["Voter A, Claude CLI, own login<br/>Pool: Anthropic subscription"]
     VoterB["Voter B, Codex CLI, own login<br/>Pool: OpenAI subscription"]
+    VoterC["Voter C, agy, opt-out, fail-soft<br/>Pool: Google AI Pro"]
     Builder["Builder, own worktree, never votes<br/>Pool: Cursor Models"]
   end
   Jev["Judge, third vendor, outside the executor<br/>Pool: metered key"]
@@ -32,6 +33,7 @@ flowchart TB
   Chair -->|"writes brief.md and runs the script"| Script
   Script -->|"launches print-only and sends the packet"| VoterA
   Script -->|"launches print-only and sends the same packet"| VoterB
+  Script -->|"launches print-only and sends the same packet"| VoterC
   Script -->|"sends the opinions and holds the key for this call only"| Jev
   Chair -->|"launches the builder only after the human says build"| Builder
   Builder -->|"commits to its worktree"| Chair
@@ -57,6 +59,7 @@ sequenceDiagram
   participant Script as conclave.sh
   participant A as Voter A
   participant B as Voter B
+  participant C as Voter C Argon
   participant Jev
   Human->>Chair: asks for a Conclave
   Chair->>Script: writes brief.md and runs a dry-run
@@ -69,10 +72,13 @@ sequenceDiagram
       Script->>A: sends the packet
     and same packet
       Script->>B: sends the same packet
+    and same packet
+      Script->>C: sends the same packet
     end
-    Note over A,B: Packet only. Claude and Grok are tool-less. Codex is a read-only sandbox. The working directory is outside the repo. Each voter sees only this packet.
+    Note over A,C: Packet only. Claude and Grok are tool-less. Codex is a read-only sandbox. Argon is agy, packet-first, and fail-soft. The working directory is outside the repo. Each voter sees only this packet.
     A-->>Script: returns an opinion
     B-->>Script: returns an opinion
+    C-->>Script: returns an opinion, or skips
     Script->>Script: writes opinion files and strips vendor names
     Script->>Jev: sends the opinions
     Jev-->>Script: returns one Decision
@@ -114,6 +120,8 @@ The brief reaches the voters, the kind decides what they see, and each path ends
 The chair fills `options.md` from the opinions. The human picks a row. A `judgment.md` file does not authorize building or posting.
 
 Ask mode is not a kind. `--ask TEXT`, or `--template NAME --input FILE`, puts one prompt to each named voter, tool-less, and writes the answers side by side with a blinded copy. It needs no brief and runs no ballot. A plain question takes its voters from `seat-usage --route ask`. Jev picks the effort lean and does not rank the answers. The `cold-read` and `tell-scan` templates are the writing checks. See `docs/review.md`, "Ask mode".
+
+Design and mixed seat Argon beside the lineup unless `CONCLAVE_ARGON=0` (`COUNCIL_ARGON` is the alias). `--voters` wins. Review and audit do not seat it. `agy` must be signed in. Do not opt in to data sharing, and do not mark the repo trusted in `agy`. The leg is fail-soft: a skip writes `voter-argon.skipped` and does not fail the run.
 
 Design and mixed can run a Muse Wonder shadow leg beside the voters when `CONCLAVE_MUSE_SHADOW=1` (`COUNCIL_MUSE_SHADOW` is the alias). It is packet-first and tool-less, does not vote, and is not given to the chair or to Jev. When the leg runs, a `subscription_usage` snapshot from `muse exec --json` is stored at `~/.cache/quartermaster/muse-usage.json`. A missing snapshot or a write error leaves the run unchanged. The default ballot is the lineup: every available leg. Design excludes nobody. Review and mixed exclude the diff's builder. Audit excludes the named author. A capped pool is not seated. A pool ahead of pace still votes. The lineup seats Muse unless a Muse window is capped. `--voters` replaces that list. `--voters ...,muse` names that leg.
 

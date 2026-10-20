@@ -202,6 +202,7 @@ run_dry() {
     -u CONCLAVE_CODEX_BIN -u COUNCIL_CODEX_BIN \
     -u CONCLAVE_SEAT_USAGE -u COUNCIL_SEAT_USAGE \
     HOME="$T/home" COUNCIL_SKIP_UPDATE_CHECK=1 COUNCIL_CODEX_BIN="$T/codex-old" \
+    CONCLAVE_ARGON=0 \
     bash "$1" "$id" --dry-run --repo "$T/target"
 }
 out_new="$(cd "$T/target" && run_dry "$ROOT/scripts/conclave.sh" 2>"$T/dry-new.err")"
@@ -225,6 +226,7 @@ out_only="$(cd "$T/target" && env -u COUNCIL_SKIP_UPDATE_CHECK -u COUNCIL_CODEX_
   -u CONCLAVE_SKIP_UPDATE_CHECK -u CONCLAVE_CODEX_BIN \
   -u CONCLAVE_SEAT_USAGE -u COUNCIL_SEAT_USAGE \
   HOME="$T/home" CONCLAVE_SKIP_UPDATE_CHECK=1 CONCLAVE_CODEX_BIN="$T/codex-new" \
+  CONCLAVE_ARGON=0 \
   bash "$ROOT/scripts/conclave.sh" "$id" --dry-run --repo "$T/target" 2>"$T/dry-only.err")"
 rc_only=$?
 check "dry-run with only CONCLAVE_* exits 0" "$rc_only" 0

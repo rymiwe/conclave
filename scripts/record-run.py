@@ -191,6 +191,8 @@ def _ran(args):
             rows.append(_voter(name, args.ran_opus_model or "opus", args.ran_opus_effort, effort_null=True))
         elif name == "muse":
             rows.append(_voter(name, args.ran_muse_model, args.ran_muse_effort))
+        elif name == "argon":
+            rows.append(_voter(name, args.ran_argon_model, args.ran_argon_effort))
         else:
             rows.append(_voter(name, "", ""))
     return {"kind": _text(args.kind), "difficulty": _text(args.difficulty), "voters": rows}
@@ -349,6 +351,8 @@ def main(argv):
     parser.add_argument("--ran-opus-effort", default="")
     parser.add_argument("--ran-muse-model", default="")
     parser.add_argument("--ran-muse-effort", default="")
+    parser.add_argument("--ran-argon-model", default="")
+    parser.add_argument("--ran-argon-effort", default="")
     parser.add_argument("--muse-status", default="")
     parser.add_argument("--muse-model", default="")
     parser.add_argument("--muse-decision", default="")

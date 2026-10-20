@@ -59,8 +59,8 @@ for src in "${srcs[@]}"; do
     s{\bgrok-(?:review-[\w-]+|\$USER|\$\(id -u\)|[a-z_][\w-]*(?=/))}{[leg-file]}gi;
     s{\.(?:grok|codex|claude|cursor)/}{.[cli]/}gi;
     s{\bcursor-agent\b}{[cli]}gi;
-    s{(?<![\w/.-])(?:claude|gpt|grok|muse)-[\w.-]*\w(?!\w)}{[model]}gi;
-    s{(?<![\w/.-])(?i:fable|opus|sonnet|haiku|claude|anthropic|grok|xai|x\.ai|astra|codex|openai|chatgpt|gpt|supergrok|typesafe|jev)(?!\w|\.\w)}{ $keep_lc{lc($&)} ? $& : "[model]" }ge;
+    s{(?<![\w/.-])(?:claude|gpt|grok|muse|gemini)-[\w.-]*\w(?!\w)}{[model]}gi;
+    s{(?<![\w/.-])(?i:fable|opus|sonnet|haiku|claude|anthropic|grok|xai|x\.ai|astra|codex|openai|chatgpt|gpt|supergrok|typesafe|jev|gemini|argon|google|antigravity|agy)(?!\w|\.\w)}{ $keep_lc{lc($&)} ? $& : "[model]" }ge;
     s{(?<![\w/.-])(?:Cursor|Sol|Muse|Meta)(?!\w|\.\w)}{ ($keep{$&} || $keep_lc{lc($&)}) ? $& : "[model]" }ge;
     s{(?<=\[model\]/)\w+}{[model]}g;
   ' "$dst"

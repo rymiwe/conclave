@@ -93,6 +93,21 @@ review_voters() {
   done
 }
 
+review_report_voters() {
+  # Voters that must produce a report. A skipped Argon stays in $VOTERS so
+  # the reason stays on disk, and is not required for the count or for blinding.
+  local v
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    if [ "$v" = argon ] && [ -n "${DIR:-}" ] && [ -s "$DIR/voter-argon.skipped" ]; then
+      continue
+    fi
+    printf '%s\n' "$v"
+  done <<EOF
+$(review_voters)
+EOF
+}
+
 review_resolve_repo() {
   local dir
   if [ -n "${FLAG_REPO:-}" ]; then
@@ -403,6 +418,9 @@ review_write_lineup() {
       printf 'effort: OpenAI %s; Anthropic and Grok high (native for OpenAI and Grok; Anthropic on the brief)\n' "$CODEX_EFFORT"
     fi
     printf 'voters: %s\n' "$VOTERS"
+    if voter_is_named argon; then
+      argon_unsupported_reason review
+    fi
     printf '%s\n' "$(ballot_source_line)"
     if [ -n "${BALLOT_EXCLUDED_WHY:-}" ]; then
       printf '%s\n' "$(excluded_line)"
@@ -415,6 +433,7 @@ review_write_lineup() {
     printf '%s\n' '|---|---|---|---|---|---|'
     while IFS= read -r v; do
       case "$v" in
+        argon) continue ;;
         claude)
           model="${CLAUDE_REVIEW_MODEL:-fable}"
           if [ "${CLAUDE_SKU:-fable}" = "opus" ]; then
@@ -1082,6 +1101,8 @@ review_build_worktrees() {
   while IFS= read -r v; do
     case "$v" in
       claude|opus|codex|grok|muse) review_make_leg "$ref" "$base" >/dev/null ;;
+      # Stay in $VOTERS. review_report_voters omits the skipped leg.
+      argon) note_argon_kind_skip ;;
       *) log_err "unknown voter '$v' (supported: claude, opus, codex, grok, muse)" ;;
     esac
   done <<EOF
@@ -2238,7 +2259,7 @@ review_count_reports() {
       REVIEW_REPORTS_MISSING="${REVIEW_REPORTS_MISSING:+$REVIEW_REPORTS_MISSING }$v"
     fi
   done <<EOF
-$(review_voters)
+$(review_report_voters)
 EOF
 }
 
@@ -2385,7 +2406,7 @@ review_blind() {
       review_note_fail "$v: no report to blind"
     fi
   done <<EOF
-$(review_voters)
+$(review_report_voters)
 EOF
   if [ "${#reports[@]}" -eq 0 ]; then
     review_note_fail "no reports to blind"
