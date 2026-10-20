@@ -779,6 +779,57 @@ def test_dry_run(tmp: Path):
         shutil.rmtree(ballot, ignore_errors=True)
 
 
+def test_open_stdin(tmp: Path, env_base):
+    """The caller's stdin stays open. The /usage preflight must not read it."""
+    d = tmp / "open-stdin"
+    packet = d / "packet"
+    bindir = d / "bin"
+    rec = d / "rec"
+    packet.mkdir(parents=True)
+    bindir.mkdir()
+    (packet / "PROMPT.md").write_text("Packet prompt for the leg.\n", encoding="utf-8")
+    stream = d / "stream.jsonl"
+    stream_file(stream, "SUCCESS", SCHEMA)
+    write_stub(bindir / "agy")
+    env = dict(env_base)
+    env.update({
+        "CONCLAVE_AGY": str(bindir / "agy"),
+        "AGY_RECORD": str(rec),
+        "AGY_STREAM": str(stream),
+        "AGY_USAGE_OUT": USAGE_OK,
+        "AGY_USAGE_RC": "0",
+        "AGY_RUN_RC": "0",
+    })
+    body = HEAD + f"""
+DIR={d}
+PACKET={packet}
+ERRORS_FILE={d}/errors.md
+: >"$ERRORS_FILE"
+KIND=design
+ARGON_EFFORT=low
+VOTERS=argon
+if ! argon_preflight; then echo preflight-failed; exit 1; fi
+run_argon
+[ -f "$DIR/voter-argon.ok" ] && echo leg-ok
+"""
+    # stdin is a pipe this test never writes to or closes until the end.
+    proc = subprocess.Popen(["bash", "-c", body], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, env=env)
+    try:
+        proc.wait(timeout=30)
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        timed_out = True
+    out = proc.stdout.read()
+    proc.stdin.close()
+    check(not timed_out, "open stdin: preflight does not block on the caller's stdin")
+    check(proc.returncode == 0 and "preflight-failed" not in out, f"open stdin: preflight passes ({out!r})")
+    check("leg-ok" in out, "open stdin: the leg still writes its ballot")
+
+
 def main():
     import tempfile
     home = Path(tempfile.mkdtemp(prefix="argon-home-"))
@@ -801,6 +852,7 @@ def main():
             test_judge_key_hidden(tmp, env)
             test_skipped_argon_not_required(tmp, env)
             test_dry_run(tmp)
+            test_open_stdin(tmp, env)
     finally:
         shutil.rmtree(home, ignore_errors=True)
     print(f"{passed} passed, {failed} failed")

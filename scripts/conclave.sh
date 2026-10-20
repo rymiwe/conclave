@@ -2029,7 +2029,7 @@ argon_preflight() {
     -u JEV_API_KEY \
     -u COUNCIL_SAVED_TYPESAFE \
     -u COUNCIL_SAVED_JEV \
-    "$bin" -p "/usage" >"$out" 2>"$err" || ec=$?
+    "$bin" -p "/usage" </dev/null >"$out" 2>"$err" || ec=$?
   if [ "$ec" -ne 0 ]; then
     if [ -s "$out" ]; then
       cat "$out"
