@@ -14,6 +14,10 @@ ROOT="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # routing advice (seat-usage --cached, seat-route-hook) stay silent for them.
 # Both names are exported. CONCLAVE_VOTER is the current name.
 conclave_export VOTER 1
+# cursor-agent legs fetch their plugin marketplace from git@github.com. Rewrite
+# GitHub SSH URLs to HTTPS for this run only. CONCLAVE_GITHUB_HTTPS=0 turns it off.
+# shellcheck disable=SC1091
+. "$ROOT/scripts/github-https-env.sh"
 cd "$ROOT"
 # shellcheck disable=SC1091
 . "$ROOT/scripts/review-kind.sh"

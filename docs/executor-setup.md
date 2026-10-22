@@ -48,6 +48,22 @@ there is a baseline before any Conclave runs.
 `cursor-agent` needs `-f` on an untrusted directory and `--output-format
 text` prints only the final message. `codex exec` needs `< /dev/null`.
 
+### GitHub over SSH
+
+`cursor-agent` fetches its plugin marketplace from
+`git@github.com:cursor/plugins.git` at the start of every call. Where
+`github.com:22` hangs, every `cursor-agent` call hangs before the model
+runs (seen 2026-10-21: the Fable voter leg and a cursor-agent chair).
+`GIT_CONFIG_COUNT` pairs from the caller do not help, because
+`cursor-agent` replaces them in its git children. `scripts/conclave.sh`
+sources `scripts/github-https-env.sh`, which points `GIT_CONFIG_GLOBAL`, for
+that run only, at a cached file that includes your global git config and
+rewrites GitHub SSH URLs to HTTPS. Launch a cursor-agent chair through
+`scripts/with-github-https.sh cursor-agent ...` for the same effect. Neither
+edits `~/.gitconfig` or `~/.ssh`. `CONCLAVE_GITHUB_HTTPS=0` turns it off.
+A push from such a process goes over HTTPS, so pass an HTTPS credential
+helper. Test: `scripts/test-github-https-env.sh`.
+
 ### HOME
 
 Every CLI keeps its login under `HOME`. The Bot desktop app can start the
