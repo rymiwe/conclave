@@ -58,11 +58,43 @@ check "an existing GIT_CONFIG_GLOBAL is included" \
 check "CONCLAVE_GITHUB_HTTPS=0 leaves SSH" "$ssh" \
   "$("${base_env[@]}" CONCLAVE_GITHUB_HTTPS=0 "$ROOT/scripts/with-github-https.sh" cursor-agent)"
 
-# 7. Nested use reuses the same file instead of stacking includes.
+# 7. Nested and repeated use reuse one regular file instead of stacking.
+one="$("${base_env[@]}" "$ROOT/scripts/with-github-https.sh" bash -c 'printf %s "$GIT_CONFIG_GLOBAL"')"; rc1=$?
 got="$("${base_env[@]}" "$ROOT/scripts/with-github-https.sh" "$ROOT/scripts/with-github-https.sh" \
-  bash -c 'printf %s "$GIT_CONFIG_GLOBAL"')"
-one="$("${base_env[@]}" "$ROOT/scripts/with-github-https.sh" bash -c 'printf %s "$GIT_CONFIG_GLOBAL"')"
+  bash -c 'printf %s "$GIT_CONFIG_GLOBAL"')"; rc2=$?
+check "wrapper runs succeed" "0 0" "$rc1 $rc2"
+check "wrapper exports a regular file" "file" "$([ -n "$one" ] && [ -f "$one" ] && echo file || echo "not-a-file:$one")"
 check "nested wrapper reuses one config file" "$one" "$got"
+check "one cache file after repeated and nested runs (home config)" "1" \
+  "$(grep -lF "path = \"$home/.gitconfig\"" "$work/cache/conclave"/gitconfig-github-https.* 2>/dev/null | wc -l | tr -d ' ')"
+
+# 7b. A relative GIT_CONFIG_GLOBAL is pinned to the caller's cwd.
+mkdir -p "$work/rel"
+printf '[user]\n\tname = Relative Global\n' >"$work/rel/rel.gitconfig"
+check "a relative GIT_CONFIG_GLOBAL is resolved against the caller's cwd" \
+  "https://github.com/cursor/plugins.git|Relative Global" \
+  "$(cd "$work/rel" && "${base_env[@]}" GIT_CONFIG_GLOBAL=rel.gitconfig "$ROOT/scripts/with-github-https.sh" cursor-agent)"
+
+# 7c. Paths with git-config special characters are quoted and escaped.
+odd="$work/odd dir #1; x\\y \"q\""
+mkdir -p "$odd"
+printf '[user]\n\tname = Odd Path\n' >"$odd/g.config"
+check "an include path with # ; backslash quote and spaces survives" \
+  "https://github.com/cursor/plugins.git|Odd Path" \
+  "$("${base_env[@]}" GIT_CONFIG_GLOBAL="$odd/g.config" "$ROOT/scripts/with-github-https.sh" cursor-agent)"
+
+# 7d. GIT_CONFIG_GLOBAL set but empty keeps meaning "no global config".
+check "an empty GIT_CONFIG_GLOBAL includes nothing" \
+  "https://github.com/cursor/plugins.git|" \
+  "$("${base_env[@]}" GIT_CONFIG_GLOBAL= "$ROOT/scripts/with-github-https.sh" cursor-agent)"
+
+# 7e. A non-file at the publish path is refused: the env is left alone.
+blocked_home="$work/home2"; mkdir -p "$blocked_home"
+printf '[user]\n\tname = Hermetic Tester\n' >"$blocked_home/.gitconfig"
+target="$("${base_env[@]}" HOME="$blocked_home" XDG_CACHE_HOME="$work/cache2" "$ROOT/scripts/with-github-https.sh" bash -c 'printf %s "$GIT_CONFIG_GLOBAL"')"
+rm -f "$target"; mkdir -p "$target"
+check "a directory at the publish path is not exported" "unset" \
+  "$("${base_env[@]}" HOME="$blocked_home" XDG_CACHE_HOME="$work/cache2" "$ROOT/scripts/with-github-https.sh" bash -c 'printf %s "${GIT_CONFIG_GLOBAL:-unset}"')"
 
 # 8. The real global config is never edited.
 check "~/.gitconfig unchanged" "$before" "$(cksum <"$home/.gitconfig")"

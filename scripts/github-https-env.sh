@@ -19,6 +19,14 @@
 #
 # CONCLAVE_GITHUB_HTTPS=0 (alias COUNCIL_GITHUB_HTTPS) turns this off.
 
+# Print one [include] path as a quoted, escaped git-config value.
+conclave_gitconfig_include() {
+  local v="$1"
+  v="${v//\\/\\\\}"
+  v="${v//\"/\\\"}"
+  printf '[include]\n\tpath = "%s"\n' "$v"
+}
+
 conclave_github_https_env() {
   local on="${CONCLAVE_GITHUB_HTTPS-${COUNCIL_GITHUB_HTTPS-1}}"
   [ "$on" = 0 ] && return 0
@@ -28,21 +36,34 @@ conclave_github_https_env() {
      && [ -f "$CONCLAVE_GITHUB_HTTPS_FILE" ]; then
     return 0
   fi
-  local dir file tmp sum
-  dir="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/conclave"
-  mkdir -p "$dir" 2>/dev/null || dir="${TMPDIR:-/tmp}"
+  local dir file tmp sum base
+  # A private, user-owned cache directory only. No shared /tmp fallback: if
+  # the directory is unusable, leave the environment as it was.
+  dir="${XDG_CACHE_HOME:-${HOME:-}/.cache}/conclave"
+  case "$dir" in /*) ;; *) return 0 ;; esac
+  mkdir -p -m 700 "$dir" 2>/dev/null || return 0
+  if [ -L "$dir" ] || [ ! -d "$dir" ] || [ ! -O "$dir" ]; then
+    return 0
+  fi
   tmp="$(mktemp "$dir/.gitconfig-github-https.XXXXXX")" || return 0
   {
     printf '# Written by conclave scripts/github-https-env.sh. Safe to delete.\n'
     # Git reads only GIT_CONFIG_GLOBAL when it is set, so include whatever
-    # git would have read as global config without this file.
-    if [ -n "${GIT_CONFIG_GLOBAL:-}" ]; then
-      printf '[include]\n\tpath = %s\n' "$GIT_CONFIG_GLOBAL"
+    # git would have read as global config without this file. Set but empty
+    # means "no global config": include nothing.
+    if [ "${GIT_CONFIG_GLOBAL+set}" = set ]; then
+      if [ -n "$GIT_CONFIG_GLOBAL" ]; then
+        base="$GIT_CONFIG_GLOBAL"
+        # Git resolves a relative GIT_CONFIG_GLOBAL against its cwd, an
+        # include against the including file. Pin it to this cwd.
+        case "$base" in /*) ;; *) base="$PWD/$base" ;; esac
+        conclave_gitconfig_include "$base"
+      fi
     else
       [ -n "${HOME:-}" ] && [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/git/config" ] \
-        && printf '[include]\n\tpath = %s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/git/config"
+        && conclave_gitconfig_include "${XDG_CONFIG_HOME:-$HOME/.config}/git/config"
       [ -n "${HOME:-}" ] && [ -f "$HOME/.gitconfig" ] \
-        && printf '[include]\n\tpath = %s\n' "$HOME/.gitconfig"
+        && conclave_gitconfig_include "$HOME/.gitconfig"
     fi
     printf '[url "https://github.com/"]\n'
     printf '\tinsteadOf = git@github.com:\n'
@@ -51,7 +72,13 @@ conclave_github_https_env() {
   # One file per distinct content, so repeated runs reuse it.
   sum="$(cksum <"$tmp" | cut -d' ' -f1)"
   file="$dir/gitconfig-github-https.$sum"
-  mv -f "$tmp" "$file" || { rm -f "$tmp"; return 0; }
+  # Never publish into or onto something that is not a regular file.
+  if [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then
+    rm -f "$tmp"
+    return 0
+  fi
+  mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 0; }
+  [ -f "$file" ] || return 0
   export GIT_CONFIG_GLOBAL="$file"
   export CONCLAVE_GITHUB_HTTPS_FILE="$file"
 }
