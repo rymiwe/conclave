@@ -217,13 +217,14 @@ printf 'audit=%s\\n' "$(argon_unsupported_reason audit)"
     check("explicit=claude,codex" in out, "--voters without argon does not seat it")
     check("named=claude,argon" in out, "--voters argon seats it even when the default is off")
     check("review=claude,codex,argon" in out, "review keeps a named argon so the skip can be recorded")
-    reason = "argon: kind review is not supported; Argon votes on design and mixed only"
+    reason = "argon: kind review seats this leg when the lineup or --voters names it"
     check(f"reason={reason}" in out, "review skip reason is the recorded sentence")
     check("audit=argon: kind audit is not supported; Argon votes on design and mixed only" in out,
           "audit skip reason names audit")
-    for name in ("review-kind.sh", "audit-kind.sh"):
-        text = (SCRIPTS / name).read_text(encoding="utf-8")
-        check("note_argon_kind_skip" in text and "argon) continue" in text, f"{name} skips argon")
+    audit = (SCRIPTS / "audit-kind.sh").read_text(encoding="utf-8")
+    check("note_argon_kind_skip" in audit and "argon) continue" in audit, "audit skips argon")
+    review = (SCRIPTS / "review-kind.sh").read_text(encoding="utf-8")
+    check("review_run_argon" in review and "argon) continue" not in review, "review launches a seated argon")
 
 
 def test_happy(tmp: Path, env_base):
@@ -406,7 +407,7 @@ echo "---errors---"
 cat "$ERRORS_FILE"
 """, env)
     text = proc.stdout
-    check(text.startswith("argon: skipped\nargon: kind review is not supported; Argon votes on design and mixed only"),
+    check(text.startswith("argon: skipped\nargon: kind review seats this leg when the lineup or --voters names it"),
           f"review skip file is the reason ({text})")
     check(text.count("argon: kind review") == 2, "a second note does not log twice")
 
@@ -641,11 +642,11 @@ fi
           f"review count omits skipped argon ({out} {proc.stderr[-300:]})")
     check("blind-ok" in out and "fail=0" in out and "legs=2" in out and "key-clean" in out,
           f"review blinds the other legs ({out})")
-    check("argon: kind review is not supported" in out and "skip<<" in out,
+    check("argon: kind review seats this leg" in out and "skip<<" in out,
           f"review keeps the skip reason ({out})")
     errors = (tmp / "count-review" / "errors.md").read_text(encoding="utf-8")
     check("not judgeable" not in errors and "no report to blind" not in errors
-          and "argon: kind review is not supported" in errors and "argon-not-in-check" in out,
+          and "argon: kind review seats this leg" in errors and "argon-not-in-check" in out,
           f"review does not fail because of argon ({errors!r} {out})")
 
     proc = run_kind("audit", """
@@ -771,10 +772,11 @@ def test_dry_run(tmp: Path):
              "--repo", str(target), "--whole", "--voters", "claude,codex,argon"],
             text=True, capture_output=True, env=env, cwd=str(target))
         check(proc.returncode == 0, f"review dry-run exits 0 ({proc.stderr[-400:]})")
-        sentence = "argon: kind review is not supported; Argon votes on design and mixed only"
-        check(sentence in proc.stdout, f"review dry-run prints the skip ({proc.stdout})")
+        check("voters: claude,codex,argon" in proc.stdout, f"review dry-run seats a named argon ({proc.stdout})")
+        check("kind review is not supported" not in proc.stdout, f"review dry-run does not skip argon ({proc.stdout})")
         calls = (rec2 / "calls").read_text() if (rec2 / "calls").is_file() else ""
-        check(calls == "", f"review dry-run does not call agy ({calls!r})")
+        check("--version" in calls and "-p=" not in calls and "--model" not in calls,
+              f"review dry-run reads the agy version and does not launch ({calls!r})")
     finally:
         shutil.rmtree(ballot, ignore_errors=True)
 
@@ -830,6 +832,43 @@ run_argon
     check("leg-ok" in out, "open stdin: the leg still writes its ballot")
 
 
+def test_review_keeps_a_report_without_design_headings(tmp: Path, env_base):
+    d = tmp / "review-report"
+    packet = d / "packet"
+    bindir = d / "bin"
+    packet.mkdir(parents=True)
+    bindir.mkdir()
+    (packet / "PROMPT.md").write_text("Review the change.\n", encoding="utf-8")
+    stream = d / "stream.jsonl"
+    stream_file(stream, "SUCCESS", "VERDICT: approve\nNo findings.\n")
+    write_stub(bindir / "agy")
+    env = dict(env_base)
+    env.update({
+        "CONCLAVE_AGY": str(bindir / "agy"),
+        "AGY_RECORD": str(d / "rec"),
+        "AGY_STREAM": str(stream),
+        "AGY_USAGE_OUT": USAGE_OK,
+        "AGY_USAGE_RC": "0",
+        "AGY_RUN_RC": "0",
+    })
+    proc = bash(HEAD + f"""
+DIR={d}
+PACKET={packet}
+ERRORS_FILE={d}/errors.md
+: >"$ERRORS_FILE"
+KIND=review
+ARGON_EFFORT=high
+run_argon
+if [ -s "$DIR/voter-argon.skipped" ]; then echo skipped; else echo kept; fi
+""", env)
+    body = (d / "voter-argon.md").read_text(encoding="utf-8") if (d / "voter-argon.md").is_file() else ""
+    check("kept" in proc.stdout and body.startswith("VERDICT: approve") and not (d / "voter-argon.skipped").exists(),
+          f"review argon keeps a report without design headings ({proc.stdout!r} {body!r})")
+    review = (SCRIPTS / "review-kind.sh").read_text(encoding="utf-8")
+    check("alloc_packet_tmpdir" in review and 'packet="$DIR/voter-argon.packet"' not in review,
+          "review argon packet is created outside the repo")
+
+
 def main():
     import tempfile
     home = Path(tempfile.mkdtemp(prefix="argon-home-"))
@@ -842,6 +881,7 @@ def main():
             test_models(env)
             test_seat(env)
             test_happy(tmp, env)
+            test_review_keeps_a_report_without_design_headings(tmp, env)
             test_skips(tmp, env)
             test_kind_skip_file(tmp, env)
             test_blind(tmp, env)

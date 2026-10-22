@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One sentence for when review adds the coverage seat.
+"""One sentence for how kind review seats its voters.
 
 The condition is apply_kind_voters in scripts/conclave.sh.
   python3 scripts/ballot_rules.py --write    # refresh the four copies
@@ -11,7 +11,11 @@ import sys
 from pathlib import Path
 
 _OPUS = "Opus"
-SENTENCE = "Review adds " + _OPUS + " native unless Anthropic built the diff."
+SENTENCE = (
+    "Review seats two voters from seat-usage --route lineup --kind review, "
+    "on two vendor families, neither the builder's, and falls back to Fable and Astra "
+    "when that route is missing, fails, or asks."
+)
 START = "<!-- ballot-rule:start -->"
 END = "<!-- ballot-rule:end -->"
 BLOCK = START + SENTENCE + END

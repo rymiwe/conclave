@@ -85,13 +85,17 @@ rejected pairs.
   (`SEAT_USAGE_RUNS` overrides the path). One line at the start of a real
   ballot and one at exit, joined by `run_id`. The review line is a later
   call, because that part does not exist when the run ends.   The script calls
-  `seat-usage --route lineup --kind KIND` for the default ballot. Review and
-  mixed add `--author` only when the brief has `author:`. Audit does the same,
-  and excludes nobody when that header is absent. Families map to legs: fable
-  to claude, astra to codex, grok, muse. <!-- ballot-rule:start -->Review adds Opus native unless Anthropic built the diff.<!-- ballot-rule:end -->
-  `--voters` still wins. When that call is missing, fails, or returns mode ask,
-  the script uses the fixed default (Fable and Astra; review also adds Opus)
-  and says so in the lineup and in `routing.md`. The same places name the
+  `seat-usage --route lineup --kind KIND` for the default ballot. Mixed
+  adds `--author` only when the brief has `author:`. Audit does the same,
+  and excludes nobody when that header is absent. Kind review also passes
+  `--builder-vendor` from that author, plus `--ballot` and `--repo`, so the
+  pick log records the ballot. Families map to legs: fable to claude (or
+  cursor-fable), astra to codex, grok, wonder and wonder-full to muse,
+  argon to the agy leg. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, neither the builder's, and falls back to Fable and Astra when that route is missing, fails, or asks.<!-- ballot-rule:end -->
+  `--voters` still wins. On review, `fable` and `astra` in that list mean
+  claude and codex. When the call is missing, fails, or returns mode ask,
+  the script uses Fable and Astra, warns on review, and says so in the lineup
+  and in `routing.md`. The same places name the
   excluded vendor and why when the router returns one.
   It does not stop the run. Ask mode calls `--route ask` and stays at two
   voters by headroom. The runs record still leaves lineup, host, usage,
