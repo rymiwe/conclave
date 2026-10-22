@@ -13,8 +13,8 @@ import sys
 from dataclasses import dataclass
 from typing import Literal
 
-Family = Literal["fable", "astra", "grok", "muse", "wonder-full"]
-Seat = Literal["claude", "cursor", "chatgpt", "grok", "muse"]
+Family = Literal["fable", "astra", "grok", "muse", "wonder-full", "wonder", "argon"]
+Seat = Literal["claude", "cursor", "chatgpt", "grok", "muse", "google"]
 
 VOTERS = {
     ("fable", "claude"): "claude",
@@ -23,6 +23,8 @@ VOTERS = {
     ("grok", "grok"): "grok",
     ("muse", "muse"): "muse",
     ("wonder-full", "muse"): "muse",
+    ("wonder", "muse"): "muse",
+    ("argon", "google"): "argon",
 }
 
 

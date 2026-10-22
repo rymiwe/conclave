@@ -27,7 +27,7 @@ cd "$ROOT"
 . "$ROOT/scripts/ask-mode.sh"
 
 DEFAULT_VOTERS="claude,codex"
-# No --voters: the lineup seats the ballot. Review adds opus. See apply_kind_voters.
+# No --voters: the lineup seats the ballot. Kind review uses --kind review. See apply_kind_voters.
 # A missing router, a failed run, or mode ask keeps the fixed default.
 VOTERS="$DEFAULT_VOTERS"
 VOTERS_EXPLICIT=0
@@ -406,12 +406,14 @@ Options:
   --voters LIST          Default ballot is seat-usage --route lineup.
                          Families map to claude, codex, grok, and muse.
                          Design and mixed also seat argon unless CONCLAVE_ARGON=0
-                         (COUNCIL_ARGON is the alias). Review and audit do not.
-                         Review adds the opus coverage leg. A missing router,
-                         a failed run, or mode ask uses claude,codex
-                         (review: claude,opus,codex) and the lineup says so.
-                         This list replaces that ballot. Argon votes only when
-                         the list names it. opus is review-only
+                         (COUNCIL_ARGON is the alias). Audit does not.
+                         Kind review takes the two voters from
+                         seat-usage --route lineup --kind review.
+                         fable and astra in this list mean claude and codex.
+                         A missing router, a failed run, or mode ask uses
+                         claude,codex (Fable and Astra) and the lineup says so.
+                         This list replaces that ballot. Argon votes when the
+                         list or the review route names it. opus is review-only
                          unless kind is audit and --voters names it.
   --record-review        Append the review phase for an existing run and exit.
                          Requires --run-id and --review-file. Does not launch voters.
@@ -1242,11 +1244,56 @@ resolve_routing() {
 }
 
 ballot_use_fixed_default() {
-  # Today's defaults. Review includes the coverage leg. Other kinds do not.
-  if [ "$KIND" = "review" ]; then
-    VOTERS="claude,opus,codex"
-  else
-    VOTERS="$DEFAULT_VOTERS"
+  # Fable and Astra. Review uses the same pair when the route cannot seat two.
+  VOTERS="$DEFAULT_VOTERS"
+}
+
+review_author_vendor() {
+  # Family from the brief author: header, as a seat-usage vendor.
+  case "$1" in
+    fable|opus) printf 'anthropic\n' ;;
+    astra) printf 'openai\n' ;;
+    grok) printf 'xai\n' ;;
+    muse|wonder|wonder-full) printf 'meta\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+review_map_voter() {
+  # --voters fable,astra is the same override as claude,codex. Review only.
+  case "$1" in
+    fable) printf 'claude\n' ;;
+    astra) printf 'codex\n' ;;
+    wonder|wonder-full) printf 'muse\n' ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+review_alias_voters() {
+  [ "${KIND:-}" = "review" ] || return 0
+  [ "${VOTERS_EXPLICIT:-0}" -eq 1 ] || return 0
+  local out="" v mapped
+  local IFS=','
+  for v in $VOTERS; do
+    v="$(printf '%s' "$v" | tr -d '[:space:]')"
+    [ -n "$v" ] || continue
+    mapped="$(review_map_voter "$v")"
+    out="${out:+$out,}$mapped"
+  done
+  VOTERS="$out"
+}
+
+note_review_route_fallback() {
+  # Stderr always. errors.md on a real run. Dry-run leaves that file alone.
+  # review_write_lineup copies the same line into lineup.md.
+  [ "${KIND:-}" = "review" ] || return 0
+  [ "${BALLOT_SOURCE:-}" = "fallback" ] || return 0
+  local msg
+  msg="warning: review route unavailable (${BALLOT_SOURCE_NOTE:-seat-usage unavailable}); using Fable and Astra"
+  BALLOT_ROUTE_WARNING="$msg"
+  printf '%s\n' "$msg" >&2
+  if [ "${DRY_RUN:-0}" != 1 ] && [ -n "${ERRORS_FILE:-}" ]; then
+    printf '%s\n' "$msg" >>"$ERRORS_FILE"
   fi
 }
 
@@ -1292,17 +1339,37 @@ load_lineup_ballot() {
     BALLOT_SOURCE=fallback
     BALLOT_SOURCE_NOTE="seat-usage missing"
     ballot_use_fixed_default
+    note_review_route_fallback
     return 0
   fi
   args=(--route lineup --json --kind "$KIND")
   if [ -n "${HEADER_AUTHOR:-}" ]; then
     args+=(--author "$HEADER_AUTHOR")
   fi
+  if [ "$KIND" = "review" ]; then
+    local vendor=""
+    if [ -z "${REPO:-}" ] && [ -n "${FLAG_REPO:-}" ]; then
+      review_resolve_repo
+    fi
+    if [ -n "${HEADER_AUTHOR:-}" ]; then
+      vendor="$(review_author_vendor "$HEADER_AUTHOR" || true)"
+      if [ -n "$vendor" ]; then
+        args+=(--builder-vendor "$vendor")
+      fi
+    fi
+    if [ -n "${ID:-}" ]; then
+      args+=(--ballot "$ID")
+    fi
+    if [ -n "${REPO:-}" ]; then
+      args+=(--repo "$REPO")
+    fi
+  fi
   raw="$("$bin" "${args[@]}" 2>/dev/null)" || raw=""
   if [ -z "$raw" ]; then
     BALLOT_SOURCE=fallback
     BALLOT_SOURCE_NOTE="seat-usage failed"
     ballot_use_fixed_default
+    note_review_route_fallback
     return 0
   fi
   parsed="$(lineup_parse_voters "$raw" 2>/dev/null)" || parsed=""
@@ -1364,12 +1431,14 @@ load_lineup_ballot() {
       BALLOT_SOURCE=fallback
       BALLOT_SOURCE_NOTE="seat-usage asked"
       ballot_use_fixed_default
+      note_review_route_fallback
       return 0
       ;;
   esac
   BALLOT_SOURCE=fallback
   BALLOT_SOURCE_NOTE="seat-usage failed"
   ballot_use_fixed_default
+  note_review_route_fallback
 }
 
 review_add_opus_leg() {
@@ -1402,13 +1471,10 @@ apply_kind_voters() {
   BALLOT_EXCLUDED_WHY=""
   BALLOT_DOWNGRADE_WHY=""
   LINEUP_DOWNGRADED_EFFORT=""
+  review_alias_voters
   if [ "$VOTERS_EXPLICIT" -eq 0 ]; then
     load_lineup_ballot
-    # Opus is Anthropic too, so it sits out when Anthropic built the diff.
-    if [ "$KIND" = "review" ] && [ "$BALLOT_SOURCE" = lineup ] \
-      && [ "$BALLOT_EXCLUDED_NAME" != Anthropic ]; then
-      review_add_opus_leg
-    fi
+    # Review voters are the route's two seats. Opus joins only when --voters names it.
     if [ "$CLAUDE_SKU" = cursor-fable ] && [ -z "${CURSOR_FABLE:-}" ] \
       && [ -z "${BALLOT_DOWNGRADE_WHY:-}" ]; then
       BALLOT_DOWNGRADE_WHY="Cursor Fable id cannot be resolved: approve a downgraded leg"

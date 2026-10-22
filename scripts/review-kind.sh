@@ -2,9 +2,10 @@
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/conclave-env.sh"
 # Phase 0 (--dry-run): lineup, target, diff shape. Writes only under preview/.
-# Phase 1 (the run): worktrees, Fable on the reviewer brief, Opus native as a
-# coverage leg (skipped when the claude leg is already Opus native), other
-# voters native, model check, read-only compare, blind.
+# Phase 1 (the run): worktrees for the route's voters (or --voters). Fable on
+# the reviewer brief when seated, Opus native only when --voters names it
+# (skipped when the claude leg is already Opus native), Argon packet-first
+# when seated, Muse with contributor mode off, model check, read-only compare, blind.
 # Phase 2 is the chair (findings.json). Phase 3 is jev-judge.py --findings.
 # Phase 4 is the chair's comments; scripts/check-comment-links.py checks links.
 # Judgment lives in docs/review.md. This file is the mechanical part.
@@ -396,6 +397,7 @@ review_vendor_name() {
     codex) printf 'OpenAI\n' ;;
     grok) printf 'xAI\n' ;;
     muse) printf 'Meta\n' ;;
+    argon) printf 'Google\n' ;;
     *) printf '%s\n' "$1" ;;
   esac
 }
@@ -418,10 +420,10 @@ review_write_lineup() {
       printf 'effort: OpenAI %s; Anthropic and Grok high (native for OpenAI and Grok; Anthropic on the brief)\n' "$CODEX_EFFORT"
     fi
     printf 'voters: %s\n' "$VOTERS"
-    if voter_is_named argon; then
-      argon_unsupported_reason review
-    fi
     printf '%s\n' "$(ballot_source_line)"
+    if [ -n "${BALLOT_ROUTE_WARNING:-}" ]; then
+      printf '%s\n' "$BALLOT_ROUTE_WARNING"
+    fi
     if [ -n "${BALLOT_EXCLUDED_WHY:-}" ]; then
       printf '%s\n' "$(excluded_line)"
     fi
@@ -433,7 +435,6 @@ review_write_lineup() {
     printf '%s\n' '|---|---|---|---|---|---|'
     while IFS= read -r v; do
       case "$v" in
-        argon) continue ;;
         claude)
           model="${CLAUDE_REVIEW_MODEL:-fable}"
           if [ "${CLAUDE_SKU:-fable}" = "opus" ]; then
@@ -485,6 +486,13 @@ review_write_lineup() {
           meth="brief"
           pool="Muse"
           pace="$(review_pace_cell muse)"
+          ;;
+        argon)
+          model="$(argon_model_id)"
+          cli="agy ($(review_cli_version agy))"
+          meth="packet"
+          pool="Google AI Pro"
+          pace="pace unknown"
           ;;
         *)
           model="?"
@@ -1100,10 +1108,8 @@ review_build_worktrees() {
   local v
   while IFS= read -r v; do
     case "$v" in
-      claude|opus|codex|grok|muse) review_make_leg "$ref" "$base" >/dev/null ;;
-      # Stay in $VOTERS. review_report_voters omits the skipped leg.
-      argon) note_argon_kind_skip ;;
-      *) log_err "unknown voter '$v' (supported: claude, opus, codex, grok, muse)" ;;
+      claude|opus|codex|grok|muse|argon) review_make_leg "$ref" "$base" >/dev/null ;;
+      *) log_err "unknown voter '$v' (supported: claude, opus, codex, grok, muse, argon)" ;;
     esac
   done <<EOF
 $(review_voters)
@@ -2007,6 +2013,31 @@ review_run_grok() {
   return 1
 }
 
+review_run_argon() {
+  # $1 wt. Packet-first, same as the design argon leg. Contributor mode is not a Muse flag here.
+  local wt="$1" packet
+  local brief="$DIR/voter-argon.brief.md"
+  if [ ! -s "$brief" ]; then
+    echo "argon: reviewer brief missing" >"$DIR/voter-argon.fail"
+    return 1
+  fi
+  packet="$DIR/voter-argon.packet"
+  rm -rf "$packet"
+  mkdir -p "$packet"
+  {
+    cat "$brief"
+    printf '\n## The change under review\n\n'
+    printf '```diff\n'
+    git -C "$wt" diff HEAD
+    printf '```\n'
+  } >"$packet/PROMPT.md" || {
+    echo "argon: cannot write packet prompt" >"$DIR/voter-argon.fail"
+    return 1
+  }
+  PACKET="$packet"
+  run_argon
+}
+
 review_run_muse() {
   # $1 wt, $2 leg tmp, $3 web: yes or no. Reviewer brief, read tools only.
   # TMPDIR is the leg tmp: Muse refuses one inside its workspace.
@@ -2097,7 +2128,7 @@ review_launch() {
   sleep 1
   while IFS= read -r v; do
     case "$v" in
-      claude|opus|codex|grok|muse) ;;
+      claude|opus|codex|grok|muse|argon) ;;
       *) continue ;;
     esac
     idx=$((idx + 1))
@@ -2145,6 +2176,10 @@ review_launch() {
         fi
         tmp="$(review_leg_tmp "$wt")"
         council_bg review_timed_leg muse review_run_muse "$wt" "$tmp" no
+        pids="$pids $!"
+        ;;
+      argon)
+        council_bg review_timed_leg argon review_run_argon "$wt"
         pids="$pids $!"
         ;;
     esac
@@ -2514,6 +2549,10 @@ review_dry_run() {
     review_write_muse_brief "$DIR/preview/voter-muse.brief.md" \
       || die "$REVIEW_BRIEF_REJECT"
   fi
+  if voter_is_named argon; then
+    review_write_muse_brief "$DIR/preview/voter-argon.brief.md" \
+      || die "$REVIEW_BRIEF_REJECT"
+  fi
   printf 'Dry-run review lineup: tmp/council/%s/preview/lineup.md (ballot untouched)\n' "$ID"
   cat "$DIR/preview/lineup.md"
 }
@@ -2594,6 +2633,10 @@ review_run() {
   fi
   if voter_is_named muse; then
     review_write_muse_brief "$DIR/voter-muse.brief.md" \
+      || die "$REVIEW_BRIEF_REJECT"
+  fi
+  if voter_is_named argon; then
+    review_write_muse_brief "$DIR/voter-argon.brief.md" \
       || die "$REVIEW_BRIEF_REJECT"
   fi
   review_build_and_prove

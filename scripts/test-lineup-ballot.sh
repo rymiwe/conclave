@@ -125,6 +125,7 @@ apply() { # $1 kind, $2 claude sku
   BALLOT_SOURCE=""
   BALLOT_SOURCE_NOTE=""
   OPUS_LEG_SKIPPED=0
+  BALLOT_ROUTE_WARNING=""
   CLAUDE_SKU="${2:-fable}"
   apply_kind_voters
 }
@@ -152,25 +153,25 @@ check "audit names the lineup" source_is "ballot: lineup"
 
 : >"$SEAT_ARGV"
 apply review
-check "review adds the coverage leg" [ "$VOTERS" = "claude,opus,codex,grok,muse" ]
-check "review passes its kind" grep -qx -- '--route lineup --json --kind review' "$SEAT_ARGV"
+check "review takes the route's voters" [ "$VOTERS" = "claude,codex,grok,muse" ]
+check "review passes its kind" grep -qx -- '--route lineup --json --kind review --ballot '"$ID" "$SEAT_ARGV"
 check "review defaults the author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
 check "review names the lineup" source_is "ballot: lineup"
-check "review keeps the coverage leg" [ "$OPUS_LEG_SKIPPED" -eq 0 ]
+check "review does not add opus" [ "$OPUS_LEG_SKIPPED" -eq 0 ]
 
 use_router "$work/no-fable.json" 0
 apply review
-check "review seats opus when fable is absent" [ "$VOTERS" = "opus,codex,grok,muse" ]
+check "review keeps the route when fable is absent" [ "$VOTERS" = "codex,grok,muse" ]
 
 use_router "$work/anthropic-built.json" 0
 apply review
-check "review drops opus when Anthropic built the diff" [ "$VOTERS" = "codex,grok,muse" ]
+check "review keeps the route when Anthropic built the diff" [ "$VOTERS" = "codex,grok,muse" ]
 check "review names Anthropic as sitting out" [ "$(excluded_line)" = "excluded: Anthropic (Opus built the diff)" ]
 
 use_router "$work/pair.json" 0
 apply review opus
-check "opus sku drops the coverage leg" [ "$VOTERS" = "claude,codex" ]
-check "opus sku records the skip" [ "$OPUS_LEG_SKIPPED" -eq 1 ]
+check "opus sku keeps the route pair" [ "$VOTERS" = "claude,codex" ]
+check "opus sku does not invent a coverage leg" [ "$OPUS_LEG_SKIPPED" -eq 0 ]
 check "opus sku still came from the lineup" source_is "ballot: lineup"
 
 use_router "$work/ask.json" 0
@@ -199,8 +200,37 @@ check "missing router uses the fixed pair" [ "$VOTERS" = "claude,codex" ]
 check "missing router says so" source_is "ballot: fallback (seat-usage missing; fixed default)"
 
 apply review
-check "missing router keeps the review default" [ "$VOTERS" = "claude,opus,codex" ]
+check "missing router keeps Fable and Astra" [ "$VOTERS" = "claude,codex" ]
 check "missing review router says so" source_is "ballot: fallback (seat-usage missing; fixed default)"
+check "missing review router warns" [ "$BALLOT_ROUTE_WARNING" = "warning: review route unavailable (seat-usage missing); using Fable and Astra" ]
+
+use_router "$work/ask.json" 0
+apply review
+check "ask review uses Fable and Astra" [ "$VOTERS" = "claude,codex" ]
+check "ask review says so" source_is "ballot: fallback (seat-usage asked; fixed default)"
+check "ask review warns" [ "$BALLOT_ROUTE_WARNING" = "warning: review route unavailable (seat-usage asked); using Fable and Astra" ]
+
+use_router "$work/all.json" 0
+KIND=review
+VOTERS="fable,astra"
+VOTERS_EXPLICIT=1
+rm -f "$SEAT_CALLED"
+apply_kind_voters
+check "voters fable,astra maps onto the legs" [ "$VOTERS" = "claude,codex" ]
+check "voters override skips the router" not_called
+
+python3 - "$work/review-route.json" <<'PY'
+import json, sys
+doc = [{"role": "lineup", "mode": "default", "reason": "stub", "lineup": {"voters": [
+    {"family": "wonder", "seat": "muse", "effort": "high"},
+    {"family": "argon", "seat": "google", "effort": "high"},
+]}}]
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    json.dump(doc, fh)
+PY
+use_router "$work/review-route.json" 0
+apply review
+check "review maps wonder and argon" [ "$VOTERS" = "muse,argon" ]
 
 use_router "$work/all.json" 1
 apply mixed
@@ -342,8 +372,8 @@ printf '%s\n' 'kind: review' 'difficulty: low' '' '# Goal' 'Check the change.' >
 capture "$ID" --dry-run --repo "$work/target" --whole
 check "review dry-run exits 0" [ "$dry_ec" -eq 0 ]
 check "review lineup names the source" grep -qx 'ballot: lineup' "$DIR/preview/lineup.md"
-check "review lineup adds opus" grep -qx 'voters: claude,opus,codex,grok,muse' "$DIR/preview/lineup.md"
-check "review dry-run prints that lineup" grep -qx 'voters: claude,opus,codex,grok,muse' <<<"$out"
+check "review lineup uses the route" grep -qx 'voters: claude,codex,grok,muse' "$DIR/preview/lineup.md"
+check "review dry-run prints that lineup" grep -qx 'voters: claude,codex,grok,muse' <<<"$out"
 
 rm -rf "$DIR/preview"
 printf '%s\n' 'A short page.' >"$work/page.md"
@@ -364,6 +394,17 @@ check "fallback dry-run says so" grep -qx '  ballot: fallback (seat-usage missin
 check "fallback routing.md says so" grep -qx 'ballot: fallback (seat-usage missing; fixed default)' "$DIR/preview/routing.md"
 check "fallback routing.md keeps the pair" grep -qx 'voters: claude,codex' "$DIR/preview/routing.md"
 
+rm -rf "$DIR/preview"
+printf '%s\n' 'kind: review' 'difficulty: low' '' '# Goal' 'Check the change.' >"$DIR/brief.md"
+CONCLAVE_SEAT_USAGE="$work/missing-seat-usage"
+export CONCLAVE_SEAT_USAGE
+warn_ec=0
+warn_out="$(dry "$ID" --dry-run --repo "$work/target" --whole 2>&1)" || warn_ec=$?
+check "review fallback dry-run exits 0" [ "$warn_ec" -eq 0 ]
+check "review fallback warns on stderr" grep -qx 'warning: review route unavailable (seat-usage missing); using Fable and Astra' <<<"$warn_out"
+check "review fallback lineup warns" grep -qx 'warning: review route unavailable (seat-usage missing); using Fable and Astra' "$DIR/preview/lineup.md"
+check "review fallback keeps Fable and Astra" grep -qx 'voters: claude,codex' "$DIR/preview/lineup.md"
+
 # The stub names who sat out. The script prints that on the lineup and in routing.md.
 python3 - "$work/sat.json" <<'PY'
 import json, sys
@@ -383,10 +424,10 @@ use_router "$work/sat.json" 0
 : >"$SEAT_ARGV"
 capture "$ID" --dry-run --repo "$work/target" --whole
 check "author review exits 0" [ "$dry_ec" -eq 0 ]
-check "author review passes the family" grep -qx -- '--route lineup --json --kind review --author grok' "$SEAT_ARGV"
+check "author review passes the family" grep -qx -- '--route lineup --json --kind review --author grok --builder-vendor xai --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
 check "author review prints the exclusion" grep -qx 'excluded: xAI (Grok built the diff)' "$DIR/preview/lineup.md"
 check "author review prints it on stdout" grep -qx 'excluded: xAI (Grok built the diff)' <<<"$out"
-check "author review keeps fable and drops nothing the stub seated" grep -qx 'voters: claude,opus,codex,muse' "$DIR/preview/lineup.md"
+check "author review keeps the stub's voters" grep -qx 'voters: claude,codex,muse' "$DIR/preview/lineup.md"
 
 python3 - "$work/open.json" <<'PY'
 import json, sys

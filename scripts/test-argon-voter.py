@@ -221,9 +221,10 @@ printf 'audit=%s\\n' "$(argon_unsupported_reason audit)"
     check(f"reason={reason}" in out, "review skip reason is the recorded sentence")
     check("audit=argon: kind audit is not supported; Argon votes on design and mixed only" in out,
           "audit skip reason names audit")
-    for name in ("review-kind.sh", "audit-kind.sh"):
-        text = (SCRIPTS / name).read_text(encoding="utf-8")
-        check("note_argon_kind_skip" in text and "argon) continue" in text, f"{name} skips argon")
+    audit = (SCRIPTS / "audit-kind.sh").read_text(encoding="utf-8")
+    check("note_argon_kind_skip" in audit and "argon) continue" in audit, "audit skips argon")
+    review = (SCRIPTS / "review-kind.sh").read_text(encoding="utf-8")
+    check("review_run_argon" in review and "argon) continue" not in review, "review launches a seated argon")
 
 
 def test_happy(tmp: Path, env_base):
@@ -771,10 +772,11 @@ def test_dry_run(tmp: Path):
              "--repo", str(target), "--whole", "--voters", "claude,codex,argon"],
             text=True, capture_output=True, env=env, cwd=str(target))
         check(proc.returncode == 0, f"review dry-run exits 0 ({proc.stderr[-400:]})")
-        sentence = "argon: kind review is not supported; Argon votes on design and mixed only"
-        check(sentence in proc.stdout, f"review dry-run prints the skip ({proc.stdout})")
+        check("voters: claude,codex,argon" in proc.stdout, f"review dry-run seats a named argon ({proc.stdout})")
+        check("kind review is not supported" not in proc.stdout, f"review dry-run does not skip argon ({proc.stdout})")
         calls = (rec2 / "calls").read_text() if (rec2 / "calls").is_file() else ""
-        check(calls == "", f"review dry-run does not call agy ({calls!r})")
+        check("--version" in calls and "-p=" not in calls and "--model" not in calls,
+              f"review dry-run reads the agy version and does not launch ({calls!r})")
     finally:
         shutil.rmtree(ballot, ignore_errors=True)
 
