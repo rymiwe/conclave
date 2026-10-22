@@ -24,6 +24,7 @@ conclave_gitconfig_include() {
   local v="$1"
   v="${v//\\/\\\\}"
   v="${v//\"/\\\"}"
+  v="${v//$'\n'/\\n}"
   printf '[include]\n\tpath = "%s"\n' "$v"
 }
 
@@ -45,6 +46,10 @@ conclave_github_https_env() {
   if [ -L "$dir" ] || [ ! -d "$dir" ] || [ ! -O "$dir" ]; then
     return 0
   fi
+  # mkdir -m does not tighten an existing directory. Ours, so make it private,
+  # and give up if that does not hold.
+  chmod 700 "$dir" 2>/dev/null || return 0
+  case "$(ls -ld "$dir" 2>/dev/null)" in drwx------*) ;; *) return 0 ;; esac
   tmp="$(mktemp "$dir/.gitconfig-github-https.XXXXXX")" || return 0
   {
     printf '# Written by conclave scripts/github-https-env.sh. Safe to delete.\n'

@@ -83,6 +83,20 @@ check "an include path with # ; backslash quote and spaces survives" \
   "https://github.com/cursor/plugins.git|Odd Path" \
   "$("${base_env[@]}" GIT_CONFIG_GLOBAL="$odd/g.config" "$ROOT/scripts/with-github-https.sh" cursor-agent)"
 
+# 7c2. A newline in an include path is escaped, not written raw.
+nl="$work/new"$'\n'"line"
+mkdir -p "$nl"
+printf '[user]\n\tname = Newline Path\n' >"$nl/g.config"
+check "an include path with a newline survives" \
+  "https://github.com/cursor/plugins.git|Newline Path" \
+  "$("${base_env[@]}" GIT_CONFIG_GLOBAL="$nl/g.config" "$ROOT/scripts/with-github-https.sh" cursor-agent)"
+
+# 7c3. An existing permissive cache directory is made private before use.
+mkdir -p "$work/cache3/conclave"; chmod 777 "$work/cache3/conclave"
+"${base_env[@]}" XDG_CACHE_HOME="$work/cache3" "$ROOT/scripts/with-github-https.sh" true
+check "a group/world-writable cache dir is tightened to 700" "drwx------" \
+  "$(ls -ld "$work/cache3/conclave" | cut -c1-10)"
+
 # 7d. GIT_CONFIG_GLOBAL set but empty keeps meaning "no global config".
 check "an empty GIT_CONFIG_GLOBAL includes nothing" \
   "https://github.com/cursor/plugins.git|" \
