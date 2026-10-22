@@ -231,6 +231,7 @@ PY
 use_router "$work/review-route.json" 0
 apply review
 check "review maps wonder and argon" [ "$VOTERS" = "muse,argon" ]
+check "argon author vendor is google" [ "$(review_author_vendor argon)" = google ]
 
 use_router "$work/all.json" 1
 apply mixed

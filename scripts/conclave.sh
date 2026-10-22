@@ -1240,6 +1240,10 @@ resolve_routing() {
   # Argon follows the same resolved effort. The model id maps low, medium, and high.
   ARGON_EFFORT="$GROK_EFFORT"
 
+  # Kind review logs the target repo. Resolve it before the lineup call.
+  if [ "$KIND" = "review" ] && [ -z "${REPO:-}" ]; then
+    review_resolve_repo
+  fi
   apply_kind_voters
 }
 
@@ -1255,6 +1259,7 @@ review_author_vendor() {
     astra) printf 'openai\n' ;;
     grok) printf 'xai\n' ;;
     muse|wonder|wonder-full) printf 'meta\n' ;;
+    argon) printf 'google\n' ;;
     *) return 1 ;;
   esac
 }
@@ -2032,7 +2037,11 @@ argon_print_timeout() {
 }
 
 argon_unsupported_reason() {
-  # $1 is the kind. The recorded sentence for review and audit.
+  # $1 is the kind. Audit still skips the leg. Review seats it.
+  if [ "$1" = "review" ]; then
+    printf 'argon: kind review seats this leg when the lineup or --voters names it\n'
+    return 0
+  fi
   printf 'argon: kind %s is not supported; Argon votes on design and mixed only\n' "$1"
 }
 
@@ -2249,6 +2258,12 @@ PY
     return 0
   fi
   rm -f "$parse_reason"
+  # Review reports follow the reviewer brief, not the design headings.
+  if [ "${KIND:-}" = "review" ]; then
+    cp "$raw" "$out"
+    printf 'argon: ok model=%s\n' "$model" >"$DIR/voter-argon.model.txt"
+    return 0
+  fi
   if ! python3 - "$raw" "$out" <<'PY'
 import re, sys
 raw_path, out_path = sys.argv[1], sys.argv[2]

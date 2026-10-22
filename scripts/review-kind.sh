@@ -2021,9 +2021,10 @@ review_run_argon() {
     echo "argon: reviewer brief missing" >"$DIR/voter-argon.fail"
     return 1
   fi
-  packet="$DIR/voter-argon.packet"
-  rm -rf "$packet"
-  mkdir -p "$packet"
+  packet="$(alloc_packet_tmpdir)" || {
+    echo "argon: cannot create packet temp dir" >"$DIR/voter-argon.fail"
+    return 1
+  }
   {
     cat "$brief"
     printf '\n## The change under review\n\n'
@@ -2034,6 +2035,7 @@ review_run_argon() {
     echo "argon: cannot write packet prompt" >"$DIR/voter-argon.fail"
     return 1
   }
+  cp "$packet/PROMPT.md" "$DIR/voter-argon.prompt.md"
   PACKET="$packet"
   run_argon
 }
