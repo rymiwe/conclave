@@ -26,7 +26,7 @@ copies and `PROMPT.md` under `preview/` only.
 | Phase | Who | What |
 |---|---|---|
 | 0 | `scripts/conclave.sh <id> --dry-run` | Lineup, target, diff shape. Writes only `tmp/council/<id>/preview/`. Local listings only: no voter prompt, no Jev call. |
-| 1 | `scripts/conclave.sh <id>` | One worktree per voter, read-only baseline. The default ballot is the lineup. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, neither the builder's, and falls back to Fable and Astra when that route is missing, fails, or asks.<!-- ballot-rule:end --> Fable is on the reviewer brief. The other seated legs run native, in parallel. Opus native is a coverage leg on review kind; its agreement with Fable is one vote. Then model check, baseline compare, `scripts/blind.sh`, stop. |
+| 1 | `scripts/conclave.sh <id>` | One worktree per voter, read-only baseline. The default ballot is the lineup. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, excluding a named author or a caller-passed builder or --builder-vendor and nobody when none of those is set, and falls back to Fable and Astra when that route is missing, fails, or asks.<!-- ballot-rule:end --> Fable is on the reviewer brief. The other seated legs run native, in parallel. Opus native is a coverage leg on review kind; its agreement with Fable is one vote. Then model check, baseline compare, `scripts/blind.sh`, stop. |
 | 2 | Chair | Read only `blind/leg-*.md`. Write `findings.json`. Do not read `blind/key.txt` yet. |
 | 3 | `scripts/conclave.sh <id> --findings` | One Jev `choice` per finding, or no call when there are no findings. Writes `judgment.md` (fixed header, then the convergence table) and `decide.md` beside it. `convergence.md` is the same table without the header. |
 | 4 | Chair | Fill `decide.md`: replace every `TODO(chair)`. The what-breaks line says what breaks and for whom, with no code identifiers. Then draft comments. `scripts/check-comment-links.py` checks citations. The script writes no comment prose and posts nothing. |
@@ -54,13 +54,16 @@ judge. Columns: vendor, model id or launch alias, CLI and version, methodology
 (`native` or `brief`), pool, pace.
 
 The default ballot is the lineup: every available leg. Design excludes
-nobody. Mixed excludes the vendor that built the diff. A brief
-header `author:` overrides the lineup's builder. Audit excludes that vendor
+nobody. Review and mixed exclude a named author, or on review the vendor a
+commit trailer names. With neither, and for `--author human`, they exclude
+nobody. A pace-picked builder is not excluded. Audit excludes that vendor
 when `author:` names the family, and excludes nobody when the author is
 unknown. The chair's vendor still votes. The lineup names who sat out and
 why. Kind review takes exactly two voters from `seat-usage --route lineup --kind review`.
-Neither shares the builder's vendor, and the two are different vendor families.
-`--builder-vendor` on that call comes from the brief `author:` family.
+The two are different vendor families. They omit an excluded vendor when
+the router names one. `--builder-vendor` comes from the brief `author:`
+family, or from a commit trailer that names one model. A user author with
+no trailer passes `--author human` and no `--builder-vendor`.
 An explicit `--voters` list replaces the route. `fable` and `astra` in that list
 mean the claude and codex legs. Argon runs when the route or the list names it.
 A capped pool is not seated. A pool ahead of pace still votes.

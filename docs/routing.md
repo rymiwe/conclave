@@ -27,12 +27,13 @@ Roles are families. The resolver picks the newest ID at run time. No
 model names in prose.
 
 Exclusion follows what the ballot judges. Design excludes nobody. Review
-and mixed exclude the vendor that built the diff. That author defaults to
-the lineup's builder. A brief header `author:` overrides it. Audit excludes
-the vendor that wrote the target when `author:` names the family, and
+and mixed exclude a named author, or on review the vendor a commit trailer
+names. With neither, and on review for a user-authored PR with no model
+trailer, they exclude nobody. A pace-picked builder is not excluded. Audit
+excludes the vendor that wrote the target when `author:` names the family, and
 excludes nobody when the author is unknown. A plain question excludes
-nobody. The chair's vendor still votes. When Claude chairs a review and
-Grok built the diff, Fable votes and Grok sits out. Fable is required when
+nobody. The chair's vendor still votes. When a review excludes xAI, Fable
+votes and Grok sits out. Fable is required when
 the excluded vendor is xAI. The chair exports `CONCLAVE_CHAIR_MODEL` so
 `judgment.md` records it. Blinding
 stays on but does not hide the vendor: a format check alone named it on 35
@@ -56,7 +57,10 @@ rejected pairs.
   first only when it would otherwise expire unused.
 - `--kind` is `design`, `review`, `mixed`, or `audit`. The chair is routed on
   its own and may differ from the builder. Design excludes nobody. Review and
-  mixed exclude `--author`, or the builder when `--author` is omitted. Audit
+  mixed exclude `--author` when it names a family, or the caller-passed
+  builder when `--author` is omitted. With neither, or with `--author human`
+  or `--author none`, they exclude nobody. The builder the router fills from
+  pace is not that caller. On review, `--builder-vendor` wins. Audit
   excludes `--author` when it is present. `--author` is a family. Fable is
   required when the excluded vendor is xAI. A builder family the caller already
   named is kept when that pool can take the work, including when the pool is
@@ -86,12 +90,15 @@ rejected pairs.
   ballot and one at exit, joined by `run_id`. The review line is a later
   call, because that part does not exist when the run ends.   The script calls
   `seat-usage --route lineup --kind KIND` for the default ballot. Mixed
-  adds `--author` only when the brief has `author:`. Audit does the same,
-  and excludes nobody when that header is absent. Kind review also passes
-  `--builder-vendor` from that author, plus `--ballot` and `--repo`, so the
+  adds `--author` only when the brief has `author:`, and passes no builder,
+  so a missing header excludes nobody. Audit does the same,
+  and excludes nobody when that header is absent. Kind review passes
+  `--author` from that header, or `--author human` for a user-authored PR
+  with no model trailer. It passes `--builder-vendor` when the header or a
+  commit trailer names one vendor, plus `--ballot` and `--repo`, so the
   pick log records the ballot. Families map to legs: fable to claude (or
   cursor-fable), astra to codex, grok, wonder and wonder-full to muse,
-  argon to the agy leg. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, neither the builder's, and falls back to Fable and Astra when that route is missing, fails, or asks.<!-- ballot-rule:end -->
+  argon to the agy leg. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, excluding a named author or a caller-passed builder or --builder-vendor and nobody when none of those is set, and falls back to Fable and Astra when that route is missing, fails, or asks.<!-- ballot-rule:end -->
   `--voters` still wins. On review, `fable` and `astra` in that list mean
   claude and codex. When the call is missing, fails, or returns mode ask,
   the script uses Fable and Astra, warns on review, and says so in the lineup
@@ -256,7 +263,8 @@ method.
 xAI capacity is Cursor Models plus the Grok subscription, spent by pace. The
 Grok subscription is spent first only when it would otherwise expire unused.
 Grok votes unless the ballot excludes xAI, and not on a capped pool.
-Review and mixed exclude xAI when Grok built the diff. Audit excludes xAI
+Review and mixed exclude xAI when the author is Grok, or on review when
+`--builder-vendor` is xAI. A pace-picked Grok is not excluded. Audit excludes xAI
 when `author:` names that family. Design does not.
 
 Bot VM logins (grok, cursor-agent, claude, cursor) stay for personal

@@ -2,7 +2,7 @@
 name: council
 description: >-
   Chair a Conclave. The default ballot is every available leg from the
-  lineup. The vendor that made what is judged sits out. On review, Opus
+  lineup. A named author sits out. A pace-picked builder does not. On review, Opus
   native is a coverage leg. Jev
   decides under locked rules; the human decides a split. Use for /council,
   multi-vendor design, planning, or review. kind: review is in
@@ -36,14 +36,14 @@ For one question that needs no ballot, use ask mode: `scripts/conclave.sh <id> -
 
 ## Ballot (locked)
 
-Print-only and mutual-blind. The default ballot is every available leg from the lineup. Design excludes nobody. Review and mixed exclude the vendor that built the diff. A brief header `author:` overrides the lineup's builder. Audit excludes that vendor when `author:` names the family, and excludes nobody when the author is unknown. The chair's vendor still votes. The lineup names who sat out and why. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, neither the builder's, and falls back to Fable and Astra when that route is missing, fails, or asks.<!-- ballot-rule:end --> A capped pool is not seated. A pool ahead of pace still votes, at low. When seat-usage is missing, fails, or asks, the fixed default is Claude and Codex. Review warns and uses that pair. The lineup says so. `--voters` wins. Design and mixed still need at least two legs. Audit legs share one brief. Audit is never inferred. `kind: audit` reviews an existing artifact, or proposed edits to an existing doc, rule, or config. A new design or plan with no artifact yet stays `kind: design`.
+Print-only and mutual-blind. The default ballot is every available leg from the lineup. Design excludes nobody. Review and mixed exclude a named author, or on review the vendor a commit trailer names. With neither, and on review for a user-authored PR with no model trailer, they exclude nobody. A pace-picked builder is not excluded. Audit excludes that vendor when `author:` names the family, and excludes nobody when the author is unknown. The chair's vendor still votes. The lineup names who sat out and why. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, excluding a named author or a caller-passed builder or --builder-vendor and nobody when none of those is set, and falls back to Fable and Astra when that route is missing, fails, or asks.<!-- ballot-rule:end --> A capped pool is not seated. A pool ahead of pace still votes, at low. When seat-usage is missing, fails, or asks, the fixed default is Claude and Codex. Review warns and uses that pair. The lineup says so. `--voters` wins. Design and mixed still need at least two legs. Audit legs share one brief. Audit is never inferred. `kind: audit` reviews an existing artifact, or proposed edits to an existing doc, rule, or config. A new design or plan with no artifact yet stays `kind: design`.
 
 | Seat | Who |
 |------|-----|
 | Claude | Fable, high effort, on the reviewer brief for `kind: review`. `--claude-model opus` turns this seat into Opus native and skips the coverage leg |
 | Opus | Coverage leg on `kind: review`. Opus native is a coverage leg on review kind; its agreement with Fable is one vote. Design and mixed reject it in `--voters`. On `kind: audit` it joins only when `--voters` names it, and it reads the brief |
 | Codex | Astra |
-| Grok | Seated unless that vendor built the diff, or wrote the audit target when `author:` names it. A capped pool is not seated. On audit it reads the brief and web search stays on. `--voters` can name it on any kind |
+| Grok | Seated unless the author is Grok, a review trailer names that vendor, or audit `author:` names it. A pace-picked Grok still votes. A capped pool is not seated. On audit it reads the brief and web search stays on. `--voters` can name it on any kind |
 | Muse | Seated unless a Muse window is capped. Ahead of pace still votes, at low. `--voters ...,muse` names it on any kind. Its opinion goes to Jev like any other, and the shadow does not run beside it. See `docs/review.md`, "Muse" |
 | Argon | Design and mixed only, via `agy` on the Google AI Pro subscription. Seated unless `CONCLAVE_ARGON=0` (`COUNCIL_ARGON` is the alias). The lineup does not seat it. `--voters` wins. Review and audit skip a named argon. A missing `agy`, a failed usage check, a 0% Argon pool, or a bad answer skips the leg and does not fail the run. `agy` must be signed in. Do not opt in to data sharing. Do not mark the repo trusted in `agy` |
 
@@ -54,7 +54,7 @@ Print-only and mutual-blind. The default ballot is every available leg from the 
 | Implementer | Newest Grok via `cursor-agent`, own worktree; fallback Opus at low. Never a voter. |
 | Control plane | Grok Bot, through the desktop app's local execution on the executor. Reads `judgment.md` and PR links only. |
 
-Grok votes when the lineup seats it. Review and mixed leave Grok out when Grok built the diff. Audit leaves Grok out when `author:` names that family. A capped pool is not seated. `--voters` still wins. Model IDs resolve at run time; never write them into prose or prompts. The script owns routing. Review and audit procedure: `docs/review.md`. `kind: audit` is never inferred.
+Grok votes when the lineup seats it. Review and mixed leave Grok out when the author is Grok or a review trailer names that vendor. Audit leaves Grok out when `author:` names that family. A capped pool is not seated. `--voters` still wins. Model IDs resolve at run time; never write them into prose or prompts. The script owns routing. Review and audit procedure: `docs/review.md`. `kind: audit` is never inferred.
 
 Separately, Muse Wonder can run as a non-voting shadow leg (`CONCLAVE_MUSE_SHADOW=1`, with `COUNCIL_MUSE_SHADOW` as the alias) on design and mixed. The shadow is not a seat. The chair and Jev do not read its verdict. When the leg runs, `muse exec --json` is parsed for a subscription usage snapshot written to `~/.cache/quartermaster/muse-usage.json`. A missing snapshot or a write error leaves the run unchanged.
 

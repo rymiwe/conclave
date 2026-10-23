@@ -460,8 +460,10 @@ Ask mode (no brief, no ballot):
 Brief header overrides (YAML-ish, optional, before first heading):
   kind: design | review | mixed | audit
   author: fable | opus | astra | grok | muse
-                         Review and mixed default to the lineup's builder.
-                         Audit excludes nobody until this names a family.
+                         Review and mixed exclude this family when it is set.
+                         With no author and no caller-passed builder they
+                         exclude nobody. Audit excludes nobody until this
+                         names a family.
   target: URL or file path (audit; a flag wins)
   target-type: content | claims | proposal (audit; required; a flag wins)
   difficulty: low | med | high
@@ -500,8 +502,10 @@ CONCLAVE_ARGON=0 (COUNCIL_ARGON is the alias). The lineup router does not
 seat it. --voters wins: Argon votes only when that list names it. Review and
 audit do not seat Argon. Naming it there skips the leg with
 "argon: kind <k> is not supported; Argon votes on design and mixed only".
-Design excludes nobody. Review and mixed exclude the vendor that built the
-diff. Audit excludes that vendor when the brief names the author. The
+Design excludes nobody. Review and mixed exclude a named author, or on
+review the vendor a commit trailer names. With neither they exclude nobody.
+A pace-picked builder is not excluded. Audit excludes that vendor when the
+brief names the author. The
 chair's vendor still votes. The lineup says who sat out and why. A capped
 pool is not seated. A pool ahead of pace still votes. When seat-usage is
 missing, fails, or returns mode ask, the fixed default is used and the
@@ -1521,8 +1525,10 @@ load_lineup_ballot() {
   # --builder-vendor. A display name of Cursor does not name a model. The
   # mailbox does not decide. resolve_routing has already set REPO for a
   # review; the --repo branch below is only for a direct loader call.
-  # Mixed still omits --author unless the brief has one, so the router
-  # defaults to its builder. Audit has no default author.
+  # Mixed still omits --author unless the brief has one, and passes no
+  # builder, so the router excludes nobody. Review does the same when it
+  # passes neither --author nor --builder-vendor. --author human excludes
+  # nobody. A pace-picked builder is not excluded. Audit has no default author.
   local bin raw parsed status legs args tail name why line rest
   bin="$(conclave_env SEAT_USAGE "$HOME/.local/bin/seat-usage")"
   if [ -z "$bin" ] || [ ! -x "$bin" ]; then
