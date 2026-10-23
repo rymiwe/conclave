@@ -60,6 +60,10 @@ review_run_grok() {
   return 0
 }
 review_run_argon() {
+  if [ "${FAKE_ARGON_FAIL:-0}" = 1 ]; then
+    printf 'argon: skipped\nnot signed in\n' >"$DIR/voter-argon.skipped"
+    return 1
+  fi
   echo "argon report" >"$DIR/voter-argon.md"
   echo "argon: ok model=gemini-4-argon-high" >"$DIR/voter-argon.model.txt"
   return 0
@@ -89,9 +93,10 @@ reset_case() {
   ID="reseat-$1"
   REPO=""
   FAKE_GROK_FAIL=0
+  FAKE_ARGON_FAIL=0
   SEAT_RECORD_RC=0
   SEAT_ROUTE_RC=0
-  export FAKE_GROK_FAIL SEAT_RECORD_RC SEAT_ROUTE_RC
+  export FAKE_GROK_FAIL FAKE_ARGON_FAIL SEAT_RECORD_RC SEAT_ROUTE_RC
   export CONCLAVE_SEAT_USAGE="$work/bin/seat-usage"
   echo "codex report" >"$DIR/voter-codex.md"
   echo "codex: ok model=gpt-6-astra" >"$DIR/voter-codex.model.txt"
@@ -279,5 +284,41 @@ only='{"mode":"default","lineup":{"voters":[{"family":"fable","seat":"claude"}]}
 none_picked="$(python3 "$ROOT/scripts/lineup.py" --replacement codex anthropic - - "$only")"
 [ "$(printf '%s\n' "$none_picked" | sed -n '1p')" = none ] || fail "vendorless only: $none_picked"
 printf 'ok a missing vendor does not bypass the builder\n'
+
+# A policy skip is not a failed voter. A replacement Argon that is not signed
+# in stays in the required count.
+reset_case policy
+VOTERS="claude,codex,argon"
+printf 'argon: skipped\nargon: kind review seats this leg when the lineup or --voters names it\n' \
+  >"$DIR/voter-argon.skipped"
+echo "claude: exit 7" >"$DIR/voter-claude.fail"
+cat >"$SEAT_JSON" <<'EOF'
+{"mode":"default","why":"ranked","lineup":{"voters":[
+  {"family":"grok","seat":"grok","vendor":"xai","model":"grok"}
+]}}
+EOF
+review_reseat_failed
+grep -q 'replaced with grok' "$DIR/reseat.md" || fail "policy: $(cat "$DIR/reseat.md")"
+grep -q 'argon failed' "$DIR/reseat.md" && fail "policy reseated argon: $(cat "$DIR/reseat.md")"
+grep -q -- '--record-failure google' "$SEAT_LOG" && fail "policy recorded argon: $(cat "$SEAT_LOG")"
+printf 'ok a policy-skipped argon is not re-seated\n'
+
+reset_case argonfail
+FAKE_ARGON_FAIL=1
+echo "claude: exit 7" >"$DIR/voter-claude.fail"
+cat >"$SEAT_JSON" <<'EOF'
+{"mode":"default","why":"ranked","lineup":{"voters":[
+  {"family":"argon","seat":"google","vendor":"google","model":"gemini-4-argon-high"}
+]}}
+EOF
+review_reseat_failed
+grep -q 'replaced with argon' "$DIR/reseat.md" || fail "argonfail: $(cat "$DIR/reseat.md")"
+grep -q 'also failed (auth)' "$DIR/reseat.md" || fail "argonfail reason: $(cat "$DIR/reseat.md")"
+[ "$VOTERS" = "codex,argon" ] || fail "argonfail: voters=$VOTERS"
+review_count_reports
+[ "$REVIEW_REPORTS_EXPECTED" = 2 ] || fail "argonfail expected=$REVIEW_REPORTS_EXPECTED"
+[ "$REVIEW_REPORTS_PRESENT" = 1 ] || fail "argonfail present=$REVIEW_REPORTS_PRESENT"
+printf '%s\n' "$REVIEW_REPORTS_MISSING" | grep -q argon || fail "argonfail missing=$REVIEW_REPORTS_MISSING"
+printf 'ok a failed replacement argon stays in the required count\n'
 
 printf 'ok re-seat\n'

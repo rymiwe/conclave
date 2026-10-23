@@ -101,14 +101,24 @@ review_voters() {
   done
 }
 
+review_argon_policy_skip() {
+  # The optional-leg marker. A seated review voter that died does not match.
+  [ -n "${DIR:-}" ] && [ -s "$DIR/voter-argon.skipped" ] || return 1
+  grep -Eq 'kind review seats this leg|is not supported' "$DIR/voter-argon.skipped"
+}
+
 review_report_voters() {
-  # Voters that must produce a report. A skipped Argon stays in $VOTERS so
-  # the reason stays on disk, and is not required for the count or for blinding.
+  # Voters that must produce a report. A policy-skipped Argon stays in
+  # $VOTERS so the reason stays on disk, and is not required for the count
+  # or for blinding. On a review, a skip that is not that marker is a failed
+  # voter and stays in the count.
   local v
   while IFS= read -r v; do
     [ -n "$v" ] || continue
     if [ "$v" = argon ] && [ -n "${DIR:-}" ] && [ -s "$DIR/voter-argon.skipped" ]; then
-      continue
+      if [ "${KIND:-}" != review ] || review_argon_policy_skip; then
+        continue
+      fi
     fi
     printf '%s\n' "$v"
   done <<EOF
@@ -2875,7 +2885,8 @@ review_reseat_one() {
   # Replace $1 once. A replacement that fails is not replaced again.
   local failed="$1" reason="$2" seat other builder raw picked name sku wt
   seat="$(review_failure_seat "$failed")"
-  review_record_seat_failure "$seat" "$reason"
+  # The caller recorded this failure before the first route. Recording it
+  # again would write a second line for the same voter.
   other="$(review_working_vendor "$failed")"
   builder=""
   if [ -n "${HEADER_AUTHOR:-}" ]; then
@@ -2963,6 +2974,9 @@ review_reseat_failed() {
   # not required for the count. On a review it was seated, so it is a failure.
   while IFS= read -r v; do
     [ -n "$v" ] || continue
+    if [ "$v" = argon ] && review_argon_policy_skip; then
+      continue
+    fi
     review_report_present "$v" && continue
     pending+=("$v")
     RESEAT_FAILED="${RESEAT_FAILED:+$RESEAT_FAILED,}$v"
