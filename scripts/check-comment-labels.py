@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Flag a summary that opens with a label, a labeled reply, or an unlabeled
-new inline comment on someone else's PR.
+"""Flag a summary that opens with a label, a labeled summary bullet, a labeled
+reply, or an unlabeled new inline comment on someone else's PR.
 
   scripts/check-comment-labels.py <payload.json> [--pr-author LOGIN] [--reviewer LOGIN]
 

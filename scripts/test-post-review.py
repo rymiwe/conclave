@@ -822,6 +822,26 @@ def test_inline_repro_not_dropped(root: Path) -> None:
           and 'no room for repro' not in proc.stderr,
           f'over-limit prose with a repro names the size, not the repro ({proc.returncode} {proc.stderr.strip()})')
 
+    f = Fixture(root / 'inline-big-hand')
+    payload = f.payload()
+    payload['body_findings'] = []
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f1']
+    payload['comments'][0]['body'] = (
+        label + 'the count is wrong.\n\n<details><summary>f1.rb</summary>\n\n```ruby\n'
+        + ('# pad\n' * 12000) + '```\n\n</details>\n'
+    )
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f1.rb').write_text('# pad\n' * 12000, encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a large hand-written inline block is resized, not refused ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    inline_body = req['comments'][0]['body']
+    check(len(inline_body) <= 65536 and '<!-- repro:demo-1/f1.rb -->' in inline_body
+          and inline_body.count('<summary>f1.rb</summary>') == 1 and 'bytes' in inline_body,
+          f'the large hand-written inline block is truncated with a note ({len(inline_body)})')
+
     f = Fixture(root / 'reply-over-limit')
     payload = f.payload()
     payload['comments'].append({'in_reply_to': 42, 'body': 'z' * 65537})

@@ -399,7 +399,13 @@ def main() -> int:
             findings[key] = {"ballot": ballot, "id": fid, "posted_as": "review body",
                              "path": c["path"], "line": c["line"], "reason": "outside the diff"}
         else:
-            refuse_over_limit(str(c["body"]), f"inline comment {key}")
+            prose = str(c["body"])
+            if repro_path is not None:
+                # A hand-written repro block can still shrink; size the prose only.
+                prose = comment_draft.prose_without_repro(comment_draft.adopt_hand_block(
+                    prose, repro_path.name, f"<!-- repro:{ballot}/{repro_path.name} -->"
+                ))
+            refuse_over_limit(prose, f"inline comment {key}")
             text = attach_finding_repro(str(c["body"]), ballot, fid)
             if repro_path is not None:
                 refuse_absent_repro(text, ballot, repro_path.name, f"inline comment {key}")

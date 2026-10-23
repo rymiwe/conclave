@@ -117,7 +117,8 @@ def main() -> None:
         check(
             "<!-- repro:demo-1/f1.rb -->" in shrunk_hand
             and shrunk_hand.count("<summary>f1.rb</summary>") == 1
-            and len(shrunk_hand) <= 800,
+            and len(shrunk_hand) <= 800
+            and "puts 'kept'" in shrunk_hand and "xxxx" not in shrunk_hand,
             f"an over-limit hand-written block is resized with a marker ({len(shrunk_hand)})",
         )
         unrelated = (
