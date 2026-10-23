@@ -1278,19 +1278,24 @@ review_pr_number() {
   printf '%s\n' "$n"
 }
 
-# Last gh pr view --json author,commits parse, keyed by PR number.
+# Last gh pr view --json author,commits parse, keyed by repo and PR number.
+# A failed fetch is not a fact: REVIEW_PR_FACT_SKIP stops the resolvers in
+# this same call from asking again, and the caller clears it so a later
+# re-seat can try. Caching the failure would hide a builder vendor.
 REVIEW_PR_FACT_NUM=""
 REVIEW_PR_FACT_VENDOR=""
 REVIEW_PR_FACT_HUMAN=""
+REVIEW_PR_FACT_SKIP=""
 
 review_pr_load_facts() {
   # Sets REVIEW_PR_FACT_VENDOR (a vendor, "ambiguous", or empty) and
   # REVIEW_PR_FACT_HUMAN (yes or no). Returns 1 when there is no PR or gh fails.
   # A Co-authored-by trailer names a model when its display name contains a
-  # known family. Co-authored-by: Cursor <cursoragent@cursor.com> does not.
+  # known family. The mailbox does not. Co-authored-by: Cursor
+  # <cursoragent@cursor.com> has no family in the display name, so it does not.
   # gh pr view --json author has is_bot. This gh omits type; a present type
   # must be User. is_bot false with type absent or User is a human author.
-  local num json parsed vendor human
+  local num json parsed vendor human key
   num="$(review_pr_number)"
   if [ -z "$num" ]; then
     REVIEW_PR_FACT_NUM=""
@@ -1298,15 +1303,27 @@ review_pr_load_facts() {
     REVIEW_PR_FACT_HUMAN=no
     return 1
   fi
-  if [ "$REVIEW_PR_FACT_NUM" = "$num" ]; then
+  key="${REPO:-}:$num"
+  if [ "$REVIEW_PR_FACT_NUM" = "$key" ]; then
     return 0
+  fi
+  if [ -n "$REVIEW_PR_FACT_SKIP" ] && [ "$REVIEW_PR_FACT_SKIP" = "$key" ]; then
+    return 1
   fi
   REVIEW_PR_FACT_NUM=""
   REVIEW_PR_FACT_VENDOR=""
   REVIEW_PR_FACT_HUMAN=no
+  # No repo yet is not a failed fetch. resolve_routing sets REPO before the
+  # lineup; a later call can load once the repo exists.
   [ -n "${REPO:-}" ] || return 1
-  json="$(cd "$REPO" && gh pr view "$num" --json author,commits 2>/dev/null)" || return 1
-  [ -n "$json" ] || return 1
+  json="$(cd "$REPO" && gh pr view "$num" --json author,commits 2>/dev/null)" || {
+    REVIEW_PR_FACT_SKIP="$key"
+    return 1
+  }
+  [ -n "$json" ] || {
+    REVIEW_PR_FACT_SKIP="$key"
+    return 1
+  }
   parsed="$(REVIEW_PR_JSON="$json" python3 - <<'PY'
 import json, os, re, sys
 doc = json.loads(os.environ["REVIEW_PR_JSON"])
@@ -1320,7 +1337,6 @@ families = (
     ("argon", "google"),
     ("wonder", "meta"),
 )
-cursor_email = re.compile(r"cursoragent@cursor\.com", re.I)
 trailer = re.compile(r"(?im)^[ \t]*co-authored-by:[ \t]*(.+)$")
 vendors = set()
 for commit in doc.get("commits") or []:
@@ -1329,8 +1345,6 @@ for commit in doc.get("commits") or []:
     text = (commit.get("messageHeadline") or "") + "\n" + (commit.get("messageBody") or "")
     for match in trailer.finditer(text):
         line = match.group(1).strip()
-        if cursor_email.search(line):
-            continue
         name = line.split("<", 1)[0].strip().lower()
         if name in ("cursor", "cursor agent"):
             continue
@@ -1351,7 +1365,10 @@ if author.get("is_bot") is False:
         human = "yes"
 sys.stdout.write(vendor + "\n" + human + "\n")
 PY
-)" || return 1
+)" || {
+    REVIEW_PR_FACT_SKIP="$key"
+    return 1
+  }
   vendor="${parsed%%$'\n'*}"
   human="${parsed#*$'\n'}"
   human="${human%%$'\n'*}"
@@ -1363,9 +1380,10 @@ PY
     yes) ;;
     *) human=no ;;
   esac
-  REVIEW_PR_FACT_NUM="$num"
+  REVIEW_PR_FACT_NUM="$key"
   REVIEW_PR_FACT_VENDOR="$vendor"
   REVIEW_PR_FACT_HUMAN="$human"
+  REVIEW_PR_FACT_SKIP=""
   return 0
 }
 
@@ -1420,6 +1438,8 @@ review_append_author_args() {
   if [ -n "$vendor" ]; then
     _dest+=(--builder-vendor "$vendor")
   fi
+  # This call is done. A later re-seat may ask gh if this one failed.
+  REVIEW_PR_FACT_SKIP=""
 }
 
 review_map_voter() {
@@ -1498,7 +1518,9 @@ load_lineup_ballot() {
   # review also --builder-vendor for that family. With no header, review
   # passes --builder-vendor only when a PR commit trailer names one model.
   # A GitHub User author with no such trailer passes --author human and no
-  # --builder-vendor. Cursor's Co-authored-by trailer does not name a model.
+  # --builder-vendor. A display name of Cursor does not name a model. The
+  # mailbox does not decide. resolve_routing has already set REPO for a
+  # review; the --repo branch below is only for a direct loader call.
   # Mixed still omits --author unless the brief has one, so the router
   # defaults to its builder. Audit has no default author.
   local bin raw parsed status legs args tail name why line rest

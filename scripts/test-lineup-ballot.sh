@@ -507,6 +507,7 @@ reset_pr_route() {
   REVIEW_PR_FACT_NUM=""
   REVIEW_PR_FACT_VENDOR=""
   REVIEW_PR_FACT_HUMAN=""
+  REVIEW_PR_FACT_SKIP=""
   HEADER_AUTHOR=""
   HEADER_PR=""
   FLAG_PR=42
@@ -565,6 +566,14 @@ check "human re-route does not call gh again" [ ! -s "$GH_ARGV" ]
 check "human re-route omits builder vendor" bash -c '! grep -q -- "--builder-vendor" "$1"' _ "$SEAT_ARGV"
 
 route_pr 'doc = {
+  "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss"},
+  "commits": [{"messageHeadline": "Seat the reviewer",
+               "messageBody": "Co-Authored-By: Grok (via cursor-agent) <cursoragent@cursor.com>\n"}],
+}'
+check "family on the cursor mailbox passes builder vendor" grep -qx -- '--route lineup --json --kind review --builder-vendor xai --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+check "family on the cursor mailbox omits author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
+
+route_pr 'doc = {
   "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss", "type": "User"},
   "commits": [],
 }'
@@ -608,10 +617,26 @@ apply review
 check "brief author wins over a trailer" grep -qx -- '--route lineup --json --kind review --author grok --builder-vendor xai --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
 check "brief author reseat vendor stays the family" [ "$(review_resolved_builder_vendor)" = xai ]
 
+cat >"$work/bin/gh" <<'EOF'
+#!/bin/sh
+if [ -n "${GH_ARGV:-}" ]; then
+  printf '%s\n' "$*" >>"$GH_ARGV"
+fi
+exit 1
+EOF
+chmod +x "$work/bin/gh"
+reset_pr_route
+use_router "$work/all.json" 0
+apply review
+check "failed gh omits author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
+check "failed gh omits builder vendor" bash -c '! grep -q -- "--builder-vendor" "$1"' _ "$SEAT_ARGV"
+check "failed gh is asked once" [ "$(grep -c 'pr view' "$GH_ARGV")" -eq 1 ]
+
 FLAG_PR=""
 HEADER_AUTHOR=""
 HEADER_PR=""
 REVIEW_PR_FACT_NUM=""
+REVIEW_PR_FACT_SKIP=""
 export PATH="$old_path"
 
 printf '%s passed, %s failed\n' "$passed" "$failed"

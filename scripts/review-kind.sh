@@ -2812,6 +2812,8 @@ review_route_json() {
   [ -n "$bin" ] && [ -x "$bin" ] || return 1
   local -a args=(--route lineup --json --kind review)
   # Same author and builder-vendor rule as load_lineup_ballot.
+  # Callers run only from a kind review (review_reseat_failed returns
+  # otherwise), so KIND is review and --builder-vendor is not dropped.
   review_append_author_args args
   if [ -n "${ID:-}" ]; then
     args+=(--ballot "$ID")
