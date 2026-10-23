@@ -2553,8 +2553,9 @@ Next step (chair, not this script):
   A finding with no file there gets no block.
   On someone else's pull request, start each new inline comment with
   **Requested:**, **Advisory:**, or **Informational:**. Do not draft
-  **Question:**. The review summary does not open with a label. A bullet in
-  the summary may. A reply to an existing comment never gets a label.
+  **Question:**. Labels go only on new inline comments: the review summary
+  does not open with a label, and a bullet in the summary has none. A reply
+  to an existing comment never gets a label.
   Every ticket id, #N, bare SHA, and file:line in a comment must sit inside a
   markdown link:
     scripts/check-comment-links.py <comments.md>

@@ -63,7 +63,7 @@ why. Kind review takes exactly two voters from `seat-usage --route lineup --kind
 The two are different vendor families. They omit an excluded vendor when
 the router names one. `--builder-vendor` comes from the brief `author:`
 family, or from commit trailers that name exactly one vendor. A user author with
-no trailer passes `--author human` and no `--builder-vendor`.
+no model trailer passes `--author human` and no `--builder-vendor`.
 An explicit `--voters` list replaces the route. `fable` and `astra` in that list
 mean the claude and codex legs. Argon runs when the route or the list names it.
 A capped pool is not seated. A pool ahead of pace still votes.
@@ -594,7 +594,7 @@ Round A writes the receipt only after its brief passes the checks. A `brief.md` 
 
 - **Chair round A.** A fresh `cursor-agent` session reads the PR, the shared context, and `stack.md`, and writes `brief.md`. It does not run the script. The runner refuses a brief without `kind: review` or with a forbidden family word.
 - **Phase 1.** The runner runs `conclave.sh <id> --dry-run`, then the full run, with the Fable flags below. Phase 1 stops if the target repo is shallow.
-- **Chair round B.** The round A session, resumed, or a fresh session when round A ran in an earlier invocation. It writes `findings.json` from `blind/leg-*.md` only, runs `--findings`, fills `decide.md`, and drafts `comments.md`. On someone else's pull request, a new inline comment starts with **Requested:**, **Advisory:**, or **Informational:**. **Question:** is not drafted. The review summary does not open with a label. A bullet in the summary may. A reply to an existing comment has no label. A throwaway script that verified a finding is saved as `repro/<finding-id>.<ext>` in the ballot directory.
+- **Chair round B.** The round A session, resumed, or a fresh session when round A ran in an earlier invocation. It writes `findings.json` from `blind/leg-*.md` only, runs `--findings`, fills `decide.md`, and drafts `comments.md`. On someone else's pull request, a new inline comment starts with **Requested:**, **Advisory:**, or **Informational:**. **Question:** is not drafted. Labels go only on new inline comments: the review summary does not open with a label, and a bullet in the summary has none. A reply to an existing comment has no label. A throwaway script that verified a finding is saved as `repro/<finding-id>.<ext>` in the ballot directory.
 
 Each cursor-agent chair the runner starts has `CONCLAVE_CHAIR=1` in its environment. That is the chair marker; `CONCLAVE_CHAIR_MODEL` is only the model id.
 
@@ -1313,11 +1313,11 @@ is appended, so the heading and the moved comment's own label do not make
 the summary open with a label. When the summary is empty, that heading is
 the first line, and it is still not a comment label.
 
-A bullet in the summary may keep a label while
-`SUMMARY_BULLETS_MAY_HAVE_LABELS` in `scripts/comment_draft.py` is True.
-That is the default, pending confirmation. The drafter and
-`scripts/check-comment-labels.py` both read that constant. Set it to False
-and the drafter strips a bullet's label and the lint flags the line. A
+Labels go only on new inline comments. A bullet in the summary has no
+label: `SUMMARY_BULLETS_MAY_HAVE_LABELS` in `scripts/comment_draft.py` is
+False (decided 2026-10-23). The drafter and
+`scripts/check-comment-labels.py` both read that constant. The drafter
+strips a bullet's label and the lint flags the line. A
 bullet is a line that, after optional indentation, starts with `-`, `*`,
 `+`, or a number (`1.` or `1)`), then whitespace, then the label.
 
@@ -1362,13 +1362,18 @@ no block. A reply does not get the block.
 GitHub's review-comment limit is 65536 characters. A script that does not fit
 in the comment is cut inside the fence, and a note after the fence says how
 many bytes were kept and names `repro/<filename>`. The comment prose is not
-cut. A comment moved into the review body is sized to the room left in that
+cut. When the prose leaves no room for that note, posting stops and names the
+finding and the file instead of sending the comment without the script. A new
+inline comment or a reply longer than 65536 characters is refused. A comment
+moved into the review body is sized to the room left in that
 body, including its permalink. A block that was already attached is resized
 to that room; it is not left at the line-comment size. The resize closes the
 block at the `</details>` outside the fence, so a script that contains that
 tag is not cut in half. A draft marks the block with the filename. Posting
 uses the ballot and the filename, and adopts the draft marker instead of
-attaching the script twice. Each later script keeps room for a truncated
+attaching the script twice. A hand-written block in the form above has no
+marker. Posting adopts that block the same way, by inserting the marker above
+the details tag. Each later script keeps room for a truncated
 block, including a script that belongs to a body finding, so one large
 script does not drop the next one. A rerun checks every reply the receipt
 already lists before it sends another, and a dry run does that check too. A fenced script is not prose: `scripts/check-comment-links.py` skips
@@ -1381,9 +1386,8 @@ run of digits is not treated as a SHA, and neither is an all-letter hex
 word. A SHA in this check includes a hex letter and a decimal digit.
 `scripts/check-comment-labels.py` fails a post payload whose summary opens
 with a label, whose reply carries a label, or whose new inline comment on
-someone else's pull request does not start with a label. With
-`SUMMARY_BULLETS_MAY_HAVE_LABELS` set to False it also fails a labeled
-bullet in the summary. The check runs in `scripts/post-review.py` before
+someone else's pull request does not start with a label. It also fails a
+labeled bullet in the summary, because labels go only on new inline comments. The check runs in `scripts/post-review.py` before
 any POST. A moved-outside-the-diff block appended to the summary is not
 an opening label.
 

@@ -873,7 +873,7 @@ class Runner:
                       + instructions + f'Replace every TODO(chair) in {ballot / "decide.md"}. '
                       f'Draft comments into {ballot / "comments.md"}. '
                       'On someone else\'s pull request, start each new inline comment with **Requested:**, **Advisory:**, or **Informational:**. '
-                      'Do not draft **Question:**. The review summary does not open with a label. A bullet in the summary may. A reply to an existing comment never gets a label. '
+                      'Do not draft **Question:**. Labels go only on new inline comments: the review summary does not open with a label, and a bullet in the summary has none. A reply to an existing comment never gets a label. '
                       f'When you verify a finding with a throwaway script, save it as {ballot / "repro"}/<finding-id>.<ext> '
                       '(for example repro/f1.rb). The drafter attaches that file to the comment. A finding with no file there gets no block. '
                       'Drafts must pass scripts/check-comment-links.py. That check rejects an internal word in a public comment and names the plain replacement. '
