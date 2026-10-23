@@ -461,9 +461,9 @@ Brief header overrides (YAML-ish, optional, before first heading):
   kind: design | review | mixed | audit
   author: fable | opus | astra | grok | muse
                          Review and mixed exclude this family when it is set.
-                         With no author and no caller-passed builder they
-                         exclude nobody. Audit excludes nobody until this
-                         names a family.
+                         With no author, no caller-passed builder, and no
+                         --builder-vendor, they exclude nobody. Audit excludes
+                         nobody until this names a family.
   target: URL or file path (audit; a flag wins)
   target-type: content | claims | proposal (audit; required; a flag wins)
   difficulty: low | med | high

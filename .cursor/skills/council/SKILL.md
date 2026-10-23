@@ -2,7 +2,7 @@
 name: council
 description: >-
   Chair a Conclave. The default ballot is every available leg from the
-  lineup. A named author sits out. A pace-picked builder does not. On review, Opus
+  lineup. A named author sits out on review and mixed. A pace-picked builder does not. On review, Opus
   native is a coverage leg. Jev
   decides under locked rules; the human decides a split. Use for /council,
   multi-vendor design, planning, or review. kind: review is in
