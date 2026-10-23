@@ -62,7 +62,7 @@ unknown. The chair's vendor still votes. The lineup names who sat out and
 why. Kind review takes exactly two voters from `seat-usage --route lineup --kind review`.
 The two are different vendor families. They omit an excluded vendor when
 the router names one. `--builder-vendor` comes from the brief `author:`
-family, or from a commit trailer that names one model. A user author with
+family, or from commit trailers that name exactly one vendor. A user author with
 no trailer passes `--author human` and no `--builder-vendor`.
 An explicit `--voters` list replaces the route. `fable` and `astra` in that list
 mean the claude and codex legs. Argon runs when the route or the list names it.

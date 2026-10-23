@@ -32,9 +32,9 @@ names. With neither, and on review for a user-authored PR with no model
 trailer, they exclude nobody. A pace-picked builder is not excluded. Audit
 excludes the vendor that wrote the target when `author:` names the family, and
 excludes nobody when the author is unknown. A plain question excludes
-nobody. The chair's vendor still votes. When a review excludes xAI, Fable
-votes and Grok sits out. Fable is required when
-the excluded vendor is xAI. The chair exports `CONCLAVE_CHAIR_MODEL` so
+nobody. The chair's vendor still votes. When xAI is excluded, Grok sits
+out. Fable is then required, except on kind review, which takes two seats
+by pace and headroom. The chair exports `CONCLAVE_CHAIR_MODEL` so
 `judgment.md` records it. Blinding
 stays on but does not hide the vendor: a format check alone named it on 35
 of 39 past blinded reports. Review kind adds an Opus native coverage leg on
