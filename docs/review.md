@@ -1363,7 +1363,7 @@ GitHub's review-comment limit is 65536 characters. A script that does not fit
 in the comment is cut inside the fence, and a note after the fence says how
 many bytes were kept and names `repro/<filename>`. The comment prose is not
 cut. When the prose leaves no room for that note, posting stops and names the
-finding and the file instead of sending the comment without the script. A new
+comment and the file instead of sending the comment without the script. A new
 inline comment or a reply longer than 65536 characters is refused. A comment
 moved into the review body is sized to the room left in that
 body, including its permalink. A block that was already attached is resized
@@ -1373,7 +1373,9 @@ tag is not cut in half. A draft marks the block with the filename. Posting
 uses the ballot and the filename, and adopts the draft marker instead of
 attaching the script twice. A hand-written block in the form above has no
 marker. Posting adopts that block the same way, by inserting the marker above
-the details tag. Each later script keeps room for a truncated
+the details tag. Only a block that opens exactly `<details><summary>f1.rb</summary>`,
+outside a fence and not already under a marker, is adopted. An adopted block
+that must shrink is rendered again from `repro/<filename>`. Each later script keeps room for a truncated
 block, including a script that belongs to a body finding, so one large
 script does not drop the next one. A rerun checks every reply the receipt
 already lists before it sends another, and a dry run does that check too. A fenced script is not prose: `scripts/check-comment-links.py` skips

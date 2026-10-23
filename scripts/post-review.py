@@ -101,15 +101,18 @@ def refuse_over_limit(text: str, where: str) -> None:
 def refuse_absent_repro(text: str, ballot: str, filename: str, where: str) -> None:
     """Die when a repro file did not land in text.
 
-    A hand-written summary with no marker is reported as a missing marker.
-    The message says "no room" only when the block was actually left off.
+    attach_repro adopts a hand-written block by inserting its marker, so a
+    missing marker here means the block was left off: the text already
+    leaves no room for even a truncated block under GitHub's limit.
     """
     marker = f"<!-- repro:{ballot}/{filename} -->"
     if marker in text:
         return
-    if f"<summary>{filename}</summary>" in text and "<!-- repro:" not in text:
-        die(f"{where} repro {ballot}/{filename} is missing its <!-- repro: --> marker")
-    die(f"{where} has no room for repro {ballot}/{filename}")
+    die(
+        f"{where} has no room for repro {ballot}/{filename}: "
+        f"the text leaves no room for even a truncated block under "
+        f"GitHub's {comment_draft.GITHUB_COMMENT_LIMIT}-character limit"
+    )
 
 
 def load_label_check():
@@ -380,16 +383,24 @@ def main() -> int:
                 text = lines[c["line"] - 1]
         if c.get("expect") and (text is None or c["expect"] not in text):
             errors.append(f"comment {i} ({key}): {c['path']}:{c['line']} reads {text!r}, expected {c['expect']!r}")
+        try:
+            repro_path = comment_draft.find_repro(council / ballot, fid)
+        except comment_draft.ReproError as exc:
+            die(str(exc))
         if in_diff is None:
-            moved.append({**c, "body": str(c["body"]), "_ballot": ballot, "_fid": fid})
+            moved_body = str(c["body"])
+            if repro_path is not None:
+                # Mark a hand-written block now, so the body budget below
+                # counts it as the script, not as prose.
+                moved_body = comment_draft.adopt_hand_block(
+                    moved_body, repro_path.name, f"<!-- repro:{ballot}/{repro_path.name} -->"
+                )
+            moved.append({**c, "body": moved_body, "_ballot": ballot, "_fid": fid})
             findings[key] = {"ballot": ballot, "id": fid, "posted_as": "review body",
                              "path": c["path"], "line": c["line"], "reason": "outside the diff"}
         else:
+            refuse_over_limit(str(c["body"]), f"inline comment {key}")
             text = attach_finding_repro(str(c["body"]), ballot, fid)
-            try:
-                repro_path = comment_draft.find_repro(council / ballot, fid)
-            except comment_draft.ReproError as exc:
-                die(str(exc))
             if repro_path is not None:
                 refuse_absent_repro(text, ballot, repro_path.name, f"inline comment {key}")
             refuse_over_limit(text, f"inline comment {key}")

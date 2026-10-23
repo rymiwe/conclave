@@ -120,6 +120,48 @@ def main() -> None:
             and len(shrunk_hand) <= 800,
             f"an over-limit hand-written block is resized with a marker ({len(shrunk_hand)})",
         )
+        unrelated = (
+            "**Requested:** note.\n\n"
+            "<details><summary>config.yml</summary>\n\nname: kept\n\n</details>\n\n"
+            "The script <summary>f1.rb</summary> is below.\n"
+        )
+        attached = comment_draft.attach_repro(unrelated, path, key="demo-1/f1.rb")
+        check(
+            "<!-- repro:demo-1/f1.rb -->\n<details><summary>f1.rb</summary>" in attached
+            and "puts 'kept'" in attached
+            and "<!-- repro:demo-1/f1.rb -->\n<details><summary>config.yml" not in attached
+            and "name: kept" in comment_draft.prose_without_repro(attached),
+            "an unrelated details block before a bare summary mention is not adopted",
+        )
+        other_marker = (
+            "Notes.\n\n<!-- repro:demo-2/f9.py -->\n<details><summary>f9.py</summary>\n\n"
+            "```python\nprint(1)\n```\n\n</details>\n\n" + written
+        )
+        both_adopted = comment_draft.attach_repro(other_marker, path, key="demo-1/f1.rb")
+        check(
+            both_adopted.count("<summary>f1.rb</summary>") == 1
+            and "<!-- repro:demo-1/f1.rb -->\n<details><summary>f1.rb</summary>" in both_adopted
+            and "puts :hand" in both_adopted,
+            "a hand-written block is adopted when another file's marker is already present",
+        )
+        other_ballot = written.replace(
+            "<details><summary>f1.rb</summary>",
+            "<!-- repro:demo-2/f1.rb -->\n<details><summary>f1.rb</summary>",
+        )
+        second = comment_draft.attach_repro(other_ballot, path, key="demo-1/f1.rb")
+        check(
+            second.count("<summary>f1.rb</summary>") == 2
+            and "<!-- repro:demo-2/f1.rb -->\n<details><summary>f1.rb</summary>" in second
+            and "puts 'kept'" in second,
+            "another ballot's marked block for the same filename is not adopted",
+        )
+        fenced = "Example:\n\n````html\n<details><summary>f1.rb</summary>\n</details>\n````\n"
+        fenced_out = comment_draft.attach_repro(fenced, path, key="demo-1/f1.rb")
+        check(
+            fenced_out.startswith(fenced.rstrip("\n")) and "puts 'kept'" in fenced_out
+            and "<!-- repro:demo-1/f1.rb -->\n<details><summary>f1.rb</summary>\n</details>\n````" not in fenced_out,
+            "a documented block inside a fence is not adopted",
+        )
 
         million = "x" * 1_000_000
         million_total = len(million.encode("utf-8"))

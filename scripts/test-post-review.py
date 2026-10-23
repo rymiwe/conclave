@@ -735,6 +735,44 @@ def test_hand_written_repro_is_adopted(root: Path) -> None:
           and 'puts :bodyhand' in body and 'puts :fromfile' not in body,
           'posting adopts the hand-written body block instead of appending the file')
 
+    f = Fixture(root / 'hand-body-after-moved')
+    payload = f.payload()
+    payload['body_findings'] = ['f4']
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f2']
+    payload['body'] = payload['body'] + "\n\n" + block.format(name='f4.rb', script="puts :bodyhand\n")
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f2.rb').write_text("puts :moved\n", encoding='utf-8')
+    (repro / 'f4.rb').write_text("puts :fromfile\n", encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a moved repro plus a hand-written body repro posts ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    body = req['body']
+    check(body.count('<summary>f4.rb</summary>') == 1 and '<!-- repro:demo-1/f4.rb -->' in body
+          and 'puts :bodyhand' in body and 'puts :fromfile' not in body
+          and '<!-- repro:demo-1/f2.rb -->' in body,
+          'a hand-written body block is adopted after another marker is already in the body')
+
+    f = Fixture(root / 'hand-inline')
+    payload = f.payload()
+    payload['body_findings'] = []
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f1']
+    payload['comments'][0]['body'] = (
+        payload['comments'][0]['body'].rstrip() + "\n\n" + block.format(name='f1.rb', script="puts :inlinehand\n")
+    )
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f1.rb').write_text("puts :fromfile\n", encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a hand-written inline repro posts ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    inline_body = req['comments'][0]['body']
+    check(inline_body.count('<summary>f1.rb</summary>') == 1 and '<!-- repro:demo-1/f1.rb -->' in inline_body
+          and 'puts :inlinehand' in inline_body and 'puts :fromfile' not in inline_body,
+          'posting adopts a hand-written inline block')
+
 
 def test_inline_repro_not_dropped(root: Path) -> None:
     """An inline repro that does not fit is refused, and an over-limit body is refused."""
@@ -768,6 +806,21 @@ def test_inline_repro_not_dropped(root: Path) -> None:
           and "GitHub's limit is 65536" in proc.stderr
           and 'no room for repro' not in proc.stderr,
           f'an over-limit inline body is refused ({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'inline-over-limit-repro')
+    payload = f.payload()
+    payload['body_findings'] = []
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f1']
+    payload['comments'][0]['body'] = label + ('y' * (65537 - len(label)))
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f1.rb').write_text('puts :hi\n', encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and f.posts() == 0
+          and 'inline comment demo-1:f1 is 65537 characters' in proc.stderr
+          and 'no room for repro' not in proc.stderr,
+          f'over-limit prose with a repro names the size, not the repro ({proc.returncode} {proc.stderr.strip()})')
 
     f = Fixture(root / 'reply-over-limit')
     payload = f.payload()

@@ -217,20 +217,38 @@ def _drop_marked_block(body: str, marker: str) -> str:
     return _cut_span(body, start, end + len("</details>"))
 
 
-def _mark_hand_summary(body: str, filename: str, marker: str) -> str | None:
-    """Insert marker above a hand-written `<details><summary>filename</summary>`.
+_REPRO_MARKER_LINE = re.compile(r"<!-- repro:[^\n]*-->")
 
-    None means the summary text is present but no `<details>` opens it, so
-    there is no block to adopt.
+
+def adopt_hand_block(body: str, filename: str, marker: str) -> str:
+    """Insert marker above a hand-written repro block for filename.
+
+    The block must open exactly as docs/review.md shows it:
+    `<details><summary>filename</summary>`. An occurrence inside a fence, or
+    one already under a `<!-- repro: -->` marker (another ballot's block, or
+    this one's), is skipped. The first remaining occurrence gets the marker.
+    The body is unchanged when marker is already present or no such block
+    exists.
     """
-    summary = f"<summary>{filename}</summary>"
-    at = body.find(summary)
-    if at < 0:
-        return None
-    start = body.rfind("<details>", 0, at)
-    if start < 0:
-        return None
-    return f"{body[:start]}{marker}\n{body[start:]}"
+    if marker in body:
+        return body
+    opening = f"<details><summary>{filename}</summary>"
+    fences = links().fence_spans(body)
+    covered = links().covered
+    idx = 0
+    while True:
+        start = body.find(opening, idx)
+        if start < 0:
+            return body
+        idx = start + len(opening)
+        if covered((start, idx), fences):
+            continue
+        before = body[:start]
+        if before.endswith("\n"):
+            before = before[:-1]
+        if _REPRO_MARKER_LINE.fullmatch(before.rsplit("\n", 1)[-1].strip()):
+            continue
+        return f"{body[:start]}{marker}\n{body[start:]}"
 
 
 def prose_without_repro(body: str) -> str:
@@ -282,10 +300,11 @@ def attach_repro(
     """Append the repro block when the comment does not already carry it.
 
     key identifies this file. It defaults to the filename. Two ballots can
-    both attach f1.rb because each key is different. A hand-written details
-    block whose summary is the filename and which has no marker is adopted
-    by inserting the marker, the same way a draft <!-- repro:filename -->
-    marker is adopted. A block that is already attached is resized when it
+    both attach f1.rb because each key is different. A hand-written block
+    that opens `<details><summary>filename</summary>`, outside a fence and
+    with no marker above it, is adopted by inserting the marker (see
+    adopt_hand_block), the same way a draft <!-- repro:filename --> marker
+    is adopted. A block that is already attached is resized when it
     is longer than limit, so a comment that fit as a line comment still fits
     after it moves into a shorter review body. A script that does not fit
     under limit is truncated with a note. When the prose leaves no room for
@@ -300,15 +319,8 @@ def attach_repro(
     if legacy in body and legacy != marker:
         body = body.replace(legacy, marker, 1)
     # A hand-written <details><summary>filename</summary> has no marker.
-    # Insert one. Leaving the block unmarked makes posting report "no room".
-    if (
-        marker not in body
-        and f"<summary>{filename}</summary>" in body
-        and "<!-- repro:" not in body
-    ):
-        marked = _mark_hand_summary(body, filename, marker)
-        if marked is not None:
-            body = marked
+    # Insert one, so the block is kept or resized instead of copied again.
+    body = adopt_hand_block(body, filename, marker)
     if marker in body and len(body) <= limit:
         return body
     if marker in body:
