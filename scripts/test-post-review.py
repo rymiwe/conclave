@@ -50,6 +50,9 @@ from urllib.parse import parse_qs, urlsplit
 page = int(parse_qs(urlsplit(path).query).get('page', ['1'])[0])
 if '-X' in args:
     if base.endswith('/replies'):
+        if os.environ.get('GH_REPLY_FAIL'):
+            sys.stderr.write('HTTP 502 Bad Gateway\\n')
+            sys.exit(1)
         req = json.loads(sys.stdin.read())
         (state / 'posted-reply.json').write_text(json.dumps({'url': base, 'body': req}))
         print(json.dumps({'id': 77, 'html_url': 'https://github.com/example/widgets/pull/7#discussion_r77'}))
@@ -447,6 +450,55 @@ def test_repro_and_labels(root: Path) -> None:
     review = json.loads((f.state / 'posted-request.json').read_text())
     check(all(c.get('body') != 'The next build picks this up.' for c in review['comments']),
           'the review POST does not include the reply')
+
+    f = Fixture(root / 'two-ballots')
+    payload = f.payload()
+    payload['body_findings'] = ['f4', 'demo-2:f4']
+    f.set_payload(payload)
+    (f.council / 'demo-1' / 'repro').mkdir()
+    (f.council / 'demo-2' / 'repro').mkdir()
+    (f.council / 'demo-1' / 'repro' / 'f4.rb').write_text("from demo-1\n", encoding='utf-8')
+    (f.council / 'demo-2' / 'repro' / 'f4.rb').write_text("from demo-2\n", encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'two ballots with the same filename attach ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    check(req['body'].count('<summary>f4.rb</summary>') == 2, 'each ballot keeps its own summary')
+    check('from demo-1' in req['body'] and 'from demo-2' in req['body'], 'both scripts are in the review body')
+
+    f = Fixture(root / 'moved-huge')
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f2.rb').write_text('y' * 70000, encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a moved huge repro still dry-runs ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    check(len(req['body']) <= 65536, f'moved repro stays within the review body ({len(req["body"])})')
+    check('Truncated to' in req['body'] and '<summary>f2.rb</summary>' in req['body'],
+          'the moved script is truncated inside the review body')
+
+    f = Fixture(root / 'reply-retry')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 42, 'body': 'The next build picks this up.'})
+    f.set_payload(payload)
+    first = f.post(env={'GH_REPLY_FAIL': '1'})
+    pending = f.council / 'demo-1/post-7.pending.json'
+    first_posts = [c for c in f.calls() if '-X' in c]
+    review_posts = [c for c in first_posts if any(str(a).endswith('/reviews') for a in c)]
+    reply_posts = [c for c in first_posts if any(str(a).endswith('/replies') for a in c)]
+    # The reply POST is attempted and the stub records it before exiting 502.
+    # The review must not be recorded as posted, so a rerun can send the reply.
+    check(first.returncode != 0 and pending.is_file() and not (f.council / 'demo-1/posted.json').exists()
+          and len(review_posts) == 1 and len(reply_posts) == 1,
+          'a failed reply leaves the review pending and does not record it posted '
+          f'({first.returncode} {first.stderr.strip()} reviews={len(review_posts)} replies={len(reply_posts)})')
+    before = len(f.calls())
+    second = f.post()
+    new_posts = [c for c in f.calls()[before:] if '-X' in c]
+    check(second.returncode == 0 and len(new_posts) == 1
+          and any(str(arg).endswith('/comments/42/replies') for arg in new_posts[0]),
+          f'a rerun posts the reply and not the review again ({second.returncode} {new_posts} {second.stderr.strip()})')
+    check((f.council / 'demo-1/posted.json').is_file() and not pending.exists(),
+          'the retry records the review and clears the pending receipt')
 
     f = Fixture(root / 'own-pr')
     payload = f.payload()

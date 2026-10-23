@@ -217,14 +217,6 @@ def decode_blob(data: object) -> list[str] | None:
     return split_lines(text)
 
 
-def outside_block(repo: str, commit: str, moved: list[dict]) -> str:
-    parts = ["**Outside this diff**"]
-    for c in moved:
-        url = f"https://github.com/{repo}/blob/{commit}/{quote(c['path'])}#L{c['line']}"
-        parts.append(f"[`{c['path']}:{c['line']}`]({url})\n\n{c['body'].strip()}")
-    return "\n\n".join(parts)
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("id")
@@ -268,6 +260,13 @@ def main() -> int:
     if str(args.pr) in posted.get("reviews", {}):
         die(f"PR {args.pr} is already in {posted_path}; remove that entry to post again")
     pending_path = home / f"post-{args.pr}.pending.json"
+    payload_has_replies = any(
+        isinstance(c, dict) and c.get("in_reply_to") is not None for c in comments
+    )
+    # A review that is already on GitHub is not posted again. Replies are the
+    # exception: a failed reply POST leaves the pending receipt, and a rerun
+    # sends the replies that are not listed there.
+    resume: dict | None = None
     if pending_path.is_file():
         try:
             pending = json.loads(pending_path.read_text(encoding="utf-8"))
@@ -277,8 +276,11 @@ def main() -> int:
         if review_id is None:
             die(f"pending receipt {pending_path} has no review id")
         if review_on_github(repo, args.pr, review_id):
-            die(f"review {review_id} already exists on GitHub; not posting again")
-        pending_path.unlink()
+            if not payload_has_replies:
+                die(f"review {review_id} already exists on GitHub; not posting again")
+            resume = pending
+        else:
+            pending_path.unlink()
 
     head = gh_json(["api", f"repos/{repo}/pulls/{args.pr}"])
     head_sha = (head or {}).get("head", {}).get("sha")
@@ -301,7 +303,9 @@ def main() -> int:
             blobs[path] = decode_blob(data)
         return blobs[path]
 
-    def attach_finding_repro(text: str, ballot: str, fid: str) -> str:
+    def attach_finding_repro(
+        text: str, ballot: str, fid: str, *, limit: int = comment_draft.GITHUB_COMMENT_LIMIT
+    ) -> str:
         try:
             path = comment_draft.find_repro(council / ballot, fid)
         except comment_draft.ReproError as exc:
@@ -309,7 +313,7 @@ def main() -> int:
         if path is None:
             return text
         try:
-            return comment_draft.attach_repro(text, path)
+            return comment_draft.attach_repro(text, path, limit=limit, key=f"{ballot}/{path.name}")
         except UnicodeDecodeError as exc:
             die(f"repro {path} is not utf-8: {exc}")
 
@@ -335,7 +339,6 @@ def main() -> int:
         key = f"{ballot}:{fid}"
         if key in findings:
             die(f"comment {i}: finding {key} appears twice")
-        c["body"] = attach_finding_repro(str(c["body"]), ballot, fid)
         in_diff = files.get(c["path"], {}).get(c["line"])
         text = in_diff
         if text is None and c.get("expect"):
@@ -345,10 +348,11 @@ def main() -> int:
         if c.get("expect") and (text is None or c["expect"] not in text):
             errors.append(f"comment {i} ({key}): {c['path']}:{c['line']} reads {text!r}, expected {c['expect']!r}")
         if in_diff is None:
-            moved.append(c)
+            moved.append({**c, "body": str(c["body"]), "_ballot": ballot, "_fid": fid})
             findings[key] = {"ballot": ballot, "id": fid, "posted_as": "review body",
                              "path": c["path"], "line": c["line"], "reason": "outside the diff"}
         else:
+            c["body"] = attach_finding_repro(str(c["body"]), ballot, fid)
             inline.append({"path": c["path"], "line": c["line"], "side": "RIGHT", "body": c["body"]})
             findings[key] = {"ballot": ballot, "id": fid, "posted_as": "inline",
                              "path": c["path"], "line": c["line"], "_body": c["body"]}
@@ -363,8 +367,37 @@ def main() -> int:
         findings[key] = {"ballot": ballot, "id": fid, "posted_as": "review body"}
         body_findings.append((ballot, fid))
 
+    # A line outside the diff joins the review body. Its script is sized to
+    # the room left after every later moved comment's prose and permalink,
+    # so one large script cannot push the next comment over the limit.
     if moved:
-        body = (body.rstrip() + "\n\n" + outside_block(repo, commit, moved)).strip()
+        def moved_link(c: dict) -> str:
+            url = f"https://github.com/{repo}/blob/{commit}/{quote(c['path'])}#L{c['line']}"
+            return f"[`{c['path']}:{c['line']}`]({url})"
+
+        prose_cost: list[int] = []
+        for index, c in enumerate(moved):
+            header = "**Outside this diff**\n\n" if index == 0 else ""
+            prose_cost.append(len(header) + len(moved_link(c)) + 2 + len(str(c["body"]).strip()))
+        assembled = body.rstrip()
+        for index, c in enumerate(moved):
+            header = "**Outside this diff**\n\n" if index == 0 else ""
+            link = moved_link(c)
+            sep = "\n\n" if assembled else ""
+            later = sum(2 + prose_cost[j] for j in range(index + 1, len(moved)))
+            prefix = f"{assembled}{sep}{header}{link}\n\n"
+            room = comment_draft.GITHUB_COMMENT_LIMIT - len(prefix) - later
+            piece = attach_finding_repro(
+                str(c["body"]), c["_ballot"], c["_fid"], limit=max(room, 0)
+            ).strip()
+            if len(prefix) + len(piece) + later > comment_draft.GITHUB_COMMENT_LIMIT:
+                die(
+                    f"review body is {len(prefix) + len(piece) + later} characters; "
+                    f"GitHub's limit is {comment_draft.GITHUB_COMMENT_LIMIT}"
+                )
+            c["body"] = piece
+            assembled = prefix + piece
+        body = assembled
     for ballot, fid in body_findings:
         body = attach_finding_repro(body, ballot, fid)
     if len(body) > comment_draft.GITHUB_COMMENT_LIMIT:
@@ -411,32 +444,42 @@ def main() -> int:
         print("dry run: nothing posted")
         return 0
 
-    # Commit and body alone are not an identity: an empty body matches other reviewers.
-    login = (gh_json(["api", "user"]) or {}).get("login")
-    if not login:
-        die("gh api user returned no login")
-    for rev in gh_pages(f"repos/{repo}/pulls/{args.pr}/reviews"):
-        if (isinstance(rev, dict) and rev.get("commit_id") == commit and rev.get("body") == body
-                and (rev.get("user") or {}).get("login") == login and rev.get("id")):
-            die(f"review {rev['id']} already exists on GitHub; not posting again")
+    sent: set[int] = set()
+    if resume:
+        review_id = resume["review_id"]
+        review_url = resume.get("review_url")
+        if not review_url:
+            die(f"pending receipt {pending_path} has no review url")
+        review = {"id": review_id, "html_url": review_url, "state": resume.get("state")}
+        sent = {int(item) for item in resume.get("replies_posted") or []}
+    else:
+        # Commit and body alone are not an identity: an empty body matches other reviewers.
+        login = (gh_json(["api", "user"]) or {}).get("login")
+        if not login:
+            die("gh api user returned no login")
+        for rev in gh_pages(f"repos/{repo}/pulls/{args.pr}/reviews"):
+            if (isinstance(rev, dict) and rev.get("commit_id") == commit and rev.get("body") == body
+                    and (rev.get("user") or {}).get("login") == login and rev.get("id")):
+                die(f"review {rev['id']} already exists on GitHub; not posting again")
 
-    review = gh_json(["api", "-X", "POST", f"repos/{repo}/pulls/{args.pr}/reviews", "--input", "-"],
-                     stdin=json.dumps(request))
-    review_id = review.get("id")
-    review_url = review.get("html_url")
-    # The receipt lands before comment read-back. A 502 there must not allow a second POST.
-    if review_id:
-        write_receipt(pending_path, {
-            "repo": repo,
-            "pr": args.pr,
-            "review_id": review_id,
-            "review_url": review_url,
-            "commit_id": commit,
-            "state": review.get("state"),
-            "payload": str(payload_path),
-        })
-    if not review_id or not review_url:
-        die(f"POST returned no review id or url: {review!r}")
+        review = gh_json(["api", "-X", "POST", f"repos/{repo}/pulls/{args.pr}/reviews", "--input", "-"],
+                         stdin=json.dumps(request))
+        review_id = review.get("id")
+        review_url = review.get("html_url")
+        # The receipt lands before comment read-back. A 502 there must not allow a second POST.
+        if review_id:
+            write_receipt(pending_path, {
+                "repo": repo,
+                "pr": args.pr,
+                "review_id": review_id,
+                "review_url": review_url,
+                "commit_id": commit,
+                "state": review.get("state"),
+                "payload": str(payload_path),
+                "replies_posted": [],
+            })
+        if not review_id or not review_url:
+            die(f"POST returned no review id or url: {review!r}")
     back = gh_pages(f"repos/{repo}/pulls/{args.pr}/reviews/{review_id}/comments")
     unmatched: list[str] = []
     for key, f in findings.items():
@@ -466,15 +509,31 @@ def main() -> int:
         "posted_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "findings": findings,
     }
-    write_receipt(posted_path, posted)
-    pending_path.unlink(missing_ok=True)
+    def remember_reply(reply_id: int) -> None:
+        sent.add(reply_id)
+        write_receipt(pending_path, {
+            "repo": repo,
+            "pr": args.pr,
+            "review_id": review_id,
+            "review_url": review_url,
+            "commit_id": commit,
+            "state": review.get("state"),
+            "payload": str(payload_path),
+            "replies_posted": sorted(sent),
+        })
+
     for reply in replies:
+        if reply["in_reply_to"] in sent:
+            continue
         gh_json(
             ["api", "-X", "POST",
              f"repos/{repo}/pulls/{args.pr}/comments/{reply['in_reply_to']}/replies",
              "--input", "-"],
             stdin=json.dumps({"body": reply["body"]}),
         )
+        remember_reply(reply["in_reply_to"])
+    write_receipt(posted_path, posted)
+    pending_path.unlink(missing_ok=True)
     print(f"posted: {review_url}")
     print(f"record: {posted_path}")
     if unmatched:

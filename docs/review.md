@@ -1326,7 +1326,9 @@ that finding gets one collapsed block:
 </details>
 ````
 
-The summary is the filename. The fence language is the usual name for that
+The summary is the filename. Two findings that share a filename, from two
+ballots on one review, each get a block. An HTML comment above the details
+tag names the ballot and the filename so the second is not dropped. The fence language is the usual name for that
 extension (`rb` → `ruby`, `py` → `python`, `sh` → `bash`); an extension with
 no usual name is the extension itself. The fence is longer than any backtick
 run in the script, so the script cannot close it. A finding with no file gets
@@ -1335,7 +1337,8 @@ no block. A reply does not get the block.
 GitHub's review-comment limit is 65536 characters. A script that does not fit
 in the comment is cut inside the fence, and a note after the fence says how
 many bytes were kept and names `repro/<filename>`. The comment prose is not
-cut. A fenced script is not prose: `scripts/check-comment-links.py` skips
+cut. A comment moved into the review body is sized to the room left in that
+body, including its permalink. A fenced script is not prose: `scripts/check-comment-links.py` skips
 citations and internal words inside the fence, and a label inside the fence
 does not count.
 
@@ -1447,13 +1450,16 @@ script calls the posting helper. When the human says post:
    check on every body, and writes `post-<pr>.request.json`. A reply is recorded
    under `replies` and is not a new line comment. It posts nothing.
 3. Read the plan, then run the same command without `--dry-run`. It posts
-   one review (`side: RIGHT`, `commit_id`, line). A reply is posted separately,
-   to `pulls/<pr>/comments/<id>/replies`, and is not a new line on that review. It writes
+   one review (`side: RIGHT`, `commit_id`, line), writes
    `post-<pr>.pending.json` with the review id, then reads the comments back.
    The pending file is written before that read. A failed read-back still
    leaves the receipt, and a rerun looks the review up on GitHub and refuses
    to post again. A review with the same commit and body is refused too.
-   After a successful read-back it writes `tmp/council/<id>/posted.json`:
+   A reply is posted after that read, to `pulls/<pr>/comments/<id>/replies`,
+   and is not a new line on the review. The pending receipt lists each reply
+   that succeeded. If a reply POST fails, the receipt stays, and a rerun sends
+   the replies it does not yet list. It does not post the review again.
+   After the replies are sent it writes `tmp/council/<id>/posted.json`:
    the review id and url, and each comment's url keyed by
    `<ballot>:<finding>`. A PR already in `posted.json` is refused.
 4. Run `scripts/evidence-index.py <id> [<id> ...]`. It writes

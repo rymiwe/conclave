@@ -61,6 +61,16 @@ def main() -> None:
 
         again = comment_draft.attach_repro(drafted, path)
         check(again.count("<summary>f1.rb</summary>") == 1, "a second attach does not duplicate the block")
+        other = directory / "other"
+        other.mkdir()
+        (other / "f1.rb").write_text("from the other ballot\n", encoding="utf-8")
+        both = comment_draft.attach_repro(
+            comment_draft.attach_repro("**Requested:** one.\n", path, key="demo-1/f1.rb"),
+            other / "f1.rb",
+            key="demo-2/f1.rb",
+        )
+        check(both.count("<summary>f1.rb</summary>") == 2, "two ballots keep two summaries")
+        check("puts 'kept'" in both and "from the other ballot" in both, "two ballots keep both scripts")
 
         ballot = directory / "ballot"
         repro = ballot / "repro"

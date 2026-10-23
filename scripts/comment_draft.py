@@ -103,45 +103,54 @@ def _note(filename: str, kept: str, total: str) -> str:
     )
 
 
-def render_repro_block(filename: str, script: str, *, budget: int | None = None) -> str:
+def render_repro_block(
+    filename: str,
+    script: str,
+    *,
+    budget: int | None = None,
+    marker: str | None = None,
+) -> str:
     """Collapsed details block. Truncates the script when budget is too small.
 
     budget is the maximum length of the block itself. None means no limit.
     An empty string means even the truncation note does not fit.
+    marker, when set, is an HTML comment on the line above the details tag.
+    The summary stays the filename. The marker tells two ballots with the
+    same filename apart.
     """
     lang = language_for(filename)
-    full = (
-        f"<details><summary>{filename}</summary>\n\n"
-        f"{fence_for(script, lang)}"
-        f"</details>\n"
-    )
+    head = f"{marker}\n" if marker else ""
+
+    def block_for(prefix: str, note: str | None) -> str:
+        note_part = f"\n{note}\n" if note else ""
+        return (
+            f"{head}<details><summary>{filename}</summary>\n\n"
+            f"{fence_for(prefix, lang)}"
+            f"{note_part}</details>\n"
+        )
+
+    full = block_for(script, None)
     if budget is None or len(full) <= budget:
         return full
 
-    def block_for(prefix: str) -> str:
+    def truncated(prefix: str) -> str:
         kept = len(prefix.encode("utf-8"))
         total = len(script.encode("utf-8"))
-        note = _note(filename, str(kept), str(total))
-        return (
-            f"<details><summary>{filename}</summary>\n\n"
-            f"{fence_for(prefix, lang)}"
-            f"\n{note}\n"
-            f"</details>\n"
-        )
+        return block_for(prefix, _note(filename, str(kept), str(total)))
 
-    if len(block_for("")) > budget:
+    if len(truncated("")) > budget:
         return ""
     lo = 0
     hi = len(script)
     best = 0
     while lo <= hi:
         mid = (lo + hi) // 2
-        if len(block_for(script[:mid])) <= budget:
+        if len(truncated(script[:mid])) <= budget:
             best = mid
             lo = mid + 1
         else:
             hi = mid - 1
-    return block_for(script[:best])
+    return truncated(script[:best])
 
 
 def join_comment(body: str, block: str) -> str:
@@ -161,15 +170,21 @@ def attach_repro(
     script_path: Path,
     *,
     limit: int = GITHUB_COMMENT_LIMIT,
+    key: str | None = None,
 ) -> str:
     """Append the repro block when the comment does not already carry it.
 
-    A comment that already has this filename in a details summary is left
-    alone. A script that does not fit under limit is truncated with a note.
-    When the comment prose already fills the limit, the block is omitted.
+    key identifies this file. It defaults to the filename. Two ballots can
+    both attach f1.rb because each key is different. A hand-written summary
+    with no marker is left alone. A script that does not fit under limit is
+    truncated with a note. When the comment prose already fills the limit,
+    the block is omitted.
     """
     filename = script_path.name
-    if f"<summary>{filename}</summary>" in body:
+    marker = f"<!-- repro:{key or filename} -->"
+    if marker in body:
+        return body
+    if f"<summary>{filename}</summary>" in body and "<!-- repro:" not in body:
         return body
     script = script_path.read_text(encoding="utf-8")
     if not body:
@@ -186,7 +201,7 @@ def attach_repro(
         budget = limit - len(prefix)
     if budget <= 0:
         return body
-    block = render_repro_block(filename, script, budget=budget)
+    block = render_repro_block(filename, script, budget=budget, marker=marker)
     if not block:
         return body
     return prefix + block if prefix else block
