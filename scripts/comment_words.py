@@ -47,10 +47,10 @@ def _overlaps(span: tuple[int, int], taken: list[tuple[int, int]]) -> bool:
     return any(not (end <= a or start >= b) for a, b in taken)
 
 
-def word_hits(text: str) -> list[tuple[int, str, str]]:
-    """(line, matched text, plain replacement), longer phrases first."""
+def word_hit_spans(text: str) -> list[tuple[int, str, str, int, int]]:
+    """(line, matched text, plain replacement, start, end), longer phrases first."""
     taken: list[tuple[int, int]] = []
-    found: list[tuple[int, str, str]] = []
+    found: list[tuple[int, str, str, int, int]] = []
     for phrase, replacement in PHRASES:
         rx = re.compile(r"\b" + re.escape(phrase) + r"\b", re.IGNORECASE)
         for match in rx.finditer(text):
@@ -58,15 +58,20 @@ def word_hits(text: str) -> list[tuple[int, str, str]]:
                 continue
             taken.append(match.span())
             line = text.count("\n", 0, match.start()) + 1
-            found.append((line, match.group(0), replacement))
+            found.append((line, match.group(0), replacement, match.start(), match.end()))
     for match in vendor_pattern().finditer(text):
         if _overlaps(match.span(), taken):
             continue
         taken.append(match.span())
         line = text.count("\n", 0, match.start()) + 1
-        found.append((line, match.group(0), VENDOR_SAY))
+        found.append((line, match.group(0), VENDOR_SAY, match.start(), match.end()))
     found.sort(key=lambda item: (item[0], item[1]))
     return found
+
+
+def word_hits(text: str) -> list[tuple[int, str, str]]:
+    """(line, matched text, plain replacement), longer phrases first."""
+    return [(line, span, say) for line, span, say, _start, _end in word_hit_spans(text)]
 
 
 def word_problems(text: str) -> list[str]:

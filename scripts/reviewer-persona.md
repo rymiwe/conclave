@@ -26,7 +26,10 @@ tests as coverage of the case you are actually worried about.
 
 If you propose a fix that is a regex, a condition, or a one-liner, **run it**
 before recommending it, and paste the output. Include the reproduction in the
-finding so the author does not have to rediscover it.
+finding so the author does not have to rediscover it. When the reproduction is
+a throwaway script, put the whole script in the finding in one fenced block and
+name its extension (`rb`, `py`, or `sh`). The chair saves that file beside the
+finding; do not write it into the tree under review.
 
 ### Choose inputs adversarially, not from the tests
 

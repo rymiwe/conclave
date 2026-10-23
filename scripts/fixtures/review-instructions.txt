@@ -18,6 +18,6 @@ Never start, stop, restart, or reconfigure a database server, container, or othe
 - Every finding cites `file:line` and a concrete failure: the input or state, then the wrong behaviour. No concrete failure means it is not a finding.
 - Zero findings is a fine answer.
 - Rank most severe first.
-- Execute anything with computable behaviour (parsing, regexes, date arithmetic, boundary comparisons) against adversarial inputs that the existing tests do not contain, and paste the output.
+- Execute anything with computable behaviour (parsing, regexes, date arithmetic, boundary comparisons) against adversarial inputs that the existing tests do not contain, and paste the output. When you verify a finding with a throwaway script, include the whole script in the finding in one fenced block and name its extension (`rb`, `py`, or `sh`).
 - End with a "Checked and found clean" list naming the areas examined and the inputs tried.
 - Do not read sibling directories or anything outside the worktree.

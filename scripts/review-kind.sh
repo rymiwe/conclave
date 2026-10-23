@@ -7,7 +7,9 @@
 # (skipped when the claude leg is already Opus native), Argon packet-first
 # when seated, Muse with contributor mode off, model check, read-only compare, blind.
 # Phase 2 is the chair (findings.json). Phase 3 is jev-judge.py --findings.
-# Phase 4 is the chair's comments; scripts/check-comment-links.py checks links.
+# Phase 4 is the chair's comments; scripts/check-comment-links.py checks links
+# and scripts/check-comment-labels.py checks labels. A repro script is
+# repro/<finding-id>.<ext> in the ballot directory.
 # Judgment lives in docs/review.md. This file is the mechanical part.
 
 SCRATCH=""
@@ -40,7 +42,7 @@ REVIEW_HEAD_OID=""
 # The clean-list sentence is the codex form (only findings and overall_explanation
 # are shown). The Grok prompt uses the other ending; see GROK_REVIEW_PROMPT.
 ASTRA_RULES=$(cat <<'EOF'
-every finding must state a concrete failure (the input or state, and the resulting wrong behaviour). No concrete failure means it is not a finding. Do not pad; zero findings is a fine answer. For anything with computable behaviour (parsing, regexes, date arithmetic, boundary comparisons), execute it against real inputs in a scratch script instead of reasoning about it, and paste the output; a passing test suite only covers the cases someone already imagined. Never take your inputs from the existing test suite. Those are the cases the author already imagined, and they already pass, so running them tells you nothing. Invent inputs designed to defeat the code: values just inside and just outside every boundary; inputs that look like the target and must still be rejected; inputs that do not look like the target at all but coincidentally satisfy the pattern (this is the class reviewers miss most: the ID whose digits happen to form a valid date, the filename that parses by accident, the code that happens to match a prefix; ask what else in the real data could satisfy this pattern, not merely whether the intended thing does); empty, absent, malformed, duplicated, and extreme values. For a pattern match, look at what the pattern does not anchor (a missing digit or word boundary, an unanchored start, a greedy quantifier) and build an input that exploits it, then check whether a real-world value of that shape could plausibly occur in this system's data. Only the findings list and overall_explanation are shown to the reader, so put a 'Checked and found clean' list inside overall_explanation, naming the areas you examined that produced no finding and the exact inputs you tried for anything you tested by hand.
+every finding must state a concrete failure (the input or state, and the resulting wrong behaviour). No concrete failure means it is not a finding. Do not pad; zero findings is a fine answer. For anything with computable behaviour (parsing, regexes, date arithmetic, boundary comparisons), execute it against real inputs in a scratch script instead of reasoning about it, and paste the output, including the whole script and its extension; a passing test suite only covers the cases someone already imagined. Never take your inputs from the existing test suite. Those are the cases the author already imagined, and they already pass, so running them tells you nothing. Invent inputs designed to defeat the code: values just inside and just outside every boundary; inputs that look like the target and must still be rejected; inputs that do not look like the target at all but coincidentally satisfy the pattern (this is the class reviewers miss most: the ID whose digits happen to form a valid date, the filename that parses by accident, the code that happens to match a prefix; ask what else in the real data could satisfy this pattern, not merely whether the intended thing does); empty, absent, malformed, duplicated, and extreme values. For a pattern match, look at what the pattern does not anchor (a missing digit or word boundary, an unanchored start, a greedy quantifier) and build an input that exploits it, then check whether a real-world value of that shape could plausibly occur in this system's data. Only the findings list and overall_explanation are shown to the reader, so put a 'Checked and found clean' list inside overall_explanation, naming the areas you examined that produced no finding and the exact inputs you tried for anything you tested by hand.
 EOF
 )
 
@@ -54,7 +56,7 @@ EOF
 GROK_REVIEW_PROMPT=$(cat <<'EOF'
 /review --local
 
-Write the review file before you explore further. Every finding must state a concrete failure (the input or state, and the resulting wrong behaviour). No concrete failure means it is not a finding. Do not pad; zero findings is a fine answer. Do not run an open-ended test campaign and do not re-read the tree after the first pass. If you test computable behaviour, one scratch script and its output is enough, then write the file. End with a 'Checked and found clean' list naming the areas you examined that produced no finding.
+Write the review file before you explore further. Every finding must state a concrete failure (the input or state, and the resulting wrong behaviour). No concrete failure means it is not a finding. Do not pad; zero findings is a fine answer. Do not run an open-ended test campaign and do not re-read the tree after the first pass. If you test computable behaviour, one scratch script and its output is enough, then write the file. Include the whole script in the finding and name its extension. End with a 'Checked and found clean' list naming the areas you examined that produced no finding.
 EOF
 )
 
@@ -1232,7 +1234,7 @@ Never start, stop, restart, or reconfigure a database server, container, or othe
 - Every finding cites `file:line` and a concrete failure: the input or state, then the wrong behaviour. No concrete failure means it is not a finding.
 - Zero findings is a fine answer.
 - Rank most severe first.
-- Execute anything with computable behaviour (parsing, regexes, date arithmetic, boundary comparisons) against adversarial inputs that the existing tests do not contain, and paste the output.
+- Execute anything with computable behaviour (parsing, regexes, date arithmetic, boundary comparisons) against adversarial inputs that the existing tests do not contain, and paste the output. When you verify a finding with a throwaway script, include the whole script in the finding in one fenced block and name its extension (`rb`, `py`, or `sh`).
 - End with a "Checked and found clean" list naming the areas examined and the inputs tried.
 - Do not read sibling directories or anything outside the worktree.
 EOF
@@ -2545,10 +2547,20 @@ Next step (chair, not this script):
   legs uses the blinded letters only. No vendor names and no agreement counts.
   {"findings": []} is a clean review.
   Then: scripts/conclave.sh $ID --findings
-  Then draft comments. Every ticket id, #N, bare SHA, and file:line in a
-  comment must sit inside a markdown link:
+  Then draft comments. When you verify a finding by running a throwaway script,
+  save that script as repro/<finding-id>.<ext> in the ballot directory
+  (for example repro/f1.rb). The drafter attaches it to that finding's comment.
+  A finding with no file there gets no block.
+  On someone else's pull request, label each new inline comment and each
+  review-body item with **Requested:**, **Advisory:**, or **Informational:**.
+  Do not draft **Question:**. A reply to an existing comment never gets a label.
+  Every ticket id, #N, bare SHA, and file:line in a comment must sit inside a
+  markdown link:
     scripts/check-comment-links.py <comments.md>
   That check rejects an internal word in a public comment and names the plain replacement.
+  A fenced script is not prose: citations and internal words inside the fence are skipped.
+  scripts/check-comment-labels.py <post-payload.json> flags a labeled reply, or an
+  unlabeled new inline comment on someone else's pull request.
   Show every draft in full in chat, as it would go out, in the message
   that asks whether to post. A file path is not a preview.
   The script does not write comment prose and does not post.

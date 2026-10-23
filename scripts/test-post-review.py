@@ -49,12 +49,17 @@ base = path.split('?')[0]
 from urllib.parse import parse_qs, urlsplit
 page = int(parse_qs(urlsplit(path).query).get('page', ['1'])[0])
 if '-X' in args:
-    if base != repo + '/reviews':
+    if base.endswith('/replies'):
+        req = json.loads(sys.stdin.read())
+        (state / 'posted-reply.json').write_text(json.dumps({'url': base, 'body': req}))
+        print(json.dumps({'id': 77, 'html_url': 'https://github.com/example/widgets/pull/7#discussion_r77'}))
+    elif base != repo + '/reviews':
         sys.exit('unexpected POST ' + base)
-    req = json.loads(sys.stdin.read())
-    (state / 'posted-request.json').write_text(json.dumps(req))
-    print(json.dumps({'id': 900, 'state': 'COMMENTED',
-                      'html_url': 'https://github.com/example/widgets/pull/7#pullrequestreview-900'}))
+    else:
+        req = json.loads(sys.stdin.read())
+        (state / 'posted-request.json').write_text(json.dumps(req))
+        print(json.dumps({'id': 900, 'state': 'COMMENTED',
+                          'html_url': 'https://github.com/example/widgets/pull/7#pullrequestreview-900'}))
 elif base == repo:
     print(json.dumps({'head': {'sha': os.environ.get('GH_HEAD', '1' * 40)}}))
 elif base == repo + '/files':
@@ -375,6 +380,84 @@ def test_findings_shape(root: Path) -> None:
           f'f11 a list findings file is a named gap ({proc.returncode} {proc.stderr.strip()} index={out.is_file()})')
 
 
+def test_repro_and_labels(root: Path) -> None:
+    """Repro files are attached. A labeled reply and an unlabeled new inline comment are refused."""
+    f = Fixture(root / 'repro')
+    script = "```\n# council\nputs 'abc1234'\n# app/widget.rb:3\n```\n"
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f1.rb').write_text(script, encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'repro comment passes the link check ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    body = req['comments'][0]['body']
+    check('<summary>f1.rb</summary>' in body and '````ruby\n' in body and script in body,
+          'in-diff comment carries the ruby repro block')
+    check('Truncated to' not in body, 'a short script is not truncated')
+    check(all('<summary>' not in c['body'] for c in req['comments'][1:]),
+          'a finding with no repro file gets no block')
+    check('council' not in proc.stderr and 'outside a markdown link' not in proc.stderr,
+          'the fenced script does not trip the citation or word lint')
+
+    f = Fixture(root / 'labeled-reply')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 42, 'body': '**Requested:** still broken.'})
+    f.set_payload(payload)
+    refused(f, 'a labeled reply is refused before POST', 'labeled reply')
+
+    f = Fixture(root / 'unlabeled-inline')
+    payload = f.payload()
+    payload['pr_author'] = 'author'
+    payload['reviewer'] = 'me'
+    payload['comments'][0]['body'] = 'size counts deleted items.'
+    f.set_payload(payload)
+    refused(f, 'an unlabeled new inline comment on someone else\'s PR is refused', 'unlabeled new inline comment')
+
+    f = Fixture(root / 'labeled-inline')
+    payload = f.payload()
+    payload['pr_author'] = 'author'
+    payload['reviewer'] = 'me'
+    payload['comments'][0]['body'] = '**Informational:** size counts deleted items.'
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0 and f.posts() == 0, f'a labeled new inline comment is accepted ({proc.stderr.strip()})')
+
+    f = Fixture(root / 'plain-reply')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 42, 'body': 'The next build picks this up.'})
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'an unlabeled reply is accepted ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    check(req['replies'] == [{'in_reply_to': 42, 'body': 'The next build picks this up.'}],
+          'a reply is recorded separately')
+    check(all('in_reply_to' not in c for c in req['comments']), 'a reply is not a new line comment')
+    check(f.posts() == 0, 'dry run does not post the reply')
+
+    f = Fixture(root / 'post-reply')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 42, 'body': 'The next build picks this up.'})
+    f.set_payload(payload)
+    proc = f.post()
+    check(proc.returncode == 0, f'posting a reply exits zero ({proc.stderr.strip()})')
+    check(f.posts() == 2, f'review and reply are two POSTs ({f.posts()})')
+    reply = json.loads((f.state / 'posted-reply.json').read_text())
+    check(reply['url'].endswith('/comments/42/replies') and reply['body']['body'] == 'The next build picks this up.',
+          'the reply goes to the reply endpoint')
+    review = json.loads((f.state / 'posted-request.json').read_text())
+    check(all(c.get('body') != 'The next build picks this up.' for c in review['comments']),
+          'the review POST does not include the reply')
+
+    f = Fixture(root / 'own-pr')
+    payload = f.payload()
+    payload['pr_author'] = 'me'
+    payload['reviewer'] = 'me'
+    payload['comments'][0]['body'] = 'size counts deleted items.'
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'an unlabeled inline comment on your own PR is not flagged ({proc.stderr.strip()})')
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix='post-review-tests-') as raw:
         root = Path(raw)
@@ -389,6 +472,7 @@ def main() -> None:
         test_readback_does_not_double_post(root)
         test_other_reviewer_same_body(root)
         test_refusals(root)
+        test_repro_and_labels(root)
     print('all post-review checks passed')
 
 

@@ -16,9 +16,13 @@ to tmp/council/<id>/post-<pr>.json:
     "event": "COMMENT",              COMMENT (default) or REQUEST_CHANGES
     "body": "summary",
     "body_findings": ["f7"],         findings carried in the summary body
+    "pr_author": "octocat",          optional; else user.login on the pull request
+    "reviewer": "me",                optional; else gh api user, and only when a
+                                     new inline comment has no label
     "comments": [
       {"finding": "f2", "path": "app/x.rb", "line": 54, "body": "...",
-       "side": "RIGHT", "expect": "optional text that must be on that line"}
+       "side": "RIGHT", "expect": "optional text that must be on that line"},
+      {"in_reply_to": 12345, "body": "a reply has no label"}
     ]
   }
 
@@ -30,7 +34,11 @@ Steps, in order. Any failure stops before the POST.
    A line outside the diff moves into the review body with a permalink.
    "expect", when given, must appear in that line's text. Outside the diff,
    the text is the file at commit_id.
-3. Every body must pass scripts/check-comment-links.py.
+3. Every body must pass scripts/check-comment-links.py, and the payload must
+   pass scripts/check-comment-labels.py. A comment with in_reply_to is a reply
+   and is not sent as a new line comment. A repro/<finding-id>.<ext> file in
+   that finding's ballot directory is attached to the new inline comment, or
+   to the review body when the finding is in body_findings.
 4. The request goes to tmp/council/<id>/post-<pr>.request.json.
 5. --dry-run stops here. Otherwise POST pulls/<pr>/reviews, write
    tmp/council/<id>/post-<pr>.pending.json with the review id, then read the
@@ -62,6 +70,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 from conclave_env import setting  # noqa: E402
+import comment_draft  # noqa: E402
 
 GH = setting("GH", "gh")
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
@@ -71,6 +80,16 @@ EVENTS = ("COMMENT", "REQUEST_CHANGES")
 
 def die(msg: str) -> None:
     raise SystemExit(f"post-review: {msg}")
+
+
+def load_label_check():
+    spec = importlib.util.spec_from_file_location(
+        "check_comment_labels", ROOT / "scripts" / "check-comment-labels.py"
+    )
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def load_links():
@@ -271,6 +290,7 @@ def main() -> int:
     findings: dict[str, dict] = {}
     inline: list[dict] = []
     moved: list[dict] = []
+    replies: list[dict] = []
     errors: list[str] = []
     blobs: dict[str, list[str] | None] = {}
 
@@ -281,7 +301,29 @@ def main() -> int:
             blobs[path] = decode_blob(data)
         return blobs[path]
 
+    def attach_finding_repro(text: str, ballot: str, fid: str) -> str:
+        try:
+            path = comment_draft.find_repro(council / ballot, fid)
+        except comment_draft.ReproError as exc:
+            die(str(exc))
+        if path is None:
+            return text
+        try:
+            return comment_draft.attach_repro(text, path)
+        except UnicodeDecodeError as exc:
+            die(f"repro {path} is not utf-8: {exc}")
+
     for i, c in enumerate(comments):
+        if not isinstance(c, dict):
+            die(f"comment {i}: not an object")
+        if c.get("in_reply_to") is not None:
+            reply_id = c["in_reply_to"]
+            if type(reply_id) is not int or reply_id < 1:
+                die(f"comment {i}: in_reply_to must be a positive integer")
+            if not isinstance(c.get("body"), str):
+                die(f"comment {i}: missing body")
+            replies.append({"in_reply_to": reply_id, "body": c["body"]})
+            continue
         for field in ("finding", "path", "line", "body"):
             if field not in c:
                 die(f"comment {i}: missing {field}")
@@ -293,6 +335,7 @@ def main() -> int:
         key = f"{ballot}:{fid}"
         if key in findings:
             die(f"comment {i}: finding {key} appears twice")
+        c["body"] = attach_finding_repro(str(c["body"]), ballot, fid)
         in_diff = files.get(c["path"], {}).get(c["line"])
         text = in_diff
         if text is None and c.get("expect"):
@@ -311,20 +354,42 @@ def main() -> int:
                              "path": c["path"], "line": c["line"], "_body": c["body"]}
         if c.get("severity"):
             findings[key]["severity"] = c["severity"]
+    body_findings = []
     for raw in payload.get("body_findings", []):
         ballot, fid = finding_key(raw, default_ballot)
         key = f"{ballot}:{fid}"
         if key in findings:
             die(f"body finding {key} is also an inline comment")
         findings[key] = {"ballot": ballot, "id": fid, "posted_as": "review body"}
+        body_findings.append((ballot, fid))
 
     if moved:
         body = (body.rstrip() + "\n\n" + outside_block(repo, commit, moved)).strip()
+    for ballot, fid in body_findings:
+        body = attach_finding_repro(body, ballot, fid)
+    if len(body) > comment_draft.GITHUB_COMMENT_LIMIT:
+        die(f"review body is {len(body)} characters; GitHub's limit is {comment_draft.GITHUB_COMMENT_LIMIT}")
     links = load_links()
-    for label, text in [("body", body)] + [(f"comment {c['path']}:{c['line']}", c["body"]) for c in inline]:
+    label_check = load_label_check()
+    author = payload.get("pr_author") or ((head or {}).get("user") or {}).get("login")
+    reviewer = payload.get("reviewer")
+    needs_reviewer = any(
+        isinstance(c, dict)
+        and c.get("in_reply_to") is None
+        and not comment_draft.has_label(str(c.get("body", "")))
+        for c in comments
+    )
+    if needs_reviewer and not reviewer:
+        reviewer = (gh_json(["api", "user"]) or {}).get("login")
+    for item in label_check.problems({"comments": comments}, pr_author=author, reviewer=reviewer):
+        errors.append(item)
+    checked = [("body", body)]
+    checked += [(f"comment {c['path']}:{c['line']}", c["body"]) for c in inline]
+    checked += [(f"reply {r['in_reply_to']}", r["body"]) for r in replies]
+    for label, text in checked:
         for p in links.problems(text):
             errors.append(f"{label}: {p} outside a markdown link")
-        for line, span, say in links._words().word_hits(text):
+        for line, span, say in links.word_hits_outside_fences(text):
             errors.append(f'{label}: line {line}: public comment contains "{span}"; say "{say}".')
     if errors:
         for e in errors:
@@ -332,10 +397,13 @@ def main() -> int:
         die(f"{len(errors)} problem(s); nothing posted")
 
     request = {"commit_id": commit, "event": event, "body": body, "comments": inline}
+    record = dict(request)
+    if replies:
+        record["replies"] = replies
     request_path = home / f"post-{args.pr}.request.json"
-    request_path.write_text(json.dumps(request, indent=2) + "\n", encoding="utf-8")
+    request_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(f"{repo}#{args.pr} at {commit[:12]}: {len(inline)} inline, {len(moved)} moved to the body "
-          f"(outside the diff), {len(payload.get('body_findings', []))} body findings")
+          f"(outside the diff), {len(payload.get('body_findings', []))} body findings, {len(replies)} replies")
     for c in moved:
         print(f"  moved: {c['path']}:{c['line']} ({c['finding']})")
     print(f"request: {request_path}")
@@ -400,6 +468,13 @@ def main() -> int:
     }
     write_receipt(posted_path, posted)
     pending_path.unlink(missing_ok=True)
+    for reply in replies:
+        gh_json(
+            ["api", "-X", "POST",
+             f"repos/{repo}/pulls/{args.pr}/comments/{reply['in_reply_to']}/replies",
+             "--input", "-"],
+            stdin=json.dumps({"body": reply["body"]}),
+        )
     print(f"posted: {review_url}")
     print(f"record: {posted_path}")
     if unmatched:

@@ -154,6 +154,17 @@ def is_host_port(token: str) -> bool:
     return label.isdigit() or label in HOST_LABELS
 
 
+def word_hits_outside_fences(text: str) -> list[tuple[int, str, str]]:
+    """Word hits in prose. A fenced script is not the comment."""
+    fences = fence_spans(text)
+    found: list[tuple[int, str, str]] = []
+    for line, span, say, start, end in _words().word_hit_spans(text):
+        if covered((start, end), fences):
+            continue
+        found.append((line, span, say))
+    return found
+
+
 def problems(text: str) -> list[str]:
     links = link_spans(text)
     fences = fence_spans(text)
@@ -193,7 +204,7 @@ def main() -> None:
         raise SystemExit(f"not a file: {path}")
     text = path.read_text(encoding="utf-8")
     found = problems(text)
-    words = _words().word_hits(text)
+    words = word_hits_outside_fences(text)
     if found or words:
         if found:
             print(f"{path}: {len(found)} citation(s) outside a markdown link")
