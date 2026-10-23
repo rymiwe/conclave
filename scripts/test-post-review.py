@@ -423,9 +423,19 @@ def test_repro_and_labels(root: Path) -> None:
         '- **Advisory:** the helper drops a row.\n'
     )
     f.set_payload(payload)
+    refused(f, 'a labeled summary bullet is refused before POST', 'labeled bullet')
+
+    f = Fixture(root / 'summary-plain-bullets')
+    payload = f.payload()
+    payload['body'] = (
+        'Four notes on the widget change. The earlier fix is '
+        '[#6](https://github.com/example/widgets/pull/6).\n\n'
+        '- the helper drops a row.\n'
+    )
+    f.set_payload(payload)
     proc = f.post('--dry-run')
     check(proc.returncode == 0 and f.posts() == 0,
-          f'a summary bullet and a moved comment label are accepted ({proc.returncode} {proc.stderr.strip()})')
+          f'an unlabeled summary bullet and a moved comment label are accepted ({proc.returncode} {proc.stderr.strip()})')
 
     f = Fixture(root / 'unlabeled-inline')
     payload = f.payload()
@@ -673,6 +683,216 @@ def test_moved_repro_keeps_its_block(root: Path) -> None:
     check('of 10000000 bytes' in body, 'the truncation note names the real byte length')
 
 
+def test_hand_written_repro_is_adopted(root: Path) -> None:
+    """A documented hand-written block has no marker. Posting adopts it."""
+    block = (
+        "<details><summary>{name}</summary>\n\n"
+        "```ruby\n"
+        "{script}"
+        "```\n\n"
+        "</details>\n"
+    )
+
+    f = Fixture(root / 'hand-moved')
+    payload = f.payload()
+    payload['body_findings'] = []
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f2']
+    script = "puts :hand\n"
+    payload['comments'][0]['body'] = (
+        "**Question:** should the label follow the locale?\n\n"
+        + block.format(name='f2.rb', script=script)
+    )
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f2.rb').write_text(script, encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0 and 'no room for repro' not in proc.stderr,
+          f'a hand-written moved repro is not a false no-room error '
+          f'({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    body = req['body']
+    check('<!-- repro:demo-1/f2.rb -->' in body and body.count('<summary>f2.rb</summary>') == 1
+          and 'puts :hand' in body,
+          'posting adopts the hand-written moved block by inserting the marker')
+
+    f = Fixture(root / 'hand-body')
+    payload = f.payload()
+    payload['body_findings'] = ['f4']
+    script = "puts :bodyhand\n"
+    payload['body'] = payload['body'] + "\n\n" + block.format(name='f4.rb', script=script)
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f4.rb').write_text("puts :fromfile\n", encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0 and 'no room for repro' not in proc.stderr,
+          f'a hand-written body repro is not a false no-room error '
+          f'({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    body = req['body']
+    # This fixture also moves f2 into the body, so the adopted f4 block is
+    # rendered again from repro/f4.rb into the room the moved comment leaves.
+    check('<!-- repro:demo-1/f4.rb -->' in body and body.count('<summary>f4.rb</summary>') == 1
+          and 'puts :fromfile' in body and 'puts :bodyhand' not in body,
+          'posting adopts the hand-written body block once, rendered from the file beside a moved comment')
+
+    f = Fixture(root / 'hand-body-alone')
+    payload = f.payload()
+    payload['body_findings'] = ['f4']
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f1']
+    payload['body'] = payload['body'] + "\n\n" + block.format(name='f4.rb', script="puts :bodyhand\n")
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f4.rb').write_text("puts :fromfile\n", encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a hand-written body repro with no moved comment posts ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    body = req['body']
+    check('<!-- repro:demo-1/f4.rb -->' in body and body.count('<summary>f4.rb</summary>') == 1
+          and 'puts :bodyhand' in body and 'puts :fromfile' not in body,
+          'with no moved comment, the hand-written body block that fits is kept as written')
+
+    f = Fixture(root / 'hand-body-after-moved')
+    payload = f.payload()
+    payload['body_findings'] = ['f4']
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f2']
+    payload['body'] = payload['body'] + "\n\n" + block.format(name='f4.rb', script="puts :bodyhand\n")
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f2.rb').write_text("puts :moved\n", encoding='utf-8')
+    (repro / 'f4.rb').write_text("puts :fromfile\n", encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a moved repro plus a hand-written body repro posts ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    body = req['body']
+    check(body.count('<summary>f4.rb</summary>') == 1 and '<!-- repro:demo-1/f4.rb -->' in body
+          and 'puts :fromfile' in body and 'puts :bodyhand' not in body
+          and '<!-- repro:demo-1/f2.rb -->' in body,
+          'a hand-written body block is adopted after another marker is already in the body')
+
+    f = Fixture(root / 'big-hand-body-with-moved')
+    payload = f.payload()
+    payload['body_findings'] = ['f4']
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f2']
+    payload['body'] = payload['body'] + "\n\n" + block.format(name='f4.rb', script='# pad\n' * 12000)
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f2.rb').write_text("puts :moved\n", encoding='utf-8')
+    (repro / 'f4.rb').write_text('# pad\n' * 12000, encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0,
+          f'a large hand-written body block with a moved comment is resized, not refused ({proc.returncode} {proc.stderr.strip()})')
+    if proc.returncode == 0:
+        req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+        body = req['body']
+        check(len(body) <= 65536 and body.count('<summary>f4.rb</summary>') == 1
+              and '<!-- repro:demo-1/f4.rb -->' in body and '<!-- repro:demo-1/f2.rb -->' in body
+              and 'puts :moved' in body,
+              f'both scripts land in the review body within the limit ({len(body)})')
+
+    f = Fixture(root / 'hand-inline')
+    payload = f.payload()
+    payload['body_findings'] = []
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f1']
+    payload['comments'][0]['body'] = (
+        payload['comments'][0]['body'].rstrip() + "\n\n" + block.format(name='f1.rb', script="puts :inlinehand\n")
+    )
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f1.rb').write_text("puts :fromfile\n", encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a hand-written inline repro posts ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    inline_body = req['comments'][0]['body']
+    check(inline_body.count('<summary>f1.rb</summary>') == 1 and '<!-- repro:demo-1/f1.rb -->' in inline_body
+          and 'puts :inlinehand' in inline_body and 'puts :fromfile' not in inline_body,
+          'posting adopts a hand-written inline block')
+
+
+def test_inline_repro_not_dropped(root: Path) -> None:
+    """An inline repro that does not fit is refused, and an over-limit body is refused."""
+    f = Fixture(root / 'inline-no-room')
+    payload = f.payload()
+    payload['body_findings'] = []
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f1']
+    label = '**Requested:** '
+    payload['comments'][0]['body'] = label + ('x' * (65536 - len(label)))
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f1.rb').write_text('puts :hi\n', encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and f.posts() == 0
+          and 'inline comment demo-1:f1 has no room for repro demo-1/f1.rb' in proc.stderr
+          and not (f.council / 'demo-1/post-7.request.json').exists(),
+          'an inline repro that does not fit is refused before POST '
+          f'({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'inline-over-limit')
+    payload = f.payload()
+    payload['body_findings'] = []
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f1']
+    label = '**Requested:** '
+    payload['comments'][0]['body'] = label + ('y' * (65537 - len(label)))
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and f.posts() == 0
+          and 'inline comment demo-1:f1 prose is 65537 characters' in proc.stderr
+          and "GitHub's limit is 65536" in proc.stderr
+          and 'no room for repro' not in proc.stderr,
+          f'an over-limit inline body is refused ({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'inline-over-limit-repro')
+    payload = f.payload()
+    payload['body_findings'] = []
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f1']
+    payload['comments'][0]['body'] = label + ('y' * (65537 - len(label)))
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f1.rb').write_text('puts :hi\n', encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and f.posts() == 0
+          and 'inline comment demo-1:f1 prose is 65537 characters' in proc.stderr
+          and 'no room for repro' not in proc.stderr,
+          f'over-limit prose with a repro names the size, not the repro ({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'inline-big-hand')
+    payload = f.payload()
+    payload['body_findings'] = []
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f1']
+    payload['comments'][0]['body'] = (
+        label + 'the count is wrong.\n\n<details><summary>f1.rb</summary>\n\n```ruby\n'
+        + ('# pad\n' * 12000) + '```\n\n</details>\n'
+    )
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f1.rb').write_text('# pad\n' * 12000, encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a large hand-written inline block is resized, not refused ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    inline_body = req['comments'][0]['body']
+    check(len(inline_body) <= 65536 and '<!-- repro:demo-1/f1.rb -->' in inline_body
+          and inline_body.count('<summary>f1.rb</summary>') == 1 and 'bytes' in inline_body,
+          f'the large hand-written inline block is truncated with a note ({len(inline_body)})')
+
+    f = Fixture(root / 'reply-over-limit')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 42, 'body': 'z' * 65537})
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and f.posts() == 0
+          and 'reply to comment 42 is 65537 characters' in proc.stderr
+          and "GitHub's limit is 65536" in proc.stderr,
+          f'an over-limit reply is refused ({proc.returncode} {proc.stderr.strip()})')
+
+
 def test_moved_repro_missing_block_dies(root: Path) -> None:
     """A moved comment with no room for its script stops, instead of posting without it."""
     f = Fixture(root / 'no-room')
@@ -704,6 +924,8 @@ def main() -> None:
         test_refusals(root)
         test_repro_and_labels(root)
         test_moved_repro_keeps_its_block(root)
+        test_hand_written_repro_is_adopted(root)
+        test_inline_repro_not_dropped(root)
         test_moved_repro_missing_block_dies(root)
     print('all post-review checks passed')
 

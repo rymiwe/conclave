@@ -142,9 +142,15 @@ def main() -> None:
     check(labels.problems(mid) == [], "a label that does not start the first line is not an opening")
 
     bullets = {**other, "body": "Notes.\n\n- **Requested:** fix the count\n- **Question:** why\n", "comments": []}
-    check(labels.problems(bullets) == [], "labeled summary bullets are ok")
+    check(labels.comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS is False,
+          "labels go only on new inline comments: the bullet constant is False")
+    found = labels.problems(bullets)
+    check(len(found) == 2 and all("labeled bullet" in item for item in found),
+          f"labeled summary bullets are flagged by default ({found})")
     only_bullet = {**other, "body": "- **Advisory:** fix the count\n", "comments": []}
-    check(labels.problems(only_bullet) == [], "a summary that is only a labeled bullet does not open with a label")
+    found = labels.problems(only_bullet)
+    check(found == ["summary body line 1: labeled bullet"],
+          f"a summary that is only a labeled bullet is flagged as a bullet, not an opening ({found})")
 
     moved = {
         **other,
@@ -176,28 +182,24 @@ def main() -> None:
           f"your own PR still flags a summary that opens with a label ({found})")
 
     fenced_bullet = {**other, "body": "Notes.\n\n```\n- **Requested:** inside\n```\n", "comments": []}
+    found = labels.problems(bullets)
+    check(any("line 3" in item for item in found) and any("line 4" in item for item in found),
+          f"bullet flags name the line ({found})")
+    check(labels.problems(moved) == [], "a moved block is not a labeled bullet")
+    check(labels.problems(empty_moved) == [], "a moved block on an empty summary is not a labeled bullet")
+    check(labels.problems(fenced_bullet) == [], "a labeled bullet inside a fence is not flagged")
+    found = labels.problems(opening)
+    check(any("summary body opens with a label" in item for item in found),
+          "a summary opening is still flagged")
+    check(labels.problems(clean) == [], "a summary without a label stays ok")
     saved = labels.comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS
-    labels.comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS = False
+    labels.comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS = True
     try:
-        found = labels.problems(bullets)
-        check(len(found) == 2 and all("labeled bullet" in item for item in found),
-              f"labeled summary bullets are flagged when the constant is false ({found})")
-        check(any("line 3" in item for item in found) and any("line 4" in item for item in found),
-              f"bullet flags name the line ({found})")
-        check(labels.problems(only_bullet) != [] and any("labeled bullet" in item for item in labels.problems(only_bullet)),
-              "a lone labeled bullet is flagged when the constant is false")
-        check(labels.problems(moved) == [], "a moved block is not a labeled bullet when the constant is false")
-        check(labels.problems(empty_moved) == [],
-              "a moved block on an empty summary is not a labeled bullet when the constant is false")
-        check(labels.problems(fenced_bullet) == [], "a labeled bullet inside a fence is not flagged")
-        found = labels.problems(opening)
-        check(any("summary body opens with a label" in item for item in found),
-              "a summary opening is still flagged when the constant is false")
-        check(labels.problems(clean) == [], "a summary without a label stays ok when the constant is false")
+        check(labels.problems(bullets) == [], "labeled bullets pass only when the constant is flipped to True")
     finally:
         labels.comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS = saved
-    check(labels.comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS is True, "the bullet constant is restored")
-    check(labels.problems(bullets) == [], "labeled bullets are ok again after the constant is restored")
+    check(labels.comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS is False, "the bullet constant is restored")
+    check(labels.problems(bullets) != [], "labeled bullets are flagged again after the constant is restored")
     print("ok comment labels")
 
 

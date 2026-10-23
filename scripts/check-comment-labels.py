@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Flag a summary that opens with a label, a labeled reply, or an unlabeled
-new inline comment on someone else's PR.
+"""Flag a summary that opens with a label, a labeled summary bullet, a labeled
+reply, or an unlabeled new inline comment on someone else's PR.
 
   scripts/check-comment-labels.py <payload.json> [--pr-author LOGIN] [--reviewer LOGIN]
 
@@ -17,9 +17,10 @@ do not count. A label on a later line does not. A moved-outside-the-diff
 block that post-review appends begins with **Outside this diff**, which is
 not a comment label, so that block does not open the summary.
 
-Bullet items in the summary may keep a label while
-comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS is True. When that constant
-is False, a bullet whose text starts with a label is flagged. A bullet is
+Labels go only on new inline comments. With
+comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS set to False (the setting
+since 2026-10-23), a summary bullet whose text starts with a label is
+flagged. A bullet is
 a line that starts with `-`, `*`, `+`, or a number (`1.` or `1)`).
 
 A new inline comment is labeled only when it starts with a label. That is

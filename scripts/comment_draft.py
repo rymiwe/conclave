@@ -6,16 +6,20 @@ repro/<finding-id>.<ext> (repro/f1.rb). The comment for that finding gets one
 collapsed details block. A finding with no file there gets no block.
 
 Labels (**Requested:**, **Advisory:**, **Informational:**, and the legacy
-**Question:**) belong at the start of a new inline comment, and only when the
-pull request is someone else's. A reply never keeps one. The review summary
-never opens with one. A bullet inside the summary may keep one while
-SUMMARY_BULLETS_MAY_HAVE_LABELS is True. This module strips labels on a reply,
-strips a label that opens the summary, and requires a new inline comment in
+**Question:**) belong only on new inline comments: at the start of one, and
+only when the pull request is someone else's. A reply never keeps one. The
+review summary never opens with one, and a bullet inside the summary loses
+one while SUMMARY_BULLETS_MAY_HAVE_LABELS is False (the setting since
+2026-10-23). This module strips labels on a reply, strips a label that opens
+the summary and every summary bullet label, and requires a new inline comment in
 someone else's pull request to start with one. It does not enforce the absence
 of labels on an inline comment on your own pull request.
 
 GitHub rejects a review comment body longer than 65536 characters. A script
 that does not fit is truncated inside the fence, with a note after the fence.
+When the prose leaves no room for that note, posting refuses the comment.
+A new inline comment whose prose is over the limit, or a reply over it, is
+refused too.
 """
 from __future__ import annotations
 
@@ -55,12 +59,12 @@ LABEL_RE = re.compile(r"\*\*(?:Requested|Advisory|Informational|Question):\*\*[ 
 # marker (`-`, `*`, `+`, or `1.` / `1)`), then whitespace, then text.
 BULLET_PREFIX = re.compile(r"[ \t]*(?:[-*+]|\d+[.)])[ \t]+")
 
-# Bullet items in the review summary may keep a label. The summary itself
-# must not open with one, and a reply never has one. The drafter in this
-# file and the lint in scripts/check-comment-labels.py both read this
-# constant. Set it to False to strip those bullet labels here and to flag
-# them in the lint. Pending confirmation from Ryan (2026-10-23).
-SUMMARY_BULLETS_MAY_HAVE_LABELS = True
+# Labels go only on new inline comments. The summary must not open with
+# one, a summary bullet must not carry one, and a reply never has one. The
+# drafter in this file and the lint in scripts/check-comment-labels.py both
+# read this constant. False strips bullet labels here and flags them in the
+# lint. Ryan chose False on 2026-10-23.
+SUMMARY_BULLETS_MAY_HAVE_LABELS = False
 FINDING_ID = re.compile(r"f\d+")
 EXT = re.compile(r"\.[A-Za-z0-9]+")
 
@@ -214,27 +218,49 @@ def _drop_marked_block(body: str, marker: str) -> str:
     return _cut_span(body, start, end + len("</details>"))
 
 
-def _drop_summary_block(body: str, filename: str) -> str:
-    summary = f"<summary>{filename}</summary>"
-    at = body.find(summary)
-    if at < 0:
+_REPRO_MARKER_LINE = re.compile(r"<!-- repro:[^\n]*-->")
+
+
+def adopt_hand_block(body: str, filename: str, marker: str) -> str:
+    """Insert marker above a hand-written repro block for filename.
+
+    The block must open exactly as docs/review.md shows it:
+    `<details><summary>filename</summary>`. An occurrence inside a fence, or
+    one already under a `<!-- repro: -->` marker (another ballot's block, or
+    this one's), is skipped. The first remaining occurrence gets the marker.
+    The body is unchanged when marker is already present or no such block
+    exists.
+    """
+    if marker in body:
         return body
-    start = body.rfind("<details>", 0, at)
-    if start < 0:
-        return body
-    end = _details_end(body, at)
-    if end < 0:
-        return body
-    return _cut_span(body, start, end + len("</details>"))
+    opening = f"<details><summary>{filename}</summary>"
+    fences = links().fence_spans(body)
+    covered = links().covered
+    idx = 0
+    while True:
+        start = body.find(opening, idx)
+        if start < 0:
+            return body
+        idx = start + len(opening)
+        if covered((start, idx), fences):
+            continue
+        before = body[:start]
+        if before.endswith("\n"):
+            before = before[:-1]
+        if _REPRO_MARKER_LINE.fullmatch(before.rsplit("\n", 1)[-1].strip()):
+            continue
+        return f"{body[:start]}{marker}\n{body[start:]}"
 
 
 def prose_without_repro(body: str) -> str:
     """Comment text with repro blocks removed.
 
     A repro block starts at its `<!-- repro:` marker. A `<details>` element
-    with no marker stays, including one whose summary is a filename. A
-    later resize can cut the script. It cannot cut this prose. A
-    `</details>` inside the fenced script is not the end of the block.
+    with no marker stays, including one whose summary is a filename.
+    attach_repro adopts that filename summary by inserting the marker; until
+    then this function leaves the element in the prose. A later resize can
+    cut the script. It cannot cut this prose. A `</details>` inside the
+    fenced script is not the end of the block.
     """
     for _ in range(20):
         start = body.find("<!-- repro:")
@@ -275,12 +301,16 @@ def attach_repro(
     """Append the repro block when the comment does not already carry it.
 
     key identifies this file. It defaults to the filename. Two ballots can
-    both attach f1.rb because each key is different. A hand-written summary
-    with no marker is left alone when it already fits. A block that is
-    already attached is resized when it is longer than limit, so a comment
-    that fit as a line comment still fits after it moves into a shorter
-    review body. A script that does not fit under limit is truncated with a
-    note. When the comment prose already fills the limit, the block is omitted.
+    both attach f1.rb because each key is different. A hand-written block
+    that opens `<details><summary>filename</summary>`, outside a fence and
+    with no marker above it, is adopted by inserting the marker (see
+    adopt_hand_block), the same way a draft <!-- repro:filename --> marker
+    is adopted. A block that is already attached is resized when it
+    is longer than limit, so a comment that fit as a line comment still fits
+    after it moves into a shorter review body. A script that does not fit
+    under limit is truncated with a note. When the prose leaves no room for
+    that note, the block is not attached. Posting then refuses the comment
+    and names the finding and the file.
     """
     filename = script_path.name
     marker = f"<!-- repro:{key or filename} -->"
@@ -289,19 +319,14 @@ def attach_repro(
     legacy = f"<!-- repro:{filename} -->"
     if legacy in body and legacy != marker:
         body = body.replace(legacy, marker, 1)
+    # A hand-written <details><summary>filename</summary> has no marker.
+    # Insert one, so the block is kept or resized instead of copied again.
+    body = adopt_hand_block(body, filename, marker)
     if marker in body and len(body) <= limit:
         return body
     if marker in body:
         stripped = _drop_marked_block(body, marker)
         if marker not in stripped and stripped != body:
-            body = stripped
-        else:
-            return body
-    if f"<summary>{filename}</summary>" in body and "<!-- repro:" not in body:
-        if len(body) <= limit:
-            return body
-        stripped = _drop_summary_block(body, filename)
-        if f"<summary>{filename}</summary>" not in stripped and stripped != body:
             body = stripped
         else:
             return body

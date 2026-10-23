@@ -80,6 +80,89 @@ def main() -> None:
         hand = "Note.\n\n<details><summary>config.yml</summary>\n\nname: kept\n\n</details>\n"
         check(comment_draft.prose_without_repro(hand) == hand,
               "a details block is prose unless it carries the repro marker")
+        written = (
+            "**Requested:** note.\n\n"
+            "<details><summary>f1.rb</summary>\n\n"
+            "```ruby\n"
+            "puts :hand\n"
+            "```\n\n"
+            "</details>\n"
+        )
+        adopted = comment_draft.attach_repro(written, path, key="demo-1/f1.rb")
+        check(
+            "<!-- repro:demo-1/f1.rb -->" in adopted
+            and adopted.count("<summary>f1.rb</summary>") == 1
+            and "puts :hand" in adopted
+            and "puts 'kept'" not in adopted,
+            "a hand-written summary is adopted by inserting the marker",
+        )
+        check(
+            comment_draft.prose_without_repro(adopted).strip() == "**Requested:** note.",
+            "once marked, the hand-written block is a repro block",
+        )
+        mention = "**Requested:** see <summary>f1.rb</summary> in the note.\n"
+        mentioned = comment_draft.attach_repro(mention, path, key="demo-1/f1.rb")
+        check(
+            "<!-- repro:demo-1/f1.rb -->" in mentioned and "puts 'kept'" in mentioned,
+            "a bare summary mention does not swallow the repro",
+        )
+        huge_hand = (
+            "**Requested:** note.\n\n"
+            "<details><summary>f1.rb</summary>\n\n"
+            "```ruby\n"
+            + ("x" * 5000)
+            + "\n```\n\n</details>\n"
+        )
+        shrunk_hand = comment_draft.attach_repro(huge_hand, path, key="demo-1/f1.rb", limit=800)
+        check(
+            "<!-- repro:demo-1/f1.rb -->" in shrunk_hand
+            and shrunk_hand.count("<summary>f1.rb</summary>") == 1
+            and len(shrunk_hand) <= 800
+            and "puts 'kept'" in shrunk_hand and "xxxx" not in shrunk_hand,
+            f"an over-limit hand-written block is resized with a marker ({len(shrunk_hand)})",
+        )
+        unrelated = (
+            "**Requested:** note.\n\n"
+            "<details><summary>config.yml</summary>\n\nname: kept\n\n</details>\n\n"
+            "The script <summary>f1.rb</summary> is below.\n"
+        )
+        attached = comment_draft.attach_repro(unrelated, path, key="demo-1/f1.rb")
+        check(
+            "<!-- repro:demo-1/f1.rb -->\n<details><summary>f1.rb</summary>" in attached
+            and "puts 'kept'" in attached
+            and "<!-- repro:demo-1/f1.rb -->\n<details><summary>config.yml" not in attached
+            and "name: kept" in comment_draft.prose_without_repro(attached),
+            "an unrelated details block before a bare summary mention is not adopted",
+        )
+        other_marker = (
+            "Notes.\n\n<!-- repro:demo-2/f9.py -->\n<details><summary>f9.py</summary>\n\n"
+            "```python\nprint(1)\n```\n\n</details>\n\n" + written
+        )
+        both_adopted = comment_draft.attach_repro(other_marker, path, key="demo-1/f1.rb")
+        check(
+            both_adopted.count("<summary>f1.rb</summary>") == 1
+            and "<!-- repro:demo-1/f1.rb -->\n<details><summary>f1.rb</summary>" in both_adopted
+            and "puts :hand" in both_adopted,
+            "a hand-written block is adopted when another file's marker is already present",
+        )
+        other_ballot = written.replace(
+            "<details><summary>f1.rb</summary>",
+            "<!-- repro:demo-2/f1.rb -->\n<details><summary>f1.rb</summary>",
+        )
+        second = comment_draft.attach_repro(other_ballot, path, key="demo-1/f1.rb")
+        check(
+            second.count("<summary>f1.rb</summary>") == 2
+            and "<!-- repro:demo-2/f1.rb -->\n<details><summary>f1.rb</summary>" in second
+            and "puts 'kept'" in second,
+            "another ballot's marked block for the same filename is not adopted",
+        )
+        fenced = "Example:\n\n````html\n<details><summary>f1.rb</summary>\n</details>\n````\n"
+        fenced_out = comment_draft.attach_repro(fenced, path, key="demo-1/f1.rb")
+        check(
+            fenced_out.startswith(fenced.rstrip("\n")) and "puts 'kept'" in fenced_out
+            and "<!-- repro:demo-1/f1.rb -->\n<details><summary>f1.rb</summary>\n</details>\n````" not in fenced_out,
+            "a documented block inside a fence is not adopted",
+        )
 
         million = "x" * 1_000_000
         million_total = len(million.encode("utf-8"))
@@ -178,8 +261,8 @@ def main() -> None:
             kind="body",
             others_pr=True,
         )
-        check(summary == "\n\nthe count is wrong.\n\n- **Advisory:** look again\n",
-              f"drafter strips a leading summary label ({summary!r})")
+        check(summary == "\n\nthe count is wrong.\n\n- look again\n",
+              f"drafter strips a leading summary label and the bullet label ({summary!r})")
         question = comment_draft.draft_comment("**Question:** why is this here?\n", kind="body")
         check(question == "why is this here?\n", "a leading Question on the summary is stripped")
         stacked = comment_draft.draft_comment("**Requested:** **Advisory:** both\n", kind="body")
@@ -187,23 +270,30 @@ def main() -> None:
         kept = comment_draft.draft_comment("**Requested:** see **Advisory:** rest\n", kind="body")
         check(kept == "see **Advisory:** rest\n", f"a later label on the opening line stays ({kept!r})")
         bullet_only = comment_draft.draft_comment("- **Requested:** fix the count\n", kind="body")
-        check(bullet_only == "- **Requested:** fix the count\n", "a summary that is only a labeled bullet keeps it")
+        check(bullet_only == "- fix the count\n", f"a summary that is only a labeled bullet loses the label ({bullet_only!r})")
         plain_summary = comment_draft.draft_comment("Four notes.\n", kind="body")
         check(plain_summary == "Four notes.\n", "a summary without a label stays")
+        check(comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS is False,
+              "labels go only on new inline comments: the bullet constant is False")
+        stripped_bullets = comment_draft.draft_comment(
+            "**Informational:** overview\n\n- **Requested:** fix the count\n1. **Question:** why\n",
+            kind="body",
+        )
+        check(
+            stripped_bullets == "overview\n\n- fix the count\n1. why\n",
+            f"drafter strips bullet labels by default ({stripped_bullets!r})",
+        )
         saved = comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS
-        comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS = False
+        comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS = True
         try:
-            stripped_bullets = comment_draft.draft_comment(
-                "**Informational:** overview\n\n- **Requested:** fix the count\n1. **Question:** why\n",
-                kind="body",
-            )
-            check(
-                stripped_bullets == "overview\n\n- fix the count\n1. why\n",
-                f"drafter strips bullet labels when the constant is false ({stripped_bullets!r})",
-            )
+            kept_bullet = comment_draft.draft_comment("- **Requested:** fix the count\n", kind="body")
+            check(kept_bullet == "- **Requested:** fix the count\n",
+                  "a bullet label stays only when the constant is flipped to True")
         finally:
             comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS = saved
-        check(comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS is True, "the bullet constant is restored")
+        check(comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS is False, "the bullet constant is restored")
+        inline_kept = comment_draft.draft_comment("**Requested:** fix it\n", kind="inline", others_pr=True)
+        check(inline_kept == "**Requested:** fix it\n", "a new inline comment keeps its label")
 
         # A script that would fail the prose lint if the fence were ignored.
         risky = directory / "f8.py"

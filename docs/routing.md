@@ -61,8 +61,9 @@ rejected pairs.
   builder when `--author` is omitted. With neither, or with `--author human`
   or `--author none`, they exclude nobody. The builder the router fills from
   pace is not that caller. On review, `--builder-vendor` wins. Audit
-  excludes `--author` when it is present. `--author` is a family. Fable is
-  required when the excluded vendor is xAI. A builder family the caller already
+  excludes `--author` when it is present. `--author` is a family. When xAI
+  is excluded, Grok sits out. Fable is then required, except on kind review,
+  which takes two seats by pace and headroom. A builder family the caller already
   named is kept when that pool can take the work, including when the pool is
   ahead of pace, and dropped when the pool is capped.
 - Opus chairs and builds when both Grok pools are over pace, or when both

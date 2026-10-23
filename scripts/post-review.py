@@ -41,7 +41,9 @@ Steps, in order. Any failure stops before the POST.
    in_reply_to is a reply and is not sent as a new line comment. A
    repro/<finding-id>.<ext> file in that finding's ballot directory is
    attached to the new inline comment, or to the review body when the
-   finding is in body_findings.
+   finding is in body_findings. A new inline comment or a reply longer than
+   65536 characters is refused, and so is a comment whose prose leaves no
+   room for its repro.
 4. The request goes to tmp/council/<id>/post-<pr>.request.json.
 5. --dry-run stops here. Otherwise POST pulls/<pr>/reviews, write
    tmp/council/<id>/post-<pr>.pending.json with the review id and the review
@@ -87,6 +89,30 @@ EVENTS = ("COMMENT", "REQUEST_CHANGES")
 
 def die(msg: str) -> None:
     raise SystemExit(f"post-review: {msg}")
+
+
+def refuse_over_limit(text: str, where: str) -> None:
+    """GitHub rejects a review comment body longer than 65536 characters."""
+    limit = comment_draft.GITHUB_COMMENT_LIMIT
+    if len(text) > limit:
+        die(f"{where} is {len(text)} characters; GitHub's limit is {limit}")
+
+
+def refuse_absent_repro(text: str, ballot: str, filename: str, where: str) -> None:
+    """Die when a repro file did not land in text.
+
+    attach_repro adopts a hand-written block by inserting its marker, so a
+    missing marker here means the block was left off: the text already
+    leaves no room for even a truncated block under GitHub's limit.
+    """
+    marker = f"<!-- repro:{ballot}/{filename} -->"
+    if marker in text:
+        return
+    die(
+        f"{where} has no room for repro {ballot}/{filename}: "
+        f"the text leaves no room for even a truncated block under "
+        f"GitHub's {comment_draft.GITHUB_COMMENT_LIMIT}-character limit"
+    )
 
 
 def load_label_check():
@@ -335,6 +361,7 @@ def main() -> int:
                 die(f"comment {i}: missing body")
             if any(r["in_reply_to"] == reply_id for r in replies):
                 die(f"comment {i}: two replies to comment {reply_id}")
+            refuse_over_limit(c["body"], f"reply to comment {reply_id}")
             replies.append({"in_reply_to": reply_id, "body": c["body"]})
             continue
         for field in ("finding", "path", "line", "body"):
@@ -356,12 +383,34 @@ def main() -> int:
                 text = lines[c["line"] - 1]
         if c.get("expect") and (text is None or c["expect"] not in text):
             errors.append(f"comment {i} ({key}): {c['path']}:{c['line']} reads {text!r}, expected {c['expect']!r}")
+        try:
+            repro_path = comment_draft.find_repro(council / ballot, fid)
+        except comment_draft.ReproError as exc:
+            die(str(exc))
         if in_diff is None:
-            moved.append({**c, "body": str(c["body"]), "_ballot": ballot, "_fid": fid})
+            moved_body = str(c["body"])
+            if repro_path is not None:
+                # Mark a hand-written block now, so the body budget below
+                # counts it as the script, not as prose.
+                moved_body = comment_draft.adopt_hand_block(
+                    moved_body, repro_path.name, f"<!-- repro:{ballot}/{repro_path.name} -->"
+                )
+            moved.append({**c, "body": moved_body, "_ballot": ballot, "_fid": fid})
             findings[key] = {"ballot": ballot, "id": fid, "posted_as": "review body",
                              "path": c["path"], "line": c["line"], "reason": "outside the diff"}
         else:
-            c["body"] = attach_finding_repro(str(c["body"]), ballot, fid)
+            prose = str(c["body"])
+            if repro_path is not None:
+                # A hand-written repro block can still shrink; size the prose only.
+                prose = comment_draft.prose_without_repro(comment_draft.adopt_hand_block(
+                    prose, repro_path.name, f"<!-- repro:{ballot}/{repro_path.name} -->"
+                ))
+            refuse_over_limit(prose, f"inline comment {key} prose")
+            text = attach_finding_repro(str(c["body"]), ballot, fid)
+            if repro_path is not None:
+                refuse_absent_repro(text, ballot, repro_path.name, f"inline comment {key}")
+            refuse_over_limit(text, f"inline comment {key}")
+            c["body"] = text
             inline.append({"path": c["path"], "line": c["line"], "side": "RIGHT", "body": c["body"]})
             findings[key] = {"ballot": ballot, "id": fid, "posted_as": "inline",
                              "path": c["path"], "line": c["line"], "_body": c["body"]}
@@ -384,6 +433,9 @@ def main() -> int:
             die(str(exc))
         if path is not None:
             repro_findings.append((ballot, fid, path))
+            # Mark a hand-written body-finding block now, so it is counted as
+            # that finding's script and not as summary prose.
+            body = comment_draft.adopt_hand_block(body, path.name, f"<!-- repro:{ballot}/{path.name} -->")
     def reserve_repro(path: Path, ballot: str) -> int:
         try:
             script = path.read_text(encoding="utf-8")
@@ -418,7 +470,9 @@ def main() -> int:
             header = "**Outside this diff**\n\n" if index == 0 else ""
             prose = comment_draft.prose_without_repro(str(c["body"])).strip()
             prose_cost.append(len(header) + len(moved_link(c)) + 2 + len(prose) + script_floor(c))
-        assembled = body.rstrip()
+        # Body-finding blocks are rendered again below, into the room the
+        # moved comments leave. Their floor is already in body_script_floor.
+        assembled = comment_draft.prose_without_repro(body).rstrip() if repro_findings else body.rstrip()
         for index, c in enumerate(moved):
             header = "**Outside this diff**\n\n" if index == 0 else ""
             link = moved_link(c)
@@ -433,8 +487,8 @@ def main() -> int:
                 repro_path = comment_draft.find_repro(council / c["_ballot"], c["_fid"])
             except comment_draft.ReproError as exc:
                 die(str(exc))
-            if repro_path is not None and f"<!-- repro:{c['_ballot']}/{repro_path.name} -->" not in piece:
-                die(f"review body has no room for repro {c['_ballot']}/{repro_path.name}")
+            if repro_path is not None:
+                refuse_absent_repro(piece, c["_ballot"], repro_path.name, "review body")
             if len(prefix) + len(piece) + later > comment_draft.GITHUB_COMMENT_LIMIT:
                 die(
                     f"review body is {len(prefix) + len(piece) + later} characters; "
@@ -449,8 +503,7 @@ def main() -> int:
             later += reserve_repro(path2, ballot2)
         room = comment_draft.GITHUB_COMMENT_LIMIT - later
         body = attach_finding_repro(body, ballot, fid, limit=max(room, 0))
-        if f"<!-- repro:{ballot}/{path.name} -->" not in body:
-            die(f"review body has no room for repro {ballot}/{path.name}")
+        refuse_absent_repro(body, ballot, path.name, "review body")
     if len(body) > comment_draft.GITHUB_COMMENT_LIMIT:
         die(f"review body is {len(body)} characters; GitHub's limit is {comment_draft.GITHUB_COMMENT_LIMIT}")
     links = load_links()
