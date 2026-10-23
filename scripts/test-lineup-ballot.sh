@@ -470,5 +470,135 @@ bad_out="$(dry "$ID" --dry-run --repo "$work/target" 2>&1)" || bad_ec=$?
 check "bad author exits" [ "$bad_ec" -ne 0 ]
 check "bad author names the family" grep -q 'invalid author family: composer' <<<"$bad_out"
 
+# PR author and commit trailers. gh pr view --json author,commits is stubbed.
+# A model-naming Co-authored-by passes --builder-vendor. A User with none passes
+# --author human. Cursor <cursoragent@cursor.com> does not name a model.
+GH_PR_JSON="$work/pr.json"
+GH_ARGV="$work/gh-argv"
+export GH_PR_JSON GH_ARGV
+: >"$GH_ARGV"
+cat >"$work/bin/gh" <<'EOF'
+#!/bin/sh
+if [ -n "${GH_ARGV:-}" ]; then
+  printf '%s\n' "$*" >>"$GH_ARGV"
+fi
+if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
+  cat "${GH_PR_JSON:?}"
+  exit 0
+fi
+echo "unexpected gh: $*" >&2
+exit 1
+EOF
+chmod +x "$work/bin/gh"
+old_path="$PATH"
+export PATH="$work/bin:$PATH"
+
+write_pr_json() { # $1 is python that assigns doc
+  python3 - "$GH_PR_JSON" "$1" <<'PY'
+import json, sys
+path, source = sys.argv[1], sys.argv[2]
+ns = {}
+exec(source, ns)
+json.dump(ns["doc"], open(path, "w"), ensure_ascii=False)
+PY
+}
+
+reset_pr_route() {
+  REVIEW_PR_FACT_NUM=""
+  REVIEW_PR_FACT_VENDOR=""
+  REVIEW_PR_FACT_HUMAN=""
+  HEADER_AUTHOR=""
+  HEADER_PR=""
+  FLAG_PR=42
+  REPO="$work/target"
+  KIND=review
+  : >"$SEAT_ARGV"
+  : >"$GH_ARGV"
+}
+
+# $1 is python that assigns doc.
+route_pr() {
+  write_pr_json "$1"
+  reset_pr_route
+  use_router "$work/all.json" 0
+  apply review
+}
+
+route_pr 'doc = {
+  "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss", "type": "User"},
+  "commits": [{"messageHeadline": "Seat the reviewer",
+               "messageBody": "Co-Authored-By: Grok (via cursor-agent) <noreply@x.ai>\n"}],
+}'
+check "trailer review passes builder vendor" grep -qx -- '--route lineup --json --kind review --builder-vendor xai --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+check "trailer review omits author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
+check "trailer review asked gh for author and commits" grep -qx 'pr view 42 --json author,commits' "$GH_ARGV"
+check "trailer review builder vendor is xai" [ "$(review_resolved_builder_vendor)" = xai ]
+: >"$SEAT_ARGV"
+review_route_json >/dev/null
+check "trailer re-route passes builder vendor" grep -qx -- '--route lineup --json --kind review --builder-vendor xai --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+
+route_pr 'doc = {
+  "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss"},
+  "commits": [{"messageHeadline": "Seat the reviewer",
+               "messageBody": "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"}],
+}'
+check "opus trailer passes anthropic" grep -qx -- '--route lineup --json --kind review --builder-vendor anthropic --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+check "opus trailer omits author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
+
+route_pr 'doc = {
+  "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss"},
+  "commits": [{"messageHeadline": "Fix the seat",
+               "messageBody": "Co-authored-by: Cursor <cursoragent@cursor.com>\n"}],
+}'
+check "human review passes author human" grep -qx -- '--route lineup --json --kind review --author human --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+check "human review omits builder vendor" bash -c '! grep -q -- "--builder-vendor" "$1"' _ "$SEAT_ARGV"
+check "human review builder vendor is empty" [ -z "$(review_resolved_builder_vendor)" ]
+: >"$SEAT_ARGV"
+review_route_json >/dev/null
+check "human re-route passes author human" grep -qx -- '--route lineup --json --kind review --author human --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+check "human re-route omits builder vendor" bash -c '! grep -q -- "--builder-vendor" "$1"' _ "$SEAT_ARGV"
+
+route_pr 'doc = {
+  "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss", "type": "User"},
+  "commits": [],
+}'
+check "type User with no trailer passes author human" grep -qx -- '--route lineup --json --kind review --author human --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+
+route_pr 'doc = {
+  "author": {"is_bot": True, "login": "cursor[bot]", "name": "Cursor", "type": "Bot"},
+  "commits": [{"messageHeadline": "Fix",
+               "messageBody": "Co-authored-by: Cursor <cursoragent@cursor.com>\n"}],
+}'
+check "bot review omits author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
+check "bot review omits builder vendor" bash -c '! grep -q -- "--builder-vendor" "$1"' _ "$SEAT_ARGV"
+
+route_pr 'doc = {
+  "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss", "type": "User"},
+  "commits": [
+    {"messageHeadline": "One", "messageBody": "Co-Authored-By: Grok <noreply@x.ai>\n"},
+    {"messageHeadline": "Two", "messageBody": "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"},
+  ],
+}'
+check "disagreeing trailers omit author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
+check "disagreeing trailers omit builder vendor" bash -c '! grep -q -- "--builder-vendor" "$1"' _ "$SEAT_ARGV"
+
+write_pr_json 'doc = {
+  "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss", "type": "User"},
+  "commits": [{"messageHeadline": "Seat",
+               "messageBody": "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"}],
+}'
+reset_pr_route
+HEADER_AUTHOR=grok
+use_router "$work/all.json" 0
+apply review
+check "brief author wins over a trailer" grep -qx -- '--route lineup --json --kind review --author grok --builder-vendor xai --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+check "brief author reseat vendor stays the family" [ "$(review_resolved_builder_vendor)" = xai ]
+
+FLAG_PR=""
+HEADER_AUTHOR=""
+HEADER_PR=""
+REVIEW_PR_FACT_NUM=""
+export PATH="$old_path"
+
 printf '%s passed, %s failed\n' "$passed" "$failed"
 [ "$failed" -eq 0 ]

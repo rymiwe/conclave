@@ -2811,14 +2811,8 @@ review_route_json() {
   bin="$(conclave_env SEAT_USAGE "$HOME/.local/bin/seat-usage")"
   [ -n "$bin" ] && [ -x "$bin" ] || return 1
   local -a args=(--route lineup --json --kind review)
-  if [ -n "${HEADER_AUTHOR:-}" ]; then
-    args+=(--author "$HEADER_AUTHOR")
-    local vendor=""
-    vendor="$(review_author_vendor "$HEADER_AUTHOR" || true)"
-    if [ -n "$vendor" ]; then
-      args+=(--builder-vendor "$vendor")
-    fi
-  fi
+  # Same author and builder-vendor rule as load_lineup_ballot.
+  review_append_author_args args
   if [ -n "${ID:-}" ]; then
     args+=(--ballot "$ID")
   fi
@@ -2888,10 +2882,8 @@ review_reseat_one() {
   # The caller recorded this failure before the first route. Recording it
   # again would write a second line for the same voter.
   other="$(review_working_vendor "$failed")"
-  builder=""
-  if [ -n "${HEADER_AUTHOR:-}" ]; then
-    builder="$(review_author_vendor "$HEADER_AUTHOR" || true)"
-  fi
+  # Same builder vendor the lineup call excludes. Empty for a human author.
+  builder="$(review_resolved_builder_vendor || true)"
   raw=""
   local -a excludes=()
   local ex
