@@ -60,7 +60,9 @@ sources `scripts/github-https-env.sh`, which points `GIT_CONFIG_GLOBAL`, for
 that run only, at a cached file that includes your global git config and
 rewrites GitHub SSH URLs to HTTPS. Launch a cursor-agent chair through
 `scripts/with-github-https.sh cursor-agent ...` for the same effect. Neither
-edits `~/.gitconfig` or `~/.ssh`. `CONCLAVE_GITHUB_HTTPS=0` turns it off.
+edits `~/.gitconfig` or `~/.ssh`. That wrapper exports `CONCLAVE_CHAIR=1`
+on the chair process, and `scripts/stack-run.py` sets the same variable on
+each chair it starts. `CONCLAVE_GITHUB_HTTPS=0` turns it off.
 A push from such a process goes over HTTPS, so pass an HTTPS credential
 helper. Test: `scripts/test-github-https-env.sh`.
 

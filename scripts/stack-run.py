@@ -738,10 +738,16 @@ class Runner:
         log = self.logs / f'{label}.jsonl'
         start = time.monotonic()
         error = ''
+        # Chair marker on this subprocess only. Do not publish it on the runner:
+        # phase 1 and the runner's other children must not receive it from here.
+        # CONCLAVE_CHAIR_MODEL is the model id, not this marker.
+        chair_env = os.environ.copy()
+        chair_env['CONCLAVE_CHAIR'] = '1'
         try:
             with log.open('w') as out, log.with_suffix('.err').open('w') as err:
                 try:
-                    rc = self.process(args, stdout=out, stderr=err, cwd=workspace, timeout=self.args.chair_timeout).returncode
+                    rc = self.process(args, stdout=out, stderr=err, cwd=workspace,
+                                      timeout=self.args.chair_timeout, env=chair_env).returncode
                     if rc:
                         error = f'chair exit {rc}'
                 except subprocess.TimeoutExpired:

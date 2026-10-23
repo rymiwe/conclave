@@ -593,6 +593,8 @@ Round A writes the receipt only after its brief passes the checks. A `brief.md` 
 - **Phase 1.** The runner runs `conclave.sh <id> --dry-run`, then the full run, with the Fable flags below. Phase 1 stops if the target repo is shallow.
 - **Chair round B.** The round A session, resumed, or a fresh session when round A ran in an earlier invocation. It writes `findings.json` from `blind/leg-*.md` only, runs `--findings`, fills `decide.md`, and drafts `comments.md`. Comment labels are **Question:**, **Requested:**, and **Advisory:**.
 
+Each cursor-agent chair the runner starts has `CONCLAVE_CHAIR=1` in its environment. That is the chair marker; `CONCLAVE_CHAIR_MODEL` is only the model id.
+
 One chair per ballot keeps each chair's context to one PR. The whole-stack ballot is a separate chair after reconcile. It does not resume the per-PR sessions.
 
 A failed ballot does not stop the stack. One exception: when the Opus coverage leg fails on a usage limit, the whole Claude subscription is capped, so the runner starts no further ballot and skips the reconciliation and the whole-stack ballot. The runner exits 1 when any ballot, the reconciliation, or the whole-stack ballot failed. Rerun the same command to resume; finished ballots are not redone, and earlier `POSTED?` hits are kept. `run.json` and `run.md` in the stack directory record each ballot: state, outcome, chair and phase 1 seconds, the Fable flags, and the Fable percent read before phase 1.
