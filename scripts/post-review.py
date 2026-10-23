@@ -41,15 +41,18 @@ Steps, in order. Any failure stops before the POST.
    to the review body when the finding is in body_findings.
 4. The request goes to tmp/council/<id>/post-<pr>.request.json.
 5. --dry-run stops here. Otherwise POST pulls/<pr>/reviews, write
-   tmp/council/<id>/post-<pr>.pending.json with the review id, then read the
-   review's comments back. The pending file is written before that read, so a
-   failed read-back cannot erase the fact that the review was posted. Then
-   write tmp/council/<id>/posted.json with the review id and url and each
-   comment's url keyed by finding id.
+   tmp/council/<id>/post-<pr>.pending.json with the review id and the review
+   request that was posted, then read the review's comments back. The pending
+   file is written before that read, so a failed read-back cannot erase the
+   fact that the review was posted. Then write tmp/council/<id>/posted.json
+   with the review id and url and each comment's url keyed by finding id.
 
 A PR already in posted.json is refused. A pending receipt is checked against
-GitHub, and a review with this commit and body is refused too, so a rerun
-never posts twice.
+GitHub. A rerun that still has replies to send compares the new review
+request with the one stored on the receipt. A different commit, body, or
+inline comment is not posted and is not recorded as posted. Two replies to
+the same comment are refused. A reply that already succeeded is not sent
+again, and a rerun stops if that reply's text changed.
 """
 from __future__ import annotations
 
@@ -326,6 +329,8 @@ def main() -> int:
                 die(f"comment {i}: in_reply_to must be a positive integer")
             if not isinstance(c.get("body"), str):
                 die(f"comment {i}: missing body")
+            if any(r["in_reply_to"] == reply_id for r in replies):
+                die(f"comment {i}: two replies to comment {reply_id}")
             replies.append({"in_reply_to": reply_id, "body": c["body"]})
             continue
         for field in ("finding", "path", "line", "body"):
@@ -440,18 +445,24 @@ def main() -> int:
     for c in moved:
         print(f"  moved: {c['path']}:{c['line']} ({c['finding']})")
     print(f"request: {request_path}")
+    review_request = {"commit_id": commit, "event": event, "body": body, "comments": inline}
+    if resume and resume.get("review_request") != review_request:
+        die("pending review was posted from a different payload; not recording this payload as posted")
     if args.dry_run:
         print("dry run: nothing posted")
         return 0
 
-    sent: set[int] = set()
+    sent: dict[int, str] = {}
     if resume:
         review_id = resume["review_id"]
         review_url = resume.get("review_url")
         if not review_url:
             die(f"pending receipt {pending_path} has no review url")
         review = {"id": review_id, "html_url": review_url, "state": resume.get("state")}
-        sent = {int(item) for item in resume.get("replies_posted") or []}
+        for item in resume.get("replies_posted") or []:
+            if not isinstance(item, dict) or type(item.get("in_reply_to")) is not int:
+                die(f"pending receipt {pending_path} replies_posted is unreadable")
+            sent[item["in_reply_to"]] = str(item.get("body", ""))
     else:
         # Commit and body alone are not an identity: an empty body matches other reviewers.
         login = (gh_json(["api", "user"]) or {}).get("login")
@@ -476,6 +487,7 @@ def main() -> int:
                 "commit_id": commit,
                 "state": review.get("state"),
                 "payload": str(payload_path),
+                "review_request": review_request,
                 "replies_posted": [],
             })
         if not review_id or not review_url:
@@ -509,8 +521,8 @@ def main() -> int:
         "posted_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "findings": findings,
     }
-    def remember_reply(reply_id: int) -> None:
-        sent.add(reply_id)
+    def remember_reply(reply_id: int, text: str) -> None:
+        sent[reply_id] = text
         write_receipt(pending_path, {
             "repo": repo,
             "pr": args.pr,
@@ -519,11 +531,17 @@ def main() -> int:
             "commit_id": commit,
             "state": review.get("state"),
             "payload": str(payload_path),
-            "replies_posted": sorted(sent),
+            "review_request": review_request,
+            "replies_posted": [
+                {"in_reply_to": i, "body": sent[i]} for i in sorted(sent)
+            ],
         })
 
     for reply in replies:
-        if reply["in_reply_to"] in sent:
+        posted_body = sent.get(reply["in_reply_to"])
+        if posted_body is not None:
+            if posted_body != reply["body"]:
+                die(f"reply to comment {reply['in_reply_to']} was already posted with different text")
             continue
         gh_json(
             ["api", "-X", "POST",
@@ -531,7 +549,7 @@ def main() -> int:
              "--input", "-"],
             stdin=json.dumps({"body": reply["body"]}),
         )
-        remember_reply(reply["in_reply_to"])
+        remember_reply(reply["in_reply_to"], reply["body"])
     write_receipt(posted_path, posted)
     pending_path.unlink(missing_ok=True)
     print(f"posted: {review_url}")

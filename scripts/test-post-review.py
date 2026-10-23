@@ -500,6 +500,51 @@ def test_repro_and_labels(root: Path) -> None:
     check((f.council / 'demo-1/posted.json').is_file() and not pending.exists(),
           'the retry records the review and clears the pending receipt')
 
+    f = Fixture(root / 'two-replies')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 81, 'body': 'First reply.'})
+    payload['comments'].append({'in_reply_to': 81, 'body': 'Second reply.'})
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and 'two replies to comment 81' in proc.stderr and f.posts() == 0,
+          f'two replies to one comment are refused before POST ({proc.returncode} {proc.stderr.strip()} posts={f.posts()})')
+
+    f = Fixture(root / 'preattached')
+    draft = load('comment_draft')
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    script = repro / 'f2.rb'
+    script.write_text('y' * 70000, encoding='utf-8')
+    payload = f.payload()
+    for c in payload['comments']:
+        if c.get('finding') == 'f2':
+            c['body'] = draft.attach_repro(c['body'], script, key='demo-1/f2.rb')
+            check(len(c['body']) <= 65536 and '<!-- repro:demo-1/f2.rb -->' in c['body'],
+                  f'the preattached draft fits a line comment ({len(c["body"])})')
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a preattached moved repro still dry-runs ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    check(len(req['body']) <= 65536, f'a preattached moved repro stays within the review body ({len(req["body"])})')
+    check(req['body'].count('<summary>f2.rb</summary>') == 1 and 'Truncated to' in req['body'],
+          'the preattached block is resized, not duplicated')
+
+    f = Fixture(root / 'changed-payload')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 42, 'body': 'The next build picks this up.'})
+    f.set_payload(payload)
+    first = f.post(env={'GH_REPLY_FAIL': '1'})
+    check(first.returncode != 0 and (f.council / 'demo-1/post-7.pending.json').is_file(),
+          f'changed-payload setup leaves a pending review ({first.returncode} {first.stderr.strip()})')
+    payload['body'] = 'A different summary, written after the review was posted.'
+    f.set_payload(payload)
+    before = f.posts()
+    second = f.post()
+    check(second.returncode != 0 and 'different payload' in second.stderr
+          and not (f.council / 'demo-1/posted.json').exists() and f.posts() == before,
+          'a changed payload is not recorded as posted '
+          f'({second.returncode} {second.stderr.strip()} posts={f.posts()} before={before})')
+
     f = Fixture(root / 'own-pr')
     payload = f.payload()
     payload['pr_author'] = 'me'

@@ -1338,7 +1338,8 @@ GitHub's review-comment limit is 65536 characters. A script that does not fit
 in the comment is cut inside the fence, and a note after the fence says how
 many bytes were kept and names `repro/<filename>`. The comment prose is not
 cut. A comment moved into the review body is sized to the room left in that
-body, including its permalink. A fenced script is not prose: `scripts/check-comment-links.py` skips
+body, including its permalink. A block that was already attached is resized
+to that room; it is not left at the line-comment size. A fenced script is not prose: `scripts/check-comment-links.py` skips
 citations and internal words inside the fence, and a label inside the fence
 does not count.
 
@@ -1456,9 +1457,14 @@ script calls the posting helper. When the human says post:
    leaves the receipt, and a rerun looks the review up on GitHub and refuses
    to post again. A review with the same commit and body is refused too.
    A reply is posted after that read, to `pulls/<pr>/comments/<id>/replies`,
-   and is not a new line on the review. The pending receipt lists each reply
-   that succeeded. If a reply POST fails, the receipt stays, and a rerun sends
-   the replies it does not yet list. It does not post the review again.
+   and is not a new line on the review. Two replies to the same comment are
+   refused. The pending receipt stores the review request that was posted and
+   lists each reply that succeeded, with the text that was posted. If a reply
+   POST fails, the receipt stays, and a rerun sends the replies it does not
+   yet list. It does not post the review again. A rerun whose commit, review
+   body, or inline comments differ from that stored request stops, and it
+   does not record the new payload as posted. A rerun also stops when an
+   already posted reply's text changed.
    After the replies are sent it writes `tmp/council/<id>/posted.json`:
    the review id and url, and each comment's url keyed by
    `<ballot>:<finding>`. A PR already in `posted.json` is refused.

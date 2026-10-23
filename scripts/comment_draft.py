@@ -165,6 +165,41 @@ def join_comment(body: str, block: str) -> str:
     return body + "\n\n" + block
 
 
+def _cut_span(body: str, start: int, end: int) -> str:
+    """Drop body[start:end] and the newline that closed the block."""
+    if end < len(body) and body[end] == "\n":
+        end += 1
+    head = body[:start].rstrip()
+    tail = body[end:].lstrip("\n")
+    if head and tail:
+        return f"{head}\n\n{tail}"
+    return head or tail
+
+
+def _drop_marked_block(body: str, marker: str) -> str:
+    start = body.find(marker)
+    if start < 0:
+        return body
+    end = body.find("</details>", start)
+    if end < 0:
+        return body
+    return _cut_span(body, start, end + len("</details>"))
+
+
+def _drop_summary_block(body: str, filename: str) -> str:
+    summary = f"<summary>{filename}</summary>"
+    at = body.find(summary)
+    if at < 0:
+        return body
+    start = body.rfind("<details>", 0, at)
+    if start < 0:
+        return body
+    end = body.find("</details>", at)
+    if end < 0:
+        return body
+    return _cut_span(body, start, end + len("</details>"))
+
+
 def attach_repro(
     body: str,
     script_path: Path,
@@ -176,16 +211,30 @@ def attach_repro(
 
     key identifies this file. It defaults to the filename. Two ballots can
     both attach f1.rb because each key is different. A hand-written summary
-    with no marker is left alone. A script that does not fit under limit is
-    truncated with a note. When the comment prose already fills the limit,
-    the block is omitted.
+    with no marker is left alone when it already fits. A block that is
+    already attached is resized when it is longer than limit, so a comment
+    that fit as a line comment still fits after it moves into a shorter
+    review body. A script that does not fit under limit is truncated with a
+    note. When the comment prose already fills the limit, the block is omitted.
     """
     filename = script_path.name
     marker = f"<!-- repro:{key or filename} -->"
+    if marker in body and len(body) <= limit:
+        return body
     if marker in body:
-        return body
+        stripped = _drop_marked_block(body, marker)
+        if marker not in stripped and stripped != body:
+            body = stripped
+        else:
+            return body
     if f"<summary>{filename}</summary>" in body and "<!-- repro:" not in body:
-        return body
+        if len(body) <= limit:
+            return body
+        stripped = _drop_summary_block(body, filename)
+        if f"<summary>{filename}</summary>" not in stripped and stripped != body:
+            body = stripped
+        else:
+            return body
     script = script_path.read_text(encoding="utf-8")
     if not body:
         budget = limit

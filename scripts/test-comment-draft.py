@@ -58,6 +58,11 @@ def main() -> None:
         check("<summary>f9.py</summary>" in capped and "```python\n" in capped, "truncated block keeps the summary and fence")
         check(huge not in capped, "the truncated comment is not the whole script")
         check(capped.rstrip().endswith("</details>"), "the truncated block still closes")
+        shrunk = comment_draft.attach_repro(capped, huge_path, limit=4000)
+        check(len(shrunk) <= 4000, f"an attached block shrinks to a smaller limit ({len(shrunk)})")
+        check(shrunk.count("<summary>f9.py</summary>") == 1, "shrinking keeps one summary")
+        check("Truncated to" in shrunk and shrunk.rstrip().endswith("</details>"),
+              "a shrunk block still notes the cut and closes")
 
         again = comment_draft.attach_repro(drafted, path)
         check(again.count("<summary>f1.rb</summary>") == 1, "a second attach does not duplicate the block")
