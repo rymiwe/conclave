@@ -1337,7 +1337,6 @@ for commit in doc.get("commits") or []:
         for fam, vendor in families:
             if re.search(r"(?<![a-z0-9])" + re.escape(fam) + r"(?![a-z0-9])", name):
                 vendors.add(vendor)
-                break
 if len(vendors) == 1:
     vendor = next(iter(vendors))
 elif vendors:
@@ -1405,8 +1404,13 @@ review_resolved_author_arg() {
 
 review_append_author_args() {
   # $1 is an array name. Adds --author and, on review, --builder-vendor.
+  # Load PR facts in this shell. The resolvers run inside $(...), and a
+  # subshell's assignments do not survive, so a later reseat would ask gh again.
   local -n _dest="$1"
   local author vendor
+  if [ "${KIND:-}" = review ] && [ -z "${HEADER_AUTHOR:-}" ]; then
+    review_pr_load_facts || true
+  fi
   author="$(review_resolved_author_arg)"
   if [ -n "$author" ]; then
     _dest+=(--author "$author")

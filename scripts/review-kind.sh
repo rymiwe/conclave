@@ -2883,6 +2883,10 @@ review_reseat_one() {
   # again would write a second line for the same voter.
   other="$(review_working_vendor "$failed")"
   # Same builder vendor the lineup call excludes. Empty for a human author.
+  # Load facts here: the substitution below is a subshell and cannot publish them.
+  if [ -z "${HEADER_AUTHOR:-}" ]; then
+    review_pr_load_facts || true
+  fi
   builder="$(review_resolved_builder_vendor || true)"
   raw=""
   local -a excludes=()

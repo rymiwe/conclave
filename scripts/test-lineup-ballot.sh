@@ -532,10 +532,13 @@ route_pr 'doc = {
 check "trailer review passes builder vendor" grep -qx -- '--route lineup --json --kind review --builder-vendor xai --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
 check "trailer review omits author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
 check "trailer review asked gh for author and commits" grep -qx 'pr view 42 --json author,commits' "$GH_ARGV"
+check "trailer review calls gh once" [ "$(grep -c 'pr view' "$GH_ARGV")" -eq 1 ]
 check "trailer review builder vendor is xai" [ "$(review_resolved_builder_vendor)" = xai ]
 : >"$SEAT_ARGV"
+: >"$GH_ARGV"
 review_route_json >/dev/null
 check "trailer re-route passes builder vendor" grep -qx -- '--route lineup --json --kind review --builder-vendor xai --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+check "trailer re-route does not call gh again" [ ! -s "$GH_ARGV" ]
 
 route_pr 'doc = {
   "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss"},
@@ -553,9 +556,12 @@ route_pr 'doc = {
 check "human review passes author human" grep -qx -- '--route lineup --json --kind review --author human --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
 check "human review omits builder vendor" bash -c '! grep -q -- "--builder-vendor" "$1"' _ "$SEAT_ARGV"
 check "human review builder vendor is empty" [ -z "$(review_resolved_builder_vendor)" ]
+check "human review calls gh once" [ "$(grep -c 'pr view' "$GH_ARGV")" -eq 1 ]
 : >"$SEAT_ARGV"
+: >"$GH_ARGV"
 review_route_json >/dev/null
 check "human re-route passes author human" grep -qx -- '--route lineup --json --kind review --author human --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+check "human re-route does not call gh again" [ ! -s "$GH_ARGV" ]
 check "human re-route omits builder vendor" bash -c '! grep -q -- "--builder-vendor" "$1"' _ "$SEAT_ARGV"
 
 route_pr 'doc = {
@@ -581,6 +587,14 @@ route_pr 'doc = {
 }'
 check "disagreeing trailers omit author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
 check "disagreeing trailers omit builder vendor" bash -c '! grep -q -- "--builder-vendor" "$1"' _ "$SEAT_ARGV"
+
+route_pr 'doc = {
+  "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss", "type": "User"},
+  "commits": [{"messageHeadline": "Seat",
+               "messageBody": "Co-Authored-By: Opus and Grok <noreply@example.com>\n"}],
+}'
+check "one trailer naming two vendors omits author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
+check "one trailer naming two vendors omits builder vendor" bash -c '! grep -q -- "--builder-vendor" "$1"' _ "$SEAT_ARGV"
 
 write_pr_json 'doc = {
   "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss", "type": "User"},
