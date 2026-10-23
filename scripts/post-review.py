@@ -52,7 +52,8 @@ GitHub. A rerun that still has replies to send compares the new review
 request with the one stored on the receipt. A different commit, body, or
 inline comment is not posted and is not recorded as posted. Two replies to
 the same comment are refused. A reply that already succeeded is not sent
-again, and a rerun stops if that reply's text changed.
+again. A rerun checks that text before it sends any other reply, including
+on a dry run, and stops if the text changed.
 """
 from __future__ import annotations
 
@@ -372,10 +373,24 @@ def main() -> int:
         findings[key] = {"ballot": ballot, "id": fid, "posted_as": "review body"}
         body_findings.append((ballot, fid))
 
+    repro_findings: list[tuple[str, str, Path]] = []
+    for ballot, fid in body_findings:
+        try:
+            path = comment_draft.find_repro(council / ballot, fid)
+        except comment_draft.ReproError as exc:
+            die(str(exc))
+        if path is not None:
+            repro_findings.append((ballot, fid, path))
+    body_script_floor = sum(
+        2 + comment_draft.repro_floor(path.name, key=f"{ballot}/{path.name}")
+        for ballot, _fid, path in repro_findings
+    )
+
     # A line outside the diff joins the review body. Reserve each later
     # comment's prose, permalink, and the smallest truncated script, not the
-    # script it already carries. A large attachment can then shrink instead
-    # of pushing the review over the limit.
+    # script it already carries. Also reserve every body-finding script.
+    # A large attachment can then shrink instead of pushing the review over
+    # the limit or dropping the next script.
     if moved:
         def moved_link(c: dict) -> str:
             url = f"https://github.com/{repo}/blob/{commit}/{quote(c['path'])}#L{c['line']}"
@@ -400,7 +415,7 @@ def main() -> int:
             header = "**Outside this diff**\n\n" if index == 0 else ""
             link = moved_link(c)
             sep = "\n\n" if assembled else ""
-            later = sum(2 + prose_cost[j] for j in range(index + 1, len(moved)))
+            later = body_script_floor + sum(2 + prose_cost[j] for j in range(index + 1, len(moved)))
             prefix = f"{assembled}{sep}{header}{link}\n\n"
             room = comment_draft.GITHUB_COMMENT_LIMIT - len(prefix) - later
             piece = attach_finding_repro(
@@ -414,14 +429,6 @@ def main() -> int:
             c["body"] = piece
             assembled = prefix + piece
         body = assembled
-    repro_findings: list[tuple[str, str, Path]] = []
-    for ballot, fid in body_findings:
-        try:
-            path = comment_draft.find_repro(council / ballot, fid)
-        except comment_draft.ReproError as exc:
-            die(str(exc))
-        if path is not None:
-            repro_findings.append((ballot, fid, path))
     for index, (ballot, fid, path) in enumerate(repro_findings):
         later = 0
         for ballot2, _fid2, path2 in repro_findings[index + 1:]:
@@ -473,21 +480,26 @@ def main() -> int:
     review_request = {"commit_id": commit, "event": event, "body": body, "comments": inline}
     if resume and resume.get("review_request") != review_request:
         die("pending review was posted from a different payload; not recording this payload as posted")
+    sent: dict[int, str] = {}
+    if resume:
+        for item in resume.get("replies_posted") or []:
+            if not isinstance(item, dict) or type(item.get("in_reply_to")) is not int:
+                die(f"pending receipt {pending_path} replies_posted is unreadable")
+            sent[item["in_reply_to"]] = str(item.get("body", ""))
+        for reply in replies:
+            posted_body = sent.get(reply["in_reply_to"])
+            if posted_body is not None and posted_body != reply["body"]:
+                die(f"reply to comment {reply['in_reply_to']} was already posted with different text")
     if args.dry_run:
         print("dry run: nothing posted")
         return 0
 
-    sent: dict[int, str] = {}
     if resume:
         review_id = resume["review_id"]
         review_url = resume.get("review_url")
         if not review_url:
             die(f"pending receipt {pending_path} has no review url")
         review = {"id": review_id, "html_url": review_url, "state": resume.get("state")}
-        for item in resume.get("replies_posted") or []:
-            if not isinstance(item, dict) or type(item.get("in_reply_to")) is not int:
-                die(f"pending receipt {pending_path} replies_posted is unreadable")
-            sent[item["in_reply_to"]] = str(item.get("body", ""))
     else:
         # Commit and body alone are not an identity: an empty body matches other reviewers.
         login = (gh_json(["api", "user"]) or {}).get("login")
@@ -563,10 +575,7 @@ def main() -> int:
         })
 
     for reply in replies:
-        posted_body = sent.get(reply["in_reply_to"])
-        if posted_body is not None:
-            if posted_body != reply["body"]:
-                die(f"reply to comment {reply['in_reply_to']} was already posted with different text")
+        if reply["in_reply_to"] in sent:
             continue
         gh_json(
             ["api", "-X", "POST",

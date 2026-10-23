@@ -50,7 +50,8 @@ from urllib.parse import parse_qs, urlsplit
 page = int(parse_qs(urlsplit(path).query).get('page', ['1'])[0])
 if '-X' in args:
     if base.endswith('/replies'):
-        if os.environ.get('GH_REPLY_FAIL'):
+        fail = os.environ.get('GH_REPLY_FAIL', '')
+        if fail == '1' or (fail and f'/comments/{fail}/replies' in base):
             sys.stderr.write('HTTP 502 Bad Gateway\\n')
             sys.exit(1)
         req = json.loads(sys.stdin.read())
@@ -577,6 +578,39 @@ def test_repro_and_labels(root: Path) -> None:
     check(second.returncode != 0 and 'different payload' in second.stderr
           and not (f.council / 'demo-1/posted.json').exists() and f.posts() == before,
           'a changed payload is not recorded as posted '
+          f'({second.returncode} {second.stderr.strip()} posts={f.posts()} before={before})')
+
+    f = Fixture(root / 'moved-and-body')
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f2.rb').write_text('y' * 70000, encoding='utf-8')
+    (repro / 'f4.rb').write_text("puts :body\n", encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a moved script leaves room for a body script ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    check(len(req['body']) <= 65536, f'moved and body scripts stay within the review body ({len(req["body"])})')
+    check('<summary>f2.rb</summary>' in req['body'] and 'puts :body' in req['body'],
+          'the body script is attached after the moved script')
+
+    f = Fixture(root / 'reply-order')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 51, 'body': 'Posted first.'})
+    payload['comments'].append({'in_reply_to': 52, 'body': 'Fails second.'})
+    f.set_payload(payload)
+    first = f.post(env={'GH_REPLY_FAIL': '52'})
+    check(first.returncode != 0 and (f.council / 'demo-1/post-7.pending.json').is_file(),
+          f'reply-order setup posts one reply and leaves the next pending ({first.returncode} {first.stderr.strip()})')
+    payload['comments'] = [c for c in payload['comments'] if 'in_reply_to' not in c]
+    payload['comments'].append({'in_reply_to': 52, 'body': 'Fails second.'})
+    payload['comments'].append({'in_reply_to': 51, 'body': 'Changed after it was posted.'})
+    f.set_payload(payload)
+    before = f.posts()
+    dry = f.post('--dry-run')
+    check(dry.returncode != 0 and 'different text' in dry.stderr and f.posts() == before,
+          f'a dry run rejects a changed reply before posting ({dry.returncode} {dry.stderr.strip()} posts={f.posts()})')
+    second = f.post()
+    check(second.returncode != 0 and 'different text' in second.stderr and f.posts() == before,
+          'a changed reply stops the rerun before the unsent reply is posted '
           f'({second.returncode} {second.stderr.strip()} posts={f.posts()} before={before})')
 
     f = Fixture(root / 'own-pr')

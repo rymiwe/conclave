@@ -1344,7 +1344,9 @@ block at the `</details>` outside the fence, so a script that contains that
 tag is not cut in half. A draft marks the block with the filename. Posting
 uses the ballot and the filename, and adopts the draft marker instead of
 attaching the script twice. Each later script keeps room for a truncated
-block, so one large script does not drop the next one. A fenced script is not prose: `scripts/check-comment-links.py` skips
+block, including a script that belongs to a body finding, so one large
+script does not drop the next one. A rerun checks every reply the receipt
+already lists before it sends another, and a dry run does that check too. A fenced script is not prose: `scripts/check-comment-links.py` skips
 citations and internal words inside the fence, and a label inside the fence
 does not count.
 
