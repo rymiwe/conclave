@@ -6,13 +6,13 @@ repro/<finding-id>.<ext> (repro/f1.rb). The comment for that finding gets one
 collapsed details block. A finding with no file there gets no block.
 
 Labels (**Requested:**, **Advisory:**, **Informational:**, and the legacy
-**Question:**) belong on a new inline comment, and only when the pull request
-is someone else's. A reply never keeps one. The review summary never opens
-with one. A bullet inside the summary may keep one while
+**Question:**) belong at the start of a new inline comment, and only when the
+pull request is someone else's. A reply never keeps one. The review summary
+never opens with one. A bullet inside the summary may keep one while
 SUMMARY_BULLETS_MAY_HAVE_LABELS is True. This module strips labels on a reply,
-strips a label that opens the summary, and requires one on a new inline
-comment in someone else's pull request. It does not enforce the absence of
-labels on an inline comment on your own pull request.
+strips a label that opens the summary, and requires a new inline comment in
+someone else's pull request to start with one. It does not enforce the absence
+of labels on an inline comment on your own pull request.
 
 GitHub rejects a review comment body longer than 65536 characters. A script
 that does not fit is truncated inside the fence, with a note after the fence.
@@ -229,25 +229,16 @@ def _drop_summary_block(body: str, filename: str) -> str:
 
 
 def prose_without_repro(body: str) -> str:
-    """Comment text with repro details blocks removed.
+    """Comment text with repro blocks removed.
 
-    A later resize can cut the script. It cannot cut this prose. A
+    A repro block starts at its `<!-- repro:` marker. A `<details>` element
+    with no marker stays, including one whose summary is a filename. A
+    later resize can cut the script. It cannot cut this prose. A
     `</details>` inside the fenced script is not the end of the block.
     """
     for _ in range(20):
-        marker_at = body.find("<!-- repro:")
-        details_at = body.find("<details>")
-        if marker_at >= 0 and (details_at < 0 or marker_at <= details_at):
-            start = marker_at
-        elif details_at >= 0:
-            window = body[details_at:details_at + 200]
-            summary = re.search(r"<summary>([^<]+)</summary>", window)
-            name = summary.group(1) if summary else ""
-            if summary and "." in name and re.fullmatch(r"[\w.-]+", name):
-                start = details_at
-            else:
-                break
-        else:
+        start = body.find("<!-- repro:")
+        if start < 0:
             break
         end = _details_end(body, start)
         if end < 0:
@@ -259,10 +250,15 @@ def prose_without_repro(body: str) -> str:
     return body
 
 
-def repro_floor(filename: str, *, key: str | None = None) -> int:
-    """Characters a truncated block needs, including its marker and note."""
+def repro_floor(filename: str, *, key: str | None = None, total: int) -> int:
+    """Characters a truncated block needs, including its marker and note.
+
+    total is the script's length in bytes. The note names that length, with
+    nothing of the script kept, so the reservation matches the smallest
+    block render_repro_block will actually emit.
+    """
     marker = f"<!-- repro:{key or filename} -->"
-    note = _note(filename, "0", "999999")
+    note = _note(filename, "0", str(total))
     fence = fence_for("", language_for(filename))
     return len(
         f"{marker}\n<details><summary>{filename}</summary>\n\n{fence}\n{note}\n</details>\n"
@@ -494,8 +490,8 @@ def draft_comment(
 
     A reply loses its labels. The summary loses a label that opens it, and
     loses a bullet's label when SUMMARY_BULLETS_MAY_HAVE_LABELS is False.
-    A new inline comment on someone else's pull request must already have
-    one. A repro file is attached to an inline comment or a review-body
+    A new inline comment on someone else's pull request must already start
+    with one. A repro file is attached to an inline comment or a review-body
     item, and not to a reply.
     """
     if kind not in ("inline", "reply", "body"):
@@ -506,7 +502,7 @@ def draft_comment(
         body = strip_opening_label(body)
         if not SUMMARY_BULLETS_MAY_HAVE_LABELS:
             body = strip_bullet_labels(body)
-    elif kind == "inline" and others_pr and not has_label(body):
+    elif kind == "inline" and others_pr and not opens_with_label(body):
         raise ValueError(
             "new inline comment on someone else's PR needs "
             "**Requested:**, **Advisory:**, or **Informational:**"

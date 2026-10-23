@@ -18,7 +18,7 @@ to tmp/council/<id>/post-<pr>.json:
     "body_findings": ["f7"],         findings carried in the summary body
     "pr_author": "octocat",          optional; else user.login on the pull request
     "reviewer": "me",                optional; else gh api user, and only when a
-                                     new inline comment has no label
+                                     new inline comment does not start with a label
     "comments": [
       {"finding": "f2", "path": "app/x.rb", "line": 54, "body": "...",
        "side": "RIGHT", "expect": "optional text that must be on that line"},
@@ -36,11 +36,12 @@ Steps, in order. Any failure stops before the POST.
    the text is the file at commit_id.
 3. Every body must pass scripts/check-comment-links.py, and the payload must
    pass scripts/check-comment-labels.py. That check flags a summary that opens
-   with a label, a labeled reply, and an unlabeled new inline comment on
-   someone else's pull request. A comment with in_reply_to is a reply
-   and is not sent as a new line comment. A repro/<finding-id>.<ext> file in
-   that finding's ballot directory is attached to the new inline comment, or
-   to the review body when the finding is in body_findings.
+   with a label, a labeled reply, and a new inline comment on someone
+   else's pull request that does not start with a label. A comment with
+   in_reply_to is a reply and is not sent as a new line comment. A
+   repro/<finding-id>.<ext> file in that finding's ballot directory is
+   attached to the new inline comment, or to the review body when the
+   finding is in body_findings.
 4. The request goes to tmp/council/<id>/post-<pr>.request.json.
 5. --dry-run stops here. Otherwise POST pulls/<pr>/reviews, write
    tmp/council/<id>/post-<pr>.pending.json with the review id and the review
@@ -383,10 +384,15 @@ def main() -> int:
             die(str(exc))
         if path is not None:
             repro_findings.append((ballot, fid, path))
-    body_script_floor = sum(
-        2 + comment_draft.repro_floor(path.name, key=f"{ballot}/{path.name}")
-        for ballot, _fid, path in repro_findings
-    )
+    def reserve_repro(path: Path, ballot: str) -> int:
+        try:
+            script = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            die(f"repro {path} is not utf-8: {exc}")
+        total = len(script.encode("utf-8"))
+        return 2 + comment_draft.repro_floor(path.name, key=f"{ballot}/{path.name}", total=total)
+
+    body_script_floor = sum(reserve_repro(path, ballot) for ballot, _fid, path in repro_findings)
 
     # A line outside the diff joins the review body. Reserve each later
     # comment's prose, permalink, and the smallest truncated script, not the
@@ -405,7 +411,7 @@ def main() -> int:
                 die(str(exc))
             if path is None:
                 return 0
-            return 2 + comment_draft.repro_floor(path.name, key=f"{c['_ballot']}/{path.name}")
+            return reserve_repro(path, c["_ballot"])
 
         prose_cost: list[int] = []
         for index, c in enumerate(moved):
@@ -423,6 +429,12 @@ def main() -> int:
             piece = attach_finding_repro(
                 str(c["body"]), c["_ballot"], c["_fid"], limit=max(room, 0)
             ).strip()
+            try:
+                repro_path = comment_draft.find_repro(council / c["_ballot"], c["_fid"])
+            except comment_draft.ReproError as exc:
+                die(str(exc))
+            if repro_path is not None and f"<!-- repro:{c['_ballot']}/{repro_path.name} -->" not in piece:
+                die(f"review body has no room for repro {c['_ballot']}/{repro_path.name}")
             if len(prefix) + len(piece) + later > comment_draft.GITHUB_COMMENT_LIMIT:
                 die(
                     f"review body is {len(prefix) + len(piece) + later} characters; "
@@ -434,7 +446,7 @@ def main() -> int:
     for index, (ballot, fid, path) in enumerate(repro_findings):
         later = 0
         for ballot2, _fid2, path2 in repro_findings[index + 1:]:
-            later += 2 + comment_draft.repro_floor(path2.name, key=f"{ballot2}/{path2.name}")
+            later += reserve_repro(path2, ballot2)
         room = comment_draft.GITHUB_COMMENT_LIMIT - later
         body = attach_finding_repro(body, ballot, fid, limit=max(room, 0))
         if f"<!-- repro:{ballot}/{path.name} -->" not in body:
@@ -448,7 +460,7 @@ def main() -> int:
     needs_reviewer = any(
         isinstance(c, dict)
         and c.get("in_reply_to") is None
-        and not comment_draft.has_label(str(c.get("body", "")))
+        and not comment_draft.opens_with_label(str(c.get("body", "")))
         for c in comments
     )
     if needs_reviewer and not reviewer:

@@ -77,6 +77,26 @@ def main() -> None:
         prose = comment_draft.prose_without_repro(tight).strip()
         check(prose == "**Requested:** note.",
               f"resizing ignores </details> inside the script ({prose!r})")
+        hand = "Note.\n\n<details><summary>config.yml</summary>\n\nname: kept\n\n</details>\n"
+        check(comment_draft.prose_without_repro(hand) == hand,
+              "a details block is prose unless it carries the repro marker")
+
+        million = "x" * 1_000_000
+        million_total = len(million.encode("utf-8"))
+        million_key = "demo-1/f1.py"
+        million_marker = f"<!-- repro:{million_key} -->"
+        million_floor = comment_draft.repro_floor("f1.py", key=million_key, total=million_total)
+        six_floor = comment_draft.repro_floor("f1.py", key=million_key, total=999_999)
+        million_block = comment_draft.render_repro_block(
+            "f1.py", million, budget=million_floor, marker=million_marker
+        )
+        check(million_floor == six_floor + 1,
+              f"a 7-digit total lengthens the note ({six_floor} -> {million_floor})")
+        check(million_block != "" and len(million_block) == million_floor and "of 1000000 bytes" in million_block,
+              f"a 7-digit script fits the floor taken from its length ({len(million_block)} {million_floor})")
+        check(comment_draft.render_repro_block(
+            "f1.py", million, budget=million_floor - 1, marker=million_marker
+        ) == "", "one byte under that floor does not fit")
         check(tight.rstrip().endswith("</details>") and "<!-- repro:demo-1/f5.py -->" in tight,
               "the resized block still closes")
 
@@ -131,6 +151,23 @@ def main() -> None:
             check("needs" in str(exc), "an unlabeled new inline comment on someone else's PR is refused")
         else:
             raise SystemExit("FAIL unlabeled inline comment was drafted")
+        try:
+            comment_draft.draft_comment(
+                "size counts deleted items. as **Requested:** above",
+                kind="inline",
+                others_pr=True,
+            )
+        except ValueError as exc:
+            check("needs" in str(exc), "a new inline comment whose label is not at the start is refused")
+        else:
+            raise SystemExit("FAIL a buried label was drafted")
+        buried_own = comment_draft.draft_comment(
+            "size counts deleted items. as **Requested:** above",
+            kind="inline",
+            others_pr=False,
+        )
+        check(buried_own == "size counts deleted items. as **Requested:** above",
+              "your own PR can draft a label that is not at the start")
         own = comment_draft.draft_comment("no label here", kind="inline", others_pr=False)
         check(own == "no label here", "your own PR can draft an unlabeled inline comment")
         labeled = comment_draft.draft_comment("**Informational:** noted.", kind="inline", others_pr=True)

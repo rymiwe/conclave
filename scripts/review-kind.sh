@@ -2551,7 +2551,7 @@ Next step (chair, not this script):
   save that script as repro/<finding-id>.<ext> in the ballot directory
   (for example repro/f1.rb). The drafter attaches it to that finding's comment.
   A finding with no file there gets no block.
-  On someone else's pull request, label each new inline comment with
+  On someone else's pull request, start each new inline comment with
   **Requested:**, **Advisory:**, or **Informational:**. Do not draft
   **Question:**. The review summary does not open with a label. A bullet in
   the summary may. A reply to an existing comment never gets a label.
@@ -2561,8 +2561,8 @@ Next step (chair, not this script):
   That check rejects an internal word in a public comment and names the plain replacement.
   A fenced script is not prose: citations and internal words inside the fence are skipped.
   scripts/check-comment-labels.py <post-payload.json> flags a summary that opens
-  with a label, a labeled reply, or an unlabeled new inline comment on someone
-  else's pull request.
+  with a label, a labeled reply, or a new inline comment on someone else's
+  pull request that does not start with a label.
   Show every draft in full in chat, as it would go out, in the message
   that asks whether to post. A file path is not a preview.
   The script does not write comment prose and does not post.

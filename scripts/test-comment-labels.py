@@ -37,6 +37,19 @@ def run_cli(payload: dict, *extra: str) -> subprocess.CompletedProcess[str]:
         )
 
 
+def run_by_path(payload: dict) -> subprocess.CompletedProcess[str]:
+    """The chair runs this script by path, not via the interpreter."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "post.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return subprocess.run(
+            ["./scripts/check-comment-labels.py", str(path)],
+            cwd=ROOT.parent,
+            capture_output=True,
+            text=True,
+        )
+
+
 def main() -> None:
     other = {"pr_author": "author", "reviewer": "me"}
     labeled_reply = {**other, "comments": [{"in_reply_to": 9, "body": "**Requested:** still broken."}]}
@@ -82,6 +95,33 @@ def main() -> None:
 
     cli_ok = run_cli(labeled_inline)
     check(cli_ok.returncode == 0 and cli_ok.stdout.endswith("ok\n"), f"cli accepts a labeled comment ({cli_ok.stdout!r})")
+    by_path = run_by_path(labeled_inline)
+    check(by_path.returncode == 0 and by_path.stdout.endswith("ok\n"),
+          f"scripts/check-comment-labels.py runs by path ({by_path.returncode} {by_path.stdout!r} {by_path.stderr!r})")
+
+    buried = {**other, "comments": [{
+        "finding": "f1", "path": "a.rb", "line": 1,
+        "body": "size counts deleted items. as **Requested:** above",
+    }]}
+    found = labels.problems(buried)
+    check(any("unlabeled new inline comment" in item for item in found),
+          f"a label that does not open the comment is not a label ({found})")
+    later = {**other, "comments": [{"body": "See above.\n**Requested:** fix."}]}
+    check(any("unlabeled new inline comment" in item for item in labels.problems(later)),
+          "a label on a later line does not open an inline comment")
+    padded = {**other, "comments": [{"body": "\n\n  **Advisory:** noted."}]}
+    check(labels.problems(padded) == [], "blank lines and indentation still open an inline comment")
+    own_buried = {"pr_author": "me", "reviewer": "me", "comments": [
+        {"body": "size counts deleted items. as **Requested:** above"}
+    ]}
+    check(labels.problems(own_buried) == [], "your own PR is not flagged when the label is not at the start")
+    unknown_buried = {"comments": [{"body": "see **Requested:** later"}]}
+    found = labels.problems(unknown_buried)
+    check(any("cannot tell" in item for item in found),
+          f"a buried label does not identify the pull request ({found})")
+    buried_reply = {**other, "comments": [{"in_reply_to": 9, "body": "see **Requested:** later"}]}
+    check(any("labeled reply" in item for item in labels.problems(buried_reply)),
+          "a reply is labeled wherever the label sits")
 
     opening = {**other, "body": "\n\n  **Requested:** four notes.\n", "comments": []}
     found = labels.problems(opening)

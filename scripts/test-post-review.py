@@ -435,6 +435,17 @@ def test_repro_and_labels(root: Path) -> None:
     f.set_payload(payload)
     refused(f, 'an unlabeled new inline comment on someone else\'s PR is refused', 'unlabeled new inline comment')
 
+    f = Fixture(root / 'buried-label')
+    payload = f.payload()
+    payload['pr_author'] = 'author'
+    payload['comments'][0]['body'] = 'size counts deleted items. as **Requested:** above'
+    f.set_payload(payload)
+    proc = f.post()
+    check(proc.returncode != 0 and 'unlabeled new inline comment' in proc.stderr
+          and 'cannot tell' not in proc.stderr and f.posts() == 0,
+          'a new inline comment whose label is not at the start is refused '
+          f'({proc.returncode} {proc.stderr.strip()} posts={f.posts()})')
+
     f = Fixture(root / 'labeled-inline')
     payload = f.payload()
     payload['pr_author'] = 'author'
@@ -641,6 +652,42 @@ def test_repro_and_labels(root: Path) -> None:
     check(proc.returncode == 0, f'an unlabeled inline comment on your own PR is not flagged ({proc.stderr.strip()})')
 
 
+def test_moved_repro_keeps_its_block(root: Path) -> None:
+    """An 8-digit script used to be reserved with a 6-digit note, and the moved loop dropped it."""
+    f = Fixture(root / 'eight-digit')
+    payload = f.payload()
+    payload['body_findings'] = []
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') in ('f2', 'f3')]
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f2.rb').write_text('y' * 10_000_000, encoding='utf-8')
+    (repro / 'f3.rb').write_text('z' * 10_000_000, encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'two 8-digit moved scripts still dry-run ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    body = req['body']
+    check(len(body) <= 65536, f'8-digit moved scripts stay within the review body ({len(body)})')
+    check('<!-- repro:demo-1/f2.rb -->' in body and '<!-- repro:demo-1/f3.rb -->' in body,
+          'the second moved script is not dropped')
+    check('of 10000000 bytes' in body, 'the truncation note names the real byte length')
+
+
+def test_moved_repro_missing_block_dies(root: Path) -> None:
+    """A moved comment with no room for its script stops, instead of posting without it."""
+    f = Fixture(root / 'no-room')
+    payload = f.payload()
+    payload['body'] = 'N' * 65300
+    payload['body_findings'] = []
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f2']
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f2.rb').write_text('puts :hi\n', encoding='utf-8')
+    refused(f, 'a moved repro that does not fit is refused before POST',
+            'no room for repro demo-1/f2.rb')
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix='post-review-tests-') as raw:
         root = Path(raw)
@@ -656,6 +703,8 @@ def main() -> None:
         test_other_reviewer_same_body(root)
         test_refusals(root)
         test_repro_and_labels(root)
+        test_moved_repro_keeps_its_block(root)
+        test_moved_repro_missing_block_dies(root)
     print('all post-review checks passed')
 
 

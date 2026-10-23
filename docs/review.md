@@ -594,7 +594,7 @@ Round A writes the receipt only after its brief passes the checks. A `brief.md` 
 
 - **Chair round A.** A fresh `cursor-agent` session reads the PR, the shared context, and `stack.md`, and writes `brief.md`. It does not run the script. The runner refuses a brief without `kind: review` or with a forbidden family word.
 - **Phase 1.** The runner runs `conclave.sh <id> --dry-run`, then the full run, with the Fable flags below. Phase 1 stops if the target repo is shallow.
-- **Chair round B.** The round A session, resumed, or a fresh session when round A ran in an earlier invocation. It writes `findings.json` from `blind/leg-*.md` only, runs `--findings`, fills `decide.md`, and drafts `comments.md`. On someone else's pull request, a new inline comment is labelled **Requested:**, **Advisory:**, or **Informational:**. **Question:** is not drafted. The review summary does not open with a label. A bullet in the summary may. A reply to an existing comment has no label. A throwaway script that verified a finding is saved as `repro/<finding-id>.<ext>` in the ballot directory.
+- **Chair round B.** The round A session, resumed, or a fresh session when round A ran in an earlier invocation. It writes `findings.json` from `blind/leg-*.md` only, runs `--findings`, fills `decide.md`, and drafts `comments.md`. On someone else's pull request, a new inline comment starts with **Requested:**, **Advisory:**, or **Informational:**. **Question:** is not drafted. The review summary does not open with a label. A bullet in the summary may. A reply to an existing comment has no label. A throwaway script that verified a finding is saved as `repro/<finding-id>.<ext>` in the ballot directory.
 
 Each cursor-agent chair the runner starts has `CONCLAVE_CHAIR=1` in its environment. That is the chair marker; `CONCLAVE_CHAIR_MODEL` is only the model id.
 
@@ -1327,9 +1327,9 @@ require one. It does flag a summary that opens with a label, and a labeled
 reply, on every pull request.
 
 `scripts/comment_draft.py` strips every label from a reply, strips a label
-that opens the summary, and refuses to draft an unlabeled new inline
-comment when the pull request is someone else's. A repro file is attached
-there, except on a reply.
+that opens the summary, and refuses to draft a new inline comment on
+someone else's pull request that does not start with a label. A repro file
+is attached there, except on a reply.
 
 When the pull request author and the reviewer are not both known, an unlabeled
 new inline comment is refused rather than treated as your own.
@@ -1381,7 +1381,7 @@ run of digits is not treated as a SHA, and neither is an all-letter hex
 word. A SHA in this check includes a hex letter and a decimal digit.
 `scripts/check-comment-labels.py` fails a post payload whose summary opens
 with a label, whose reply carries a label, or whose new inline comment on
-someone else's pull request has no label. With
+someone else's pull request does not start with a label. With
 `SUMMARY_BULLETS_MAY_HAVE_LABELS` set to False it also fails a labeled
 bullet in the summary. The check runs in `scripts/post-review.py` before
 any POST. A moved-outside-the-diff block appended to the summary is not
@@ -1477,8 +1477,8 @@ script calls the posting helper. When the human says post:
    It has a body and no line. `pr_author` and `reviewer` are GitHub logins.
    When they are omitted, `post-review.py` reads the author from the pull
    request and the reviewer from `gh api user`, and it reads the reviewer
-   only when a new inline comment has no label. The format is in the header
-   of `scripts/post-review.py`.
+   only when a new inline comment does not start with a label. The format
+   is in the header of `scripts/post-review.py`.
 2. Run `scripts/post-review.py <id> <pr> --dry-run`. It checks the PR head
    against `commit_id`, checks each line against the `pulls/<pr>/files`
    hunks, moves a line outside the diff into the review body with a

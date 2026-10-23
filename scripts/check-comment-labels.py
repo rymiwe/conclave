@@ -22,6 +22,11 @@ comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS is True. When that constant
 is False, a bullet whose text starts with a label is flagged. A bullet is
 a line that starts with `-`, `*`, `+`, or a number (`1.` or `1)`).
 
+A new inline comment is labeled only when it starts with a label. That is
+the same opening rule as the summary: after blank lines, the first
+remaining line starts with the label. A label later in the comment does
+not. A reply is different: a label anywhere in the reply is flagged.
+
 Someone else's pull request means pr_author and reviewer are both set and
 they differ. When they are the same login, an unlabeled new inline comment
 is left alone (your own pull request; this lint does not require or forbid
@@ -94,7 +99,7 @@ def problems(
             if comment_draft.has_label(body):
                 found.append(f"comment {index}: labeled reply")
             continue
-        if comment_draft.has_label(body):
+        if comment_draft.opens_with_label(body):
             continue
         if whose is False:
             continue

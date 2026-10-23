@@ -872,7 +872,7 @@ class Runner:
                       'Read only blind/leg-*.md for reports; never voter-* files; never blind/key.txt until the convergence table exists. '
                       + instructions + f'Replace every TODO(chair) in {ballot / "decide.md"}. '
                       f'Draft comments into {ballot / "comments.md"}. '
-                      'On someone else\'s pull request, label each new inline comment with **Requested:**, **Advisory:**, or **Informational:**. '
+                      'On someone else\'s pull request, start each new inline comment with **Requested:**, **Advisory:**, or **Informational:**. '
                       'Do not draft **Question:**. The review summary does not open with a label. A bullet in the summary may. A reply to an existing comment never gets a label. '
                       f'When you verify a finding with a throwaway script, save it as {ballot / "repro"}/<finding-id>.<ext> '
                       '(for example repro/f1.rb). The drafter attaches that file to the comment. A finding with no file there gets no block. '
