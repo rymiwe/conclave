@@ -2341,6 +2341,33 @@ prepare_argon_leg() {
   printf '  argon: skipped\n'
 }
 
+argon_agent_name() {
+  printf 'conclave-voter\n'
+}
+
+argon_write_agent() {
+  # $1 is the packet. A tool-less agy agent scoped to this packet only.
+  # The prompt already carries the diff, so the voter needs no tools, and a
+  # headless run cannot approve one (agy auto-denies and answers empty).
+  # Never ~/.gemini: the file lives in the packet temp dir and dies with it.
+  local dir="$1/.agents/agents"
+  mkdir -p -- "$dir" || return 1
+  cat >"$dir/$(argon_agent_name).md" <<'EOF'
+---
+name: conclave-voter
+description: Conclave council voter. Answers from the user message alone. No tools.
+mainAgent: true
+excludeDefaultComponents: true
+tools: []
+---
+# Conclave voter
+
+Everything you need is in the user message: the brief and, for a review, the diff.
+You have no tools. Do not try to read files, run commands, or open URLs.
+Answer in plain text, in the format the user message asks for.
+EOF
+}
+
 run_argon() {
   # Packet-first. The prompt is PROMPT.md on stdin as one stream-json user event.
   # cwd is the packet. A failure writes voter-argon.skipped and returns 0.
@@ -2361,6 +2388,10 @@ run_argon() {
     argon_skip "agy: not found: ${bin:-agy}"
     return 0
   fi
+  if ! argon_write_agent "$PACKET"; then
+    argon_skip "argon: cannot write the tool-less voter agent"
+    return 0
+  fi
   ec=0
   (
     set -o pipefail
@@ -2373,6 +2404,7 @@ run_argon() {
           -u COUNCIL_SAVED_JEV \
           "$bin" \
           --model "$model" \
+          --agent "$(argon_agent_name)" \
           --disable-slash-commands \
           --sandbox \
           --print-timeout "${timeout}s" \
@@ -2394,14 +2426,26 @@ run_argon() {
   parse_ec=0
   local parse_reason
   parse_reason="$(mktemp)"
-  python3 - "$stream" "$raw" "$parse_reason" <<'PY' || parse_ec=$?
-import json, sys
-stream_path, raw_path, reason_path = sys.argv[1:4]
+  python3 - "$stream" "$raw" "$parse_reason" "$err" "$(argon_agent_name)" <<'PY' || parse_ec=$?
+import json, re, sys
+stream_path, raw_path, reason_path, err_path, agent_name = sys.argv[1:6]
 result = None
+init = None
 try:
     lines = open(stream_path, encoding="utf-8", errors="replace").read().splitlines()
 except OSError as exc:
     open(reason_path, "w", encoding="utf-8").write(str(exc))
+    raise SystemExit(1)
+try:
+    stderr = open(err_path, encoding="utf-8", errors="replace").read()
+except OSError:
+    stderr = ""
+def fail(msg):
+    # The reason is the leg's skip text. agy stderr follows verbatim.
+    body = msg.rstrip("\n") + "\n"
+    if stderr.strip():
+        body += stderr if stderr.endswith("\n") else stderr + "\n"
+    open(reason_path, "w", encoding="utf-8").write(body)
     raise SystemExit(1)
 for line in lines:
     line = line.strip()
@@ -2411,6 +2455,8 @@ for line in lines:
         ev = json.loads(line)
     except json.JSONDecodeError:
         continue
+    if isinstance(ev, dict) and ev.get("event") == "init" and init is None:
+        init = ev.get("init")
     if isinstance(ev, dict) and ev.get("event") == "result":
         result = ev.get("result")
 def as_text(value):
@@ -2427,11 +2473,20 @@ if status != "SUCCESS":
     err = as_text(result.get("error")).strip() or "status %s" % (status,)
     open(reason_path, "w", encoding="utf-8").write(err if err.endswith("\n") else err + "\n")
     raise SystemExit(1)
+# A run that did not load the tool-less agent had tools, so it is not a vote.
+loaded = init.get("agent") if isinstance(init, dict) else None
+if loaded != agent_name:
+    fail("argon: agy did not load the tool-less voter agent (init agent %r)" % (loaded,))
+# A denied tool means the answer was cut short. Exit 0 does not make it a review.
+denied = result.get("denied_actions")
+if denied:
+    fail("argon: agy denied a tool in headless mode: %s" % (as_text(denied),))
+if re.search(r"headless mode cannot prompt for|no output produced", stderr):
+    fail("argon: agy reported a headless permission denial")
 response = result.get("response")
 if not isinstance(response, str) or not response.strip():
-    err = as_text(result.get("error")).strip() or "empty response"
-    open(reason_path, "w", encoding="utf-8").write(err if err.endswith("\n") else err + "\n")
-    raise SystemExit(1)
+    err = as_text(result.get("error")).strip()
+    fail("argon: empty response (agy exit 0)" + (": " + err if err else ""))
 open(raw_path, "w", encoding="utf-8").write(response if response.endswith("\n") else response + "\n")
 PY
   if [ "$parse_ec" -ne 0 ]; then

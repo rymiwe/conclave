@@ -126,18 +126,24 @@ def write_stub(path: Path):
     path.chmod(0o755)
 
 
-def stream_file(path: Path, status, response, error="", usage=None):
+def stream_file(path: Path, status, response, error="", usage=None, agent="conclave-voter", denied=None):
     if usage is None:
         usage = {"input_tokens": 3}
+    init = {"event": "init"}
+    if agent is not None:
+        init["init"] = {"agent": agent}
+    result = {
+        "status": status,
+        "response": response,
+        "error": error,
+        "usage": usage,
+    }
+    if denied is not None:
+        result["denied_actions"] = denied
     events = [
-        {"event": "init"},
+        init,
         {"event": "step_update", "text_delta": "x"},
-        {"event": "result", "result": {
-            "status": status,
-            "response": response,
-            "error": error,
-            "usage": usage,
-        }},
+        {"event": "result", "result": result},
     ]
     path.write_text("".join(json.dumps(ev) + "\n" for ev in events), encoding="utf-8")
 
@@ -291,8 +297,16 @@ council_write_header_json
           and "--input-format\nstream-json" in argv and "--output-format\nstream-json" in argv
           and argv.strip().endswith("-p="),
           f"argv is the stream-json packet launch ({argv})")
+    check("--agent\nconclave-voter" in argv, f"argv names the tool-less voter agent ({argv})")
     check(cwd == str(packet), f"cwd is the packet ({cwd})")
     check(stdin == expect, "stdin prompt equals PROMPT.md")
+    agent_md = packet / ".agents" / "agents" / "conclave-voter.md"
+    text = agent_md.read_text() if agent_md.is_file() else ""
+    check("\ntools: []\n" in text and "\nexcludeDefaultComponents: true\n" in text
+          and "\nname: conclave-voter\n" in text,
+          f"the packet holds a tool-less agent file ({text!r})")
+    home = Path(env["HOME"])
+    check(not (home / ".gemini").exists(), "run_argon writes nothing under ~/.gemini")
     calls = (rec / "calls").read_text() if (rec / "calls").is_file() else ""
     check("/usage" in calls and calls.count("--model") == 1, "preflight is usage and the run is one model call")
 
@@ -389,6 +403,83 @@ council_write_header_json
     # The case above passes stream="" which writes a stream file of empty string only if stream is not None.
     # stream="" is not None, so it writes empty and run_rc 7. agy exits 7 before reading stream... stub exits after writing stderr.
     check("boom from agy" in skipped, f"nonzero exit keeps stderr ({skipped!r} {proc.stderr[-300:]})")
+
+
+JETSKI_ERR = (
+    'jetski: no output produced \u2014 a tool required the "command" permission that headless mode '
+    'cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in '
+    'settings.json (e.g. command(<target>)). Alternatively, re-run with '
+    '--dangerously-skip-permissions to auto-approve all tools.\n'
+)
+
+
+def test_headless_denial(tmp: Path, env_base):
+    """An exit-0 agy run that is not a real answer skips the leg with the agy text."""
+    def run_case(name, stream_kwargs, run_err=""):
+        d = tmp / name
+        packet = d / "packet"
+        bindir = d / "bin"
+        rec = d / "rec"
+        packet.mkdir(parents=True)
+        bindir.mkdir()
+        (packet / "PROMPT.md").write_text("review this diff\n", encoding="utf-8")
+        stream = d / "stream.jsonl"
+        stream_file(stream, "SUCCESS", **stream_kwargs)
+        write_stub(bindir / "agy")
+        env = dict(env_base)
+        env.update({
+            "CONCLAVE_AGY": str(bindir / "agy"),
+            "AGY_RECORD": str(rec),
+            "AGY_STREAM": str(stream),
+            "AGY_USAGE_OUT": USAGE_OK,
+            "AGY_RUN_RC": "0",
+            "AGY_RUN_ERR": run_err,
+        })
+        proc = bash(HEAD + f"""
+DIR={d}
+PACKET={packet}
+ERRORS_FILE={d}/errors.md
+: >"$ERRORS_FILE"
+KIND=review
+ARGON_EFFORT=high
+VOTERS=argon
+run_argon
+""", env)
+        skipped = (d / "voter-argon.skipped").read_text() if (d / "voter-argon.skipped").is_file() else ""
+        wrote = (d / "voter-argon.md").exists() or (d / "voter-argon.model.txt").exists()
+        return proc, skipped, wrote
+
+    proc, skipped, wrote = run_case("m2-empty", {"response": "", "denied": [
+        {"action": "command", "display_name": "RunCommand"}]}, run_err=JETSKI_ERR)
+    check(skipped.startswith("argon: skipped\n") and not wrote,
+          f"empty response with a denial skips the leg ({skipped!r} {proc.stderr[-300:]})")
+    check(JETSKI_ERR.strip() in skipped, f"skip keeps the agy stderr verbatim ({skipped!r})")
+
+    proc, skipped, wrote = run_case("empty-quiet", {"response": "  \n"})
+    check("argon: empty response (agy exit 0)" in skipped and not wrote,
+          f"empty response with no stderr skips the leg ({skipped!r})")
+
+    proc, skipped, wrote = run_case("stderr-only", {"response": "VERDICT: approve\n"}, run_err=JETSKI_ERR)
+    check("headless permission denial" in skipped and JETSKI_ERR.strip() in skipped and not wrote,
+          f"the denial stderr is a failure even with text ({skipped!r})")
+
+    proc, skipped, wrote = run_case("denied-only", {"response": "VERDICT: approve\n", "denied": [
+        {"action": "command", "display_name": "RunCommand"}]})
+    check("denied a tool" in skipped and "RunCommand" in skipped and not wrote,
+          f"denied_actions is a failure even with text ({skipped!r})")
+
+    proc, skipped, wrote = run_case("no-agent", {"response": "VERDICT: approve\n", "agent": None})
+    check("did not load the tool-less voter agent" in skipped and not wrote,
+          f"a run without the tool-less agent is not a vote ({skipped!r})")
+
+    proc, skipped, wrote = run_case("ok", {"response": "VERDICT: approve\nfine\n"})
+    check(skipped == "" and wrote, f"a clean answer is still a vote ({skipped!r} {proc.stderr[-300:]})")
+
+    review = (SCRIPTS / "review-kind.sh").read_text(encoding="utf-8")
+    conclave = CONCLAVE.read_text(encoding="utf-8")
+    check("--dangerously-skip-permissions" not in review
+          and conclave.count("--dangerously-skip-permissions") == 0,
+          "no launcher passes --dangerously-skip-permissions")
 
 
 def test_kind_skip_file(tmp: Path, env):
@@ -883,6 +974,7 @@ def main():
             test_happy(tmp, env)
             test_review_keeps_a_report_without_design_headings(tmp, env)
             test_skips(tmp, env)
+            test_headless_denial(tmp, env)
             test_kind_skip_file(tmp, env)
             test_blind(tmp, env)
             test_jev(tmp, env)
