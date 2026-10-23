@@ -115,13 +115,28 @@ def parse(raw: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def pick_replacement(raw: str, failed: str, builder: str, other: str) -> str:
+# Used when a route row omits vendor. Fable on either seat is still Anthropic.
+_FAMILY_VENDOR = {
+    "fable": "anthropic",
+    "astra": "openai",
+    "grok": "xai",
+    "muse": "meta",
+    "wonder": "meta",
+    "wonder-full": "meta",
+    "argon": "google",
+}
+
+
+def pick_replacement(raw: str, failed: str, builder: str, other: str, avoid_names: str = "") -> str:
     """One replacement voter, or none.
 
     `failed` is the conclave voter that just failed. `builder` and `other`
-    are vendor ids (`other` may be empty). The replacement's vendor is neither.
-    The failed voter is not returned. Output is `ok`, the voter name, and
-    `cursor-fable` when that is how Fable launches; or `none` and a reason.
+    are vendor ids (`other` may be empty). `avoid_names` is a comma-separated
+    list of voter names that already failed or are already seated. The
+    replacement's vendor is neither the builder nor the other working voter.
+    A named voter in `avoid_names`, including the one that just failed, is
+    not returned. Output is `ok`, the voter name, and `cursor-fable` when
+    that is how Fable launches; or `none` and a reason.
     """
     try:
         doc = json.loads(raw)
@@ -141,6 +156,9 @@ def pick_replacement(raw: str, failed: str, builder: str, other: str) -> str:
         extra = f" ({code_text})" if code_text else ""
         return f"none\nno eligible replacement: {why}{extra}\n"
     avoid_vendors = {v for v in (builder, other) if v}
+    avoid = {name.strip() for name in (avoid_names or "").split(",") if name.strip()}
+    if failed:
+        avoid.add(failed)
     for row in doc["lineup"].get("voters") or []:
         if not isinstance(row, dict):
             continue
@@ -149,10 +167,12 @@ def pick_replacement(raw: str, failed: str, builder: str, other: str) -> str:
             name = voter_name(leg)
         except ValueError:
             continue
-        if name == failed:
+        if name in avoid:
             continue
-        vendor = row.get("vendor") or ""
+        vendor = row.get("vendor") or _FAMILY_VENDOR.get(leg.family) or ""
         if vendor in avoid_vendors:
+            continue
+        if not vendor and avoid_vendors:
             continue
         lines = ["ok", name]
         try:
@@ -172,15 +192,22 @@ def pick_replacement(raw: str, failed: str, builder: str, other: str) -> str:
 def main(argv: list[str]) -> int:
     if argv and argv[0] == "--replacement":
         # --replacement <failed> <builder-vendor> <other-vendor> <json>
+        # or <failed> <builder> <other> <avoid-names> <json>. "-" is empty.
         if len(argv) < 5:
             sys.stdout.write("none\nreplacement needs the failed voter, both vendors, and json\n")
             return 0
-        failed, builder, other, raw = argv[1], argv[2], argv[3], argv[4]
+        failed, builder, other = argv[1], argv[2], argv[3]
+        if len(argv) >= 6:
+            avoid, raw = argv[4], argv[5]
+        else:
+            avoid, raw = "", argv[4]
         if builder == "-":
             builder = ""
         if other == "-":
             other = ""
-        sys.stdout.write(pick_replacement(raw, failed, builder, other))
+        if avoid == "-":
+            avoid = ""
+        sys.stdout.write(pick_replacement(raw, failed, builder, other, avoid))
         return 0
     raw = argv[0] if argv else sys.stdin.read()
     sys.stdout.write(parse(raw))

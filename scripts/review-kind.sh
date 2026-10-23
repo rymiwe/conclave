@@ -2658,7 +2658,8 @@ review_classify_failure() {
     return 0
   fi
   for f in "$DIR/voter-$v.fail" "$DIR/voter-$v.err" "$DIR/voter-$v.stdout.md" \
-           "$DIR/voter-$v.json" "$DIR/voter-$v.md" "$DIR/voter-$v-report.md"; do
+           "$DIR/voter-$v.json" "$DIR/voter-$v.md" "$DIR/voter-$v-report.md" \
+           "$DIR/voter-$v.skipped"; do
     [ -f "$f" ] || continue
     blob="$blob
 $(cat "$f" 2>/dev/null || true)"
@@ -2671,7 +2672,7 @@ $(cat "$f" 2>/dev/null || true)"
     printf 'max_turns\n'
     return 0
   fi
-  if printf '%s\n' "$blob" | grep -Eiq 'unauthorized|authentication failed|not logged in|signed out|auth failure|invalid api key|HTTPError 401'; then
+  if printf '%s\n' "$blob" | grep -Eiq 'unauthorized|authentication failed|not logged in|not signed in|signed out|auth failure|invalid api key|HTTPError 401'; then
     printf 'auth\n'
     return 0
   fi
@@ -2794,9 +2795,9 @@ review_launch_one() {
 }
 
 review_route_json() {
-  # Print the lineup JSON. $1 is an extra --exclude-seat value, or empty.
+  # Print the lineup JSON. Each argument is an --exclude-seat value.
   # Empty output means the command failed. Ask JSON is still output.
-  local bin exclude="$1" raw
+  local bin raw seat
   bin="$(conclave_env SEAT_USAGE "$HOME/.local/bin/seat-usage")"
   [ -n "$bin" ] && [ -x "$bin" ] || return 1
   local -a args=(--route lineup --json --kind review)
@@ -2814,12 +2815,44 @@ review_route_json() {
   if [ -n "${REPO:-}" ]; then
     args+=(--repo "$REPO")
   fi
-  if [ -n "$exclude" ]; then
-    args+=(--exclude-seat "$exclude")
-  fi
+  for seat in "$@"; do
+    [ -n "$seat" ] || continue
+    args+=(--exclude-seat "$seat")
+  done
   raw="$("$bin" "${args[@]}" 2>/dev/null)" || return 1
   [ -n "$raw" ] || return 1
   printf '%s\n' "$raw"
+}
+
+review_reseat_avoid_names() {
+  # Voters that must not be returned: everyone seated, plus everyone who
+  # already failed on this ballot (including a voter already swapped out).
+  local v out="" seen="|"
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    case "$seen" in
+      *"|$v|"*) continue ;;
+    esac
+    seen="${seen}${v}|"
+    out="${out:+$out,}$v"
+  done <<EOF
+$(review_voters)
+$(printf '%s\n' "${RESEAT_FAILED:-}" | tr ',' '\n')
+EOF
+  printf '%s\n' "$out"
+}
+
+review_reseat_exclude_seats() {
+  # One seat-usage seat per line, for --exclude-seat. Duplicates are kept;
+  # the router treats a repeat as the same seat.
+  local v
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    review_failure_seat "$v"
+  done <<EOF
+$(review_voters)
+$(printf '%s\n' "${RESEAT_FAILED:-}" | tr ',' '\n')
+EOF
 }
 
 review_working_vendor() {
@@ -2849,18 +2882,28 @@ review_reseat_one() {
     builder="$(review_author_vendor "$HEADER_AUTHOR" || true)"
   fi
   raw=""
-  if ! raw="$(review_route_json "$seat")"; then
+  local -a excludes=()
+  local ex
+  while IFS= read -r ex; do
+    [ -n "$ex" ] || continue
+    excludes+=("$ex")
+  done <<EOF
+$(review_reseat_exclude_seats)
+EOF
+  if ! raw="$(review_route_json "${excludes[@]}")"; then
     # Older seat-usage rejects --exclude-seat. The failure file is the signal
     # when the binary is new enough to have recorded it; otherwise the parse
-    # below still refuses to return the voter that just failed.
-    raw="$(review_route_json "")" || raw=""
+    # below still refuses to return a voter that already failed or is seated.
+    raw="$(review_route_json)" || raw=""
   fi
   if [ -z "$raw" ]; then
     review_note_reseat "re-seat: could not replace $failed ($reason): seat-usage returned nothing"
     return 1
   fi
+  local avoid
+  avoid="$(review_reseat_avoid_names)"
   picked="$(python3 "$ROOT/scripts/lineup.py" --replacement "$failed" \
-    "${builder:--}" "${other:--}" "$raw" 2>/dev/null)" || picked=""
+    "${builder:--}" "${other:--}" "${avoid:--}" "$raw" 2>/dev/null)" || picked=""
   if [ "${picked%%$'\n'*}" != ok ]; then
     local why
     why="${picked#*$'\n'}"
@@ -2902,6 +2945,7 @@ review_reseat_one() {
   local again
   again="$(review_classify_failure "$name")"
   review_record_seat_failure "$(review_failure_seat "$name")" "$again"
+  RESEAT_FAILED="${RESEAT_FAILED:+$RESEAT_FAILED,}$name"
   review_note_reseat "re-seat: $name also failed ($again); not replacing again"
   return 1
 }
@@ -2913,14 +2957,26 @@ review_reseat_failed() {
   [ "${VOTERS_EXPLICIT:-0}" -eq 0 ] || return 0
   local v reason
   local -a pending=()
+  RESEAT_FAILED=""
+  # Every seated voter, including an Argon that wrote voter-argon.skipped.
+  # review_report_voters omits that Argon because a skipped optional leg is
+  # not required for the count. On a review it was seated, so it is a failure.
   while IFS= read -r v; do
     [ -n "$v" ] || continue
     review_report_present "$v" && continue
     pending+=("$v")
+    RESEAT_FAILED="${RESEAT_FAILED:+$RESEAT_FAILED,}$v"
   done <<EOF
-$(review_report_voters)
+$(review_voters)
 EOF
   [ "${#pending[@]}" -gt 0 ] || return 0
+  # Record every failure before the first re-route, so a later route cannot
+  # offer a voter whose failure has not been written yet.
+  for v in "${pending[@]}"; do
+    reason="$(review_classify_failure "$v")"
+    [ -n "$reason" ] || reason="nonzero"
+    review_record_seat_failure "$(review_failure_seat "$v")" "$reason"
+  done
   for v in "${pending[@]}"; do
     review_report_present "$v" && continue
     reason="$(review_classify_failure "$v")"

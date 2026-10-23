@@ -231,4 +231,53 @@ review_reseat_failed
 [ "$VOTERS" = "claude,codex" ] || fail "explicit: voters=$VOTERS"
 printf 'ok explicit --voters is not re-seated\n'
 
+# Both original voters failed. The route lists the other failure first.
+# That voter must not be launched again, and the first failure must not come back.
+reset_case both
+rm -f "$DIR/voter-codex.md" "$DIR/voter-codex.model.txt"
+echo "claude: exit 7" >"$DIR/voter-claude.fail"
+echo "codex: exit 8" >"$DIR/voter-codex.fail"
+cat >"$SEAT_JSON" <<'EOF'
+{"mode":"default","why":"ranked","lineup":{"voters":[
+  {"family":"astra","seat":"chatgpt","vendor":"openai","model":"gpt-6-astra"},
+  {"family":"grok","seat":"grok","vendor":"xai","model":"grok"},
+  {"family":"argon","seat":"google","vendor":"google","model":"gemini-4-argon-high"}
+]}}
+EOF
+review_reseat_failed
+grep -q 'replaced with grok' "$DIR/reseat.md" || fail "both: $(cat "$DIR/reseat.md")"
+grep -q 'replaced with argon' "$DIR/reseat.md" || fail "both second: $(cat "$DIR/reseat.md")"
+grep -q 'replaced with codex\|replaced with claude' "$DIR/reseat.md" && fail "both: reseated a failure: $(cat "$DIR/reseat.md")"
+[ "$VOTERS" = "grok,argon" ] || fail "both: voters=$VOTERS"
+grep -q -- '--exclude-seat claude' "$SEAT_LOG" || fail "both: exclude claude: $(cat "$SEAT_LOG")"
+grep -q -- '--exclude-seat chatgpt' "$SEAT_LOG" || fail "both: exclude chatgpt: $(cat "$SEAT_LOG")"
+printf 'ok both failures are excluded before either is replaced\n'
+
+# A seated Argon that is not signed in is an auth failure, not a skipped optional leg.
+reset_case auth
+VOTERS="argon,codex"
+printf 'argon: skipped\nnot signed in\n' >"$DIR/voter-argon.skipped"
+cat >"$SEAT_JSON" <<'EOF'
+{"mode":"default","why":"ranked","lineup":{"voters":[
+  {"family":"grok","seat":"grok","vendor":"xai","model":"grok"},
+  {"family":"astra","seat":"chatgpt","vendor":"openai","model":"gpt-6-astra"}
+]}}
+EOF
+review_reseat_failed
+grep -q 're-seat: argon failed (auth); replaced with grok' "$DIR/reseat.md" \
+  || fail "auth: $(cat "$DIR/reseat.md")"
+grep -q -- '--record-failure google --reason auth' "$SEAT_LOG" || fail "auth record: $(cat "$SEAT_LOG")"
+[ "$VOTERS" = "codex,grok" ] || fail "auth: voters=$VOTERS"
+printf 'ok argon not-signed-in re-seats and records auth\n'
+
+# A route row with no vendor still cannot be the builder's family.
+vendor_json='{"mode":"default","lineup":{"voters":[{"family":"fable","seat":"claude"},{"family":"grok","seat":"grok","vendor":"xai"}]}}'
+picked="$(python3 "$ROOT/scripts/lineup.py" --replacement codex anthropic - - "$vendor_json")"
+[ "$(printf '%s\n' "$picked" | sed -n '1p')" = ok ] || fail "vendorless: $picked"
+[ "$(printf '%s\n' "$picked" | sed -n '2p')" = grok ] || fail "vendorless returned: $picked"
+only='{"mode":"default","lineup":{"voters":[{"family":"fable","seat":"claude"}]}}'
+none_picked="$(python3 "$ROOT/scripts/lineup.py" --replacement codex anthropic - - "$only")"
+[ "$(printf '%s\n' "$none_picked" | sed -n '1p')" = none ] || fail "vendorless only: $none_picked"
+printf 'ok a missing vendor does not bypass the builder\n'
+
 printf 'ok re-seat\n'
