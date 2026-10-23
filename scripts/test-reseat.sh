@@ -321,4 +321,40 @@ review_count_reports
 printf '%s\n' "$REVIEW_REPORTS_MISSING" | grep -q argon || fail "argonfail missing=$REVIEW_REPORTS_MISSING"
 printf 'ok a failed replacement argon stays in the required count\n'
 
+
+# The m2 case: agy exits 0, the response is empty, and stderr says a tool was
+# auto-denied in headless mode. The real run_argon turns that into a skip, and
+# on a review a seated Argon that skipped is a failed voter: it is recorded
+# and replaced once.
+reset_case m2
+VOTERS="argon,codex"
+mkdir -p "$work/m2-packet"
+printf 'review this diff\n' >"$work/m2-packet/PROMPT.md"
+cat >"$work/bin/agy-m2" <<'EOF'
+#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"event":"init","init":{"agent":"conclave-voter"}}'
+printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"","denied_actions":[{"action":"command","display_name":"RunCommand"}]}}'
+printf '%s\n' 'jetski: no output produced — a tool required the "command" permission that headless mode cannot prompt for, so it was auto-denied.' >&2
+exit 0
+EOF
+chmod +x "$work/bin/agy-m2"
+CONCLAVE_AGY="$work/bin/agy-m2" PACKET="$work/m2-packet" run_argon 2>/dev/null
+[ ! -e "$DIR/voter-argon.md" ] || fail "m2: empty agy answer became a report"
+grep -q 'headless mode cannot prompt for' "$DIR/voter-argon.skipped" \
+  || fail "m2: skip lost the agy stderr: $(cat "$DIR/voter-argon.skipped" 2>/dev/null)"
+cat >"$SEAT_JSON" <<'EOF'
+{"mode":"default","why":"ranked","lineup":{"voters":[
+  {"family":"grok","seat":"grok","vendor":"xai","model":"grok"}
+]}}
+EOF
+review_reseat_failed
+grep -q -- '--record-failure google --reason nonzero' "$SEAT_LOG" \
+  || fail "m2: failure not recorded: $(cat "$SEAT_LOG")"
+grep -q -- '--exclude-seat google' "$SEAT_LOG" || fail "m2: route kept argon: $(cat "$SEAT_LOG")"
+grep -q 're-seat: argon failed (nonzero); replaced with grok' "$DIR/reseat.md" \
+  || fail "m2: $(cat "$DIR/reseat.md")"
+[ "$VOTERS" = "grok,codex" ] || [ "$VOTERS" = "codex,grok" ] || fail "m2: voters=$VOTERS"
+printf 'ok an empty headless agy answer re-seats argon and records nonzero\n'
+
 printf 'ok re-seat\n'
