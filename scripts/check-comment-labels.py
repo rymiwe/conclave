@@ -1,20 +1,34 @@
 #!/usr/bin/env python3
-"""Flag a labeled reply, or an unlabeled new inline comment on someone else's PR.
+"""Flag a summary that opens with a label, a labeled reply, or an unlabeled
+new inline comment on someone else's PR.
 
   scripts/check-comment-labels.py <payload.json> [--pr-author LOGIN] [--reviewer LOGIN]
 
 The payload is the post-review JSON. A comment with in_reply_to is a reply.
-A comment without it is a new inline comment. The review body is not checked:
-labels are allowed there, and a missing label on the body is not this lint.
+A comment without it is a new inline comment. The review summary is payload
+"body". It must not open with a label. A reply must not carry one.
 
 **Requested:**, **Advisory:**, **Informational:**, and the legacy **Question:**
 all count as a label. A label inside a fenced script does not.
 
+A summary opens with a label when, after blank lines, the first non-empty
+line starts with one of those labels. Leading spaces and tabs on that line
+do not count. A label on a later line does not. A moved-outside-the-diff
+block that post-review appends begins with **Outside this diff**, which is
+not a comment label, so that block does not open the summary.
+
+Bullet items in the summary may keep a label while
+comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS is True. When that constant
+is False, a bullet whose text starts with a label is flagged. A bullet is
+a line that starts with `-`, `*`, `+`, or a number (`1.` or `1)`).
+
 Someone else's pull request means pr_author and reviewer are both set and
 they differ. When they are the same login, an unlabeled new inline comment
 is left alone (your own pull request; this lint does not require or forbid
-a label there). When either login is missing, an unlabeled new inline comment
-is flagged because the check cannot tell whose pull request it is.
+a label on an inline comment there). When either login is missing, an
+unlabeled new inline comment is flagged because the check cannot tell whose
+pull request it is. The summary-opening check and the labeled-reply check
+do not depend on whose pull request it is.
 """
 from __future__ import annotations
 
@@ -55,6 +69,22 @@ def problems(
     if not isinstance(comments, list):
         return ["comments must be a list"]
     found: list[str] = []
+    raw_body = payload.get("body", "")
+    if raw_body is None:
+        raw_body = ""
+    if not isinstance(raw_body, str):
+        found.append("summary body must be a string")
+    else:
+        if comment_draft.opens_with_label(raw_body):
+            found.append("summary body opens with a label")
+        if not comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS:
+            seen: set[int] = set()
+            for start, _end in comment_draft.bullet_label_spans(raw_body):
+                line_no = raw_body.count("\n", 0, start) + 1
+                if line_no in seen:
+                    continue
+                seen.add(line_no)
+                found.append(f"summary body line {line_no}: labeled bullet")
     for index, comment in enumerate(comments):
         if not isinstance(comment, dict):
             found.append(f"comment {index}: not an object")

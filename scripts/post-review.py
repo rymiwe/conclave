@@ -35,7 +35,9 @@ Steps, in order. Any failure stops before the POST.
    "expect", when given, must appear in that line's text. Outside the diff,
    the text is the file at commit_id.
 3. Every body must pass scripts/check-comment-links.py, and the payload must
-   pass scripts/check-comment-labels.py. A comment with in_reply_to is a reply
+   pass scripts/check-comment-labels.py. That check flags a summary that opens
+   with a label, a labeled reply, and an unlabeled new inline comment on
+   someone else's pull request. A comment with in_reply_to is a reply
    and is not sent as a new line comment. A repro/<finding-id>.<ext> file in
    that finding's ballot directory is attached to the new inline comment, or
    to the review body when the finding is in body_findings.
@@ -451,7 +453,12 @@ def main() -> int:
     )
     if needs_reviewer and not reviewer:
         reviewer = (gh_json(["api", "user"]) or {}).get("login")
-    for item in label_check.problems({"comments": comments}, pr_author=author, reviewer=reviewer):
+    # `body` here is the summary plus any moved-outside-the-diff block.
+    # That block is appended, and it starts with **Outside this diff**, so
+    # it cannot make the summary open with a comment label.
+    for item in label_check.problems(
+        {"body": body, "comments": comments}, pr_author=author, reviewer=reviewer
+    ):
         errors.append(item)
     checked = [("body", body)]
     checked += [(f"comment {c['path']}:{c['line']}", c["body"]) for c in inline]

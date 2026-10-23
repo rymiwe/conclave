@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Repro blocks and reply-label stripping."""
+"""Repro blocks, reply-label stripping, and summary-opening labels."""
 from __future__ import annotations
 
 import subprocess
@@ -135,6 +135,38 @@ def main() -> None:
         check(own == "no label here", "your own PR can draft an unlabeled inline comment")
         labeled = comment_draft.draft_comment("**Informational:** noted.", kind="inline", others_pr=True)
         check(labeled == "**Informational:** noted.", "a labeled new inline comment is kept")
+
+        summary = comment_draft.draft_comment(
+            "\n\n**Requested:** the count is wrong.\n\n- **Advisory:** look again\n",
+            kind="body",
+            others_pr=True,
+        )
+        check(summary == "\n\nthe count is wrong.\n\n- **Advisory:** look again\n",
+              f"drafter strips a leading summary label ({summary!r})")
+        question = comment_draft.draft_comment("**Question:** why is this here?\n", kind="body")
+        check(question == "why is this here?\n", "a leading Question on the summary is stripped")
+        stacked = comment_draft.draft_comment("**Requested:** **Advisory:** both\n", kind="body")
+        check(stacked == "both\n", f"stacked opening labels are stripped ({stacked!r})")
+        kept = comment_draft.draft_comment("**Requested:** see **Advisory:** rest\n", kind="body")
+        check(kept == "see **Advisory:** rest\n", f"a later label on the opening line stays ({kept!r})")
+        bullet_only = comment_draft.draft_comment("- **Requested:** fix the count\n", kind="body")
+        check(bullet_only == "- **Requested:** fix the count\n", "a summary that is only a labeled bullet keeps it")
+        plain_summary = comment_draft.draft_comment("Four notes.\n", kind="body")
+        check(plain_summary == "Four notes.\n", "a summary without a label stays")
+        saved = comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS
+        comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS = False
+        try:
+            stripped_bullets = comment_draft.draft_comment(
+                "**Informational:** overview\n\n- **Requested:** fix the count\n1. **Question:** why\n",
+                kind="body",
+            )
+            check(
+                stripped_bullets == "overview\n\n- fix the count\n1. why\n",
+                f"drafter strips bullet labels when the constant is false ({stripped_bullets!r})",
+            )
+        finally:
+            comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS = saved
+        check(comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS is True, "the bullet constant is restored")
 
         # A script that would fail the prose lint if the fence were ignored.
         risky = directory / "f8.py"

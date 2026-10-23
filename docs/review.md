@@ -594,7 +594,7 @@ Round A writes the receipt only after its brief passes the checks. A `brief.md` 
 
 - **Chair round A.** A fresh `cursor-agent` session reads the PR, the shared context, and `stack.md`, and writes `brief.md`. It does not run the script. The runner refuses a brief without `kind: review` or with a forbidden family word.
 - **Phase 1.** The runner runs `conclave.sh <id> --dry-run`, then the full run, with the Fable flags below. Phase 1 stops if the target repo is shallow.
-- **Chair round B.** The round A session, resumed, or a fresh session when round A ran in an earlier invocation. It writes `findings.json` from `blind/leg-*.md` only, runs `--findings`, fills `decide.md`, and drafts `comments.md`. On someone else's pull request, a new inline comment and a review-body item are labelled **Requested:**, **Advisory:**, or **Informational:**. **Question:** is not drafted. A reply to an existing comment has no label. A throwaway script that verified a finding is saved as `repro/<finding-id>.<ext>` in the ballot directory.
+- **Chair round B.** The round A session, resumed, or a fresh session when round A ran in an earlier invocation. It writes `findings.json` from `blind/leg-*.md` only, runs `--findings`, fills `decide.md`, and drafts `comments.md`. On someone else's pull request, a new inline comment is labelled **Requested:**, **Advisory:**, or **Informational:**. **Question:** is not drafted. The review summary does not open with a label. A bullet in the summary may. A reply to an existing comment has no label. A throwaway script that verified a finding is saved as `repro/<finding-id>.<ext>` in the ballot directory.
 
 Each cursor-agent chair the runner starts has `CONCLAVE_CHAIR=1` in its environment. That is the chair marker; `CONCLAVE_CHAIR_MODEL` is only the model id.
 
@@ -1294,17 +1294,42 @@ A finding that is held stays in the report and does not become a comment.
 
 Write as the user.
 
-On someone else's pull request, a new inline comment and a review-body item
-start with one label: **Requested:**, **Advisory:**, or **Informational:**.
-**Question:** is not drafted. It still counts as a label, so an older draft
-that uses it is labeled, and a reply that still carries it is stripped.
-A reply never gets a label, on anyone's pull request. On your own pull request
-the same rule means no labels at all. The lint does not enforce that: it does
-not flag a label on your own pull request, and it does not require one.
+On someone else's pull request, a new inline comment starts with one label:
+**Requested:**, **Advisory:**, or **Informational:**. **Question:** is not
+drafted. It still counts as a label, so an older draft that uses it is
+labeled, a reply that still carries it is stripped, and a summary that
+opens with it is stripped by the drafter and refused by the lint. A reply
+carries no label, on anyone's pull request. The review summary does not
+open with a label, on anyone's pull request.
 
-`scripts/comment_draft.py` strips a label from a reply and refuses to draft an
-unlabeled new inline comment when the pull request is someone else's. A repro
-file is attached there, except on a reply.
+A summary opens with a label when, after lines that are empty or only
+whitespace, the first remaining line starts with one of those bold labels.
+Spaces and tabs before the label on that line do not count. A label later
+on the line, or on a later line, does not open the summary. A label inside
+a fenced script does not count. `post-review.py` appends a comment that
+fell outside the diff after the summary. That block starts with the heading
+**Outside this diff**, which is not one of the four labels, and the block
+is appended, so the heading and the moved comment's own label do not make
+the summary open with a label. When the summary is empty, that heading is
+the first line, and it is still not a comment label.
+
+A bullet in the summary may keep a label while
+`SUMMARY_BULLETS_MAY_HAVE_LABELS` in `scripts/comment_draft.py` is True.
+That is the default, pending confirmation. The drafter and
+`scripts/check-comment-labels.py` both read that constant. Set it to False
+and the drafter strips a bullet's label and the lint flags the line. A
+bullet is a line that, after optional indentation, starts with `-`, `*`,
+`+`, or a number (`1.` or `1)`), then whitespace, then the label.
+
+On your own pull request, write no labels. The lint does not enforce that
+on an inline comment: it does not flag a label there, and it does not
+require one. It does flag a summary that opens with a label, and a labeled
+reply, on every pull request.
+
+`scripts/comment_draft.py` strips every label from a reply, strips a label
+that opens the summary, and refuses to draft an unlabeled new inline
+comment when the pull request is someone else's. A repro file is attached
+there, except on a reply.
 
 When the pull request author and the reviewer are not both known, an unlabeled
 new inline comment is refused rather than treated as your own.
@@ -1354,8 +1379,13 @@ Every ticket id, `#N`, bare SHA, and `file:line` sits inside a markdown link.
 `scripts/check-comment-links.py` fails the draft otherwise, and when a public comment uses an internal word. The error names the plain replacement. A pure decimal
 run of digits is not treated as a SHA, and neither is an all-letter hex
 word. A SHA in this check includes a hex letter and a decimal digit.
-`scripts/check-comment-labels.py` fails a post payload that has a labeled
-reply, or an unlabeled new inline comment on someone else's pull request.
+`scripts/check-comment-labels.py` fails a post payload whose summary opens
+with a label, whose reply carries a label, or whose new inline comment on
+someone else's pull request has no label. With
+`SUMMARY_BULLETS_MAY_HAVE_LABELS` set to False it also fails a labeled
+bullet in the summary. The check runs in `scripts/post-review.py` before
+any POST. A moved-outside-the-diff block appended to the summary is not
+an opening label.
 
 Show every draft in full in chat, as it would go out, in the message that
 asks whether to post. A file path is not a preview.

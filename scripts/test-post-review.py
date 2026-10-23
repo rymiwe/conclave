@@ -409,6 +409,24 @@ def test_repro_and_labels(root: Path) -> None:
     f.set_payload(payload)
     refused(f, 'a labeled reply is refused before POST', 'labeled reply')
 
+    f = Fixture(root / 'summary-label')
+    payload = f.payload()
+    payload['body'] = '\n\n**Requested:** four notes on the widget change.\n'
+    f.set_payload(payload)
+    refused(f, 'a summary that opens with a label is refused before POST', 'summary body opens with a label')
+
+    f = Fixture(root / 'summary-bullets')
+    payload = f.payload()
+    payload['body'] = (
+        'Four notes on the widget change. The earlier fix is '
+        '[#6](https://github.com/example/widgets/pull/6).\n\n'
+        '- **Advisory:** the helper drops a row.\n'
+    )
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0 and f.posts() == 0,
+          f'a summary bullet and a moved comment label are accepted ({proc.returncode} {proc.stderr.strip()})')
+
     f = Fixture(root / 'unlabeled-inline')
     payload = f.payload()
     payload['pr_author'] = 'author'

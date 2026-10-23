@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Label lint: a labeled reply fails; an unlabeled new inline comment on someone else's PR fails."""
+"""Label lint: a summary that opens with a label fails, a labeled reply fails,
+and an unlabeled new inline comment on someone else's PR fails."""
 from __future__ import annotations
 
 import json
@@ -81,6 +82,82 @@ def main() -> None:
 
     cli_ok = run_cli(labeled_inline)
     check(cli_ok.returncode == 0 and cli_ok.stdout.endswith("ok\n"), f"cli accepts a labeled comment ({cli_ok.stdout!r})")
+
+    opening = {**other, "body": "\n\n  **Requested:** four notes.\n", "comments": []}
+    found = labels.problems(opening)
+    check(any("summary body opens with a label" in item for item in found), f"summary opening flagged ({found})")
+    cli_open = run_cli(opening)
+    check(cli_open.returncode != 0 and "summary body opens with a label" in cli_open.stdout,
+          f"cli flags a summary that opens with a label ({cli_open.stdout!r})")
+    for token in ("**Advisory:**", "**Informational:**", "**Question:**"):
+        payload = {**other, "body": f"{token} notes\n", "comments": []}
+        found = labels.problems(payload)
+        check(any("summary body opens with a label" in item for item in found), f"{token} opens the summary")
+
+    clean = {**other, "body": "Four notes on the widget change.\n", "comments": [
+        {"finding": "f1", "path": "a.rb", "line": 1, "body": "**Requested:** size counts deleted items."}
+    ]}
+    check(labels.problems(clean) == [], "summary opening without a label is ok")
+    mid = {**other, "body": "Four notes.\n\nSee **Requested:** later in the line.\n", "comments": []}
+    check(labels.problems(mid) == [], "a label that does not start the first line is not an opening")
+
+    bullets = {**other, "body": "Notes.\n\n- **Requested:** fix the count\n- **Question:** why\n", "comments": []}
+    check(labels.problems(bullets) == [], "labeled summary bullets are ok")
+    only_bullet = {**other, "body": "- **Advisory:** fix the count\n", "comments": []}
+    check(labels.problems(only_bullet) == [], "a summary that is only a labeled bullet does not open with a label")
+
+    moved = {
+        **other,
+        "comments": [],
+        "body": (
+            "Four notes on the widget change.\n\n"
+            "**Outside this diff**\n\n"
+            "[`app/widget.rb:40`](https://github.com/example/widgets/blob/abc/app/widget.rb#L40)\n\n"
+            "**Question:** should the label follow the locale?\n\n"
+            "[`lib/other.rb:1`](https://github.com/example/widgets/blob/abc/lib/other.rb#L1)\n\n"
+            "**Advisory:** `call` has no nil guard.\n"
+        ),
+    }
+    check(labels.problems(moved) == [], "a moved-outside-the-diff block is not an opening label")
+    empty_moved = {
+        **other,
+        "comments": [],
+        "body": (
+            "**Outside this diff**\n\n"
+            "[`app/widget.rb:40`](https://github.com/example/widgets/blob/abc/app/widget.rb#L40)\n\n"
+            "**Requested:** should the label follow the locale?\n"
+        ),
+    }
+    check(labels.problems(empty_moved) == [], "an empty summary plus a moved block does not open with a label")
+
+    own_open = {"pr_author": "me", "reviewer": "me", "body": "**Informational:** notes\n", "comments": []}
+    found = labels.problems(own_open)
+    check(any("summary body opens with a label" in item for item in found),
+          f"your own PR still flags a summary that opens with a label ({found})")
+
+    fenced_bullet = {**other, "body": "Notes.\n\n```\n- **Requested:** inside\n```\n", "comments": []}
+    saved = labels.comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS
+    labels.comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS = False
+    try:
+        found = labels.problems(bullets)
+        check(len(found) == 2 and all("labeled bullet" in item for item in found),
+              f"labeled summary bullets are flagged when the constant is false ({found})")
+        check(any("line 3" in item for item in found) and any("line 4" in item for item in found),
+              f"bullet flags name the line ({found})")
+        check(labels.problems(only_bullet) != [] and any("labeled bullet" in item for item in labels.problems(only_bullet)),
+              "a lone labeled bullet is flagged when the constant is false")
+        check(labels.problems(moved) == [], "a moved block is not a labeled bullet when the constant is false")
+        check(labels.problems(empty_moved) == [],
+              "a moved block on an empty summary is not a labeled bullet when the constant is false")
+        check(labels.problems(fenced_bullet) == [], "a labeled bullet inside a fence is not flagged")
+        found = labels.problems(opening)
+        check(any("summary body opens with a label" in item for item in found),
+              "a summary opening is still flagged when the constant is false")
+        check(labels.problems(clean) == [], "a summary without a label stays ok when the constant is false")
+    finally:
+        labels.comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS = saved
+    check(labels.comment_draft.SUMMARY_BULLETS_MAY_HAVE_LABELS is True, "the bullet constant is restored")
+    check(labels.problems(bullets) == [], "labeled bullets are ok again after the constant is restored")
     print("ok comment labels")
 
 

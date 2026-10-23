@@ -6,11 +6,13 @@ repro/<finding-id>.<ext> (repro/f1.rb). The comment for that finding gets one
 collapsed details block. A finding with no file there gets no block.
 
 Labels (**Requested:**, **Advisory:**, **Informational:**, and the legacy
-**Question:**) belong on a new inline comment, and on a review-body item, only
-when the pull request is someone else's. A reply never keeps one. This module
-strips labels on a reply and requires one on a new inline comment in someone
-else's pull request. It does not enforce the absence of labels on your own
-pull request.
+**Question:**) belong on a new inline comment, and only when the pull request
+is someone else's. A reply never keeps one. The review summary never opens
+with one. A bullet inside the summary may keep one while
+SUMMARY_BULLETS_MAY_HAVE_LABELS is True. This module strips labels on a reply,
+strips a label that opens the summary, and requires one on a new inline
+comment in someone else's pull request. It does not enforce the absence of
+labels on an inline comment on your own pull request.
 
 GitHub rejects a review comment body longer than 65536 characters. A script
 that does not fit is truncated inside the fence, with a note after the fence.
@@ -48,6 +50,17 @@ _LANG = {
 # Question is no longer drafted. It still counts, so an old draft is labeled
 # and a reply that still carries it is stripped.
 LABEL_RE = re.compile(r"\*\*(?:Requested|Advisory|Informational|Question):\*\*[ \t]*")
+
+# A summary bullet is a line that, after optional indentation, has a list
+# marker (`-`, `*`, `+`, or `1.` / `1)`), then whitespace, then text.
+BULLET_PREFIX = re.compile(r"[ \t]*(?:[-*+]|\d+[.)])[ \t]+")
+
+# Bullet items in the review summary may keep a label. The summary itself
+# must not open with one, and a reply never has one. The drafter in this
+# file and the lint in scripts/check-comment-labels.py both read this
+# constant. Set it to False to strip those bullet labels here and to flag
+# them in the lint. Pending confirmation from Ryan (2026-10-23).
+SUMMARY_BULLETS_MAY_HAVE_LABELS = True
 FINDING_ID = re.compile(r"f\d+")
 EXT = re.compile(r"\.[A-Za-z0-9]+")
 
@@ -363,9 +376,70 @@ def has_label(text: str) -> bool:
     return bool(label_spans(text))
 
 
-def strip_labels(text: str) -> str:
-    """Remove prose labels. A label inside a fenced script stays."""
-    spans = label_spans(text)
+def _line_rows(text: str) -> list[tuple[int, int, str]]:
+    """Each line as (start offset, end offset of the content, content).
+
+    The end offset excludes the line break. A blank line has equal offsets.
+    """
+    rows: list[tuple[int, int, str]] = []
+    offset = 0
+    for raw in text.splitlines(keepends=True):
+        content = raw.rstrip("\r\n")
+        rows.append((offset, offset + len(content), content))
+        offset += len(raw)
+    return rows
+
+
+def opening_label_span(text: str) -> tuple[int, int] | None:
+    """Span of the label that opens text, or None.
+
+    After lines that are empty or only whitespace, the first remaining line
+    starts with a bold label (**Requested:**, **Advisory:**, **Informational:**,
+    or legacy **Question:**) at its first non-whitespace character. Leading
+    spaces and tabs on that line do not count. A label later on that line, on
+    a later line, on a bullet, or inside a fenced script does not open the text.
+
+    A block that post-review appends for a comment outside the diff starts
+    with **Outside this diff**, which is not one of those four labels, and it
+    is appended after the summary. It does not change this span. When the
+    summary is empty, that heading is the first line, and it is not a label.
+    """
+    for start, _end, content in _line_rows(text):
+        if not content.strip():
+            continue
+        column = len(content) - len(content.lstrip(" \t"))
+        at = start + column
+        match = LABEL_RE.match(text, at)
+        if match is None or not _outside_fences(text, match.start(), match.end()):
+            return None
+        return match.span()
+    return None
+
+
+def opens_with_label(text: str) -> bool:
+    return opening_label_span(text) is not None
+
+
+def bullet_label_spans(text: str) -> list[tuple[int, int]]:
+    """Labels that start a summary bullet, outside a fenced script.
+
+    The bullet line's text, after the list marker, starts with the label.
+    A label later in the bullet does not count.
+    """
+    spans: list[tuple[int, int]] = []
+    for start, _end, content in _line_rows(text):
+        marker = BULLET_PREFIX.match(content)
+        if marker is None:
+            continue
+        at = start + marker.end()
+        match = LABEL_RE.match(text, at)
+        if match is None or not _outside_fences(text, match.start(), match.end()):
+            continue
+        spans.append(match.span())
+    return spans
+
+
+def _delete_spans(text: str, spans: list[tuple[int, int]]) -> str:
     if not spans:
         return text
     parts: list[str] = []
@@ -375,6 +449,37 @@ def strip_labels(text: str) -> str:
         last = end
     parts.append(text[last:])
     return "".join(parts)
+
+
+def strip_labels(text: str) -> str:
+    """Remove prose labels. A label inside a fenced script stays."""
+    return _delete_spans(text, label_spans(text))
+
+
+def strip_opening_label(text: str) -> str:
+    """Remove a label that opens the text, repeating while one still does."""
+    for _ in range(20):
+        span = opening_label_span(text)
+        if span is None:
+            return text
+        start, end = span
+        if end <= start:
+            return text
+        text = _delete_spans(text, [span])
+    return text
+
+
+def strip_bullet_labels(text: str) -> str:
+    """Remove a label that starts a summary bullet, and one exposed behind it."""
+    for _ in range(20):
+        spans = bullet_label_spans(text)
+        if not spans:
+            return text
+        nxt = _delete_spans(text, spans)
+        if nxt == text:
+            return text
+        text = nxt
+    return text
 
 
 def draft_comment(
@@ -387,14 +492,20 @@ def draft_comment(
 ) -> str:
     """kind is inline, reply, or body.
 
-    A reply loses its labels. A new inline comment on someone else's pull
-    request must already have one. A repro file is attached to an inline
-    comment or a review-body item, and not to a reply.
+    A reply loses its labels. The summary loses a label that opens it, and
+    loses a bullet's label when SUMMARY_BULLETS_MAY_HAVE_LABELS is False.
+    A new inline comment on someone else's pull request must already have
+    one. A repro file is attached to an inline comment or a review-body
+    item, and not to a reply.
     """
     if kind not in ("inline", "reply", "body"):
         raise ValueError(f"bad comment kind {kind!r}")
     if kind == "reply":
         body = strip_labels(body)
+    elif kind == "body":
+        body = strip_opening_label(body)
+        if not SUMMARY_BULLETS_MAY_HAVE_LABELS:
+            body = strip_bullet_labels(body)
     elif kind == "inline" and others_pr and not has_label(body):
         raise ValueError(
             "new inline comment on someone else's PR needs "
