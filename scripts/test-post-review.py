@@ -500,6 +500,40 @@ def test_repro_and_labels(root: Path) -> None:
     check((f.council / 'demo-1/posted.json').is_file() and not pending.exists(),
           'the retry records the review and clears the pending receipt')
 
+    f = Fixture(root / 'later-huge')
+    draft = load('comment_draft')
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    script = repro / 'f3.rb'
+    script.write_text('z' * 70000, encoding='utf-8')
+    payload = f.payload()
+    for c in payload['comments']:
+        if c.get('finding') == 'f3':
+            c['body'] = draft.attach_repro(c['body'], script, key='demo-1/f3.rb')
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a later preattached script still dry-runs ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    check(len(req['body']) <= 65536, f'a later preattached script stays within the review body ({len(req["body"])})')
+    check('should the label follow the locale' in req['body'] and '<summary>f3.rb</summary>' in req['body'],
+          'the earlier prose stays and the later script is still attached')
+
+    f = Fixture(root / 'two-body-scripts')
+    payload = f.payload()
+    payload['body_findings'] = ['f4', 'demo-2:f4']
+    f.set_payload(payload)
+    (f.council / 'demo-1' / 'repro').mkdir()
+    (f.council / 'demo-2' / 'repro').mkdir()
+    (f.council / 'demo-1' / 'repro' / 'f4.rb').write_text('a' * 70000, encoding='utf-8')
+    (f.council / 'demo-2' / 'repro' / 'f4.rb').write_text("puts :second\n", encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'two body scripts still dry-run ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    check(len(req['body']) <= 65536, f'two body scripts stay within the review body ({len(req["body"])})')
+    check('<!-- repro:demo-1/f4.rb -->' in req['body'] and '<!-- repro:demo-2/f4.rb -->' in req['body'],
+          'the second body script is not dropped')
+    check('puts :second' in req['body'], 'the short second script is whole')
+
     f = Fixture(root / 'two-replies')
     payload = f.payload()
     payload['comments'].append({'in_reply_to': 81, 'body': 'First reply.'})

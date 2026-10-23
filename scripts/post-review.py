@@ -372,18 +372,29 @@ def main() -> int:
         findings[key] = {"ballot": ballot, "id": fid, "posted_as": "review body"}
         body_findings.append((ballot, fid))
 
-    # A line outside the diff joins the review body. Its script is sized to
-    # the room left after every later moved comment's prose and permalink,
-    # so one large script cannot push the next comment over the limit.
+    # A line outside the diff joins the review body. Reserve each later
+    # comment's prose, permalink, and the smallest truncated script, not the
+    # script it already carries. A large attachment can then shrink instead
+    # of pushing the review over the limit.
     if moved:
         def moved_link(c: dict) -> str:
             url = f"https://github.com/{repo}/blob/{commit}/{quote(c['path'])}#L{c['line']}"
             return f"[`{c['path']}:{c['line']}`]({url})"
 
+        def script_floor(c: dict) -> int:
+            try:
+                path = comment_draft.find_repro(council / c["_ballot"], c["_fid"])
+            except comment_draft.ReproError as exc:
+                die(str(exc))
+            if path is None:
+                return 0
+            return 2 + comment_draft.repro_floor(path.name, key=f"{c['_ballot']}/{path.name}")
+
         prose_cost: list[int] = []
         for index, c in enumerate(moved):
             header = "**Outside this diff**\n\n" if index == 0 else ""
-            prose_cost.append(len(header) + len(moved_link(c)) + 2 + len(str(c["body"]).strip()))
+            prose = comment_draft.prose_without_repro(str(c["body"])).strip()
+            prose_cost.append(len(header) + len(moved_link(c)) + 2 + len(prose) + script_floor(c))
         assembled = body.rstrip()
         for index, c in enumerate(moved):
             header = "**Outside this diff**\n\n" if index == 0 else ""
@@ -403,8 +414,22 @@ def main() -> int:
             c["body"] = piece
             assembled = prefix + piece
         body = assembled
+    repro_findings: list[tuple[str, str, Path]] = []
     for ballot, fid in body_findings:
-        body = attach_finding_repro(body, ballot, fid)
+        try:
+            path = comment_draft.find_repro(council / ballot, fid)
+        except comment_draft.ReproError as exc:
+            die(str(exc))
+        if path is not None:
+            repro_findings.append((ballot, fid, path))
+    for index, (ballot, fid, path) in enumerate(repro_findings):
+        later = 0
+        for ballot2, _fid2, path2 in repro_findings[index + 1:]:
+            later += 2 + comment_draft.repro_floor(path2.name, key=f"{ballot2}/{path2.name}")
+        room = comment_draft.GITHUB_COMMENT_LIMIT - later
+        body = attach_finding_repro(body, ballot, fid, limit=max(room, 0))
+        if f"<!-- repro:{ballot}/{path.name} -->" not in body:
+            die(f"review body has no room for repro {ballot}/{path.name}")
     if len(body) > comment_draft.GITHUB_COMMENT_LIMIT:
         die(f"review body is {len(body)} characters; GitHub's limit is {comment_draft.GITHUB_COMMENT_LIMIT}")
     links = load_links()

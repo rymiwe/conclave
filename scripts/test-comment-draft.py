@@ -64,6 +64,22 @@ def main() -> None:
         check("Truncated to" in shrunk and shrunk.rstrip().endswith("</details>"),
               "a shrunk block still notes the cut and closes")
 
+        posted = comment_draft.attach_repro(drafted, path, key="demo-1/f1.rb")
+        check(posted.count("<summary>f1.rb</summary>") == 1, "posting adopts the draft marker")
+        check("<!-- repro:demo-1/f1.rb -->" in posted and "<!-- repro:f1.rb -->" not in posted,
+              "the draft marker becomes the ballot marker")
+        check(script in posted, "the adopted block still holds the script")
+
+        tricky = directory / "f5.py"
+        tricky.write_text('print("</details>")\n' + ("x" * 5000) + "\n", encoding="utf-8")
+        wide = comment_draft.attach_repro("**Requested:** note.\n", tricky, key="demo-1/f5.py")
+        tight = comment_draft.attach_repro(wide, tricky, key="demo-1/f5.py", limit=900)
+        prose = comment_draft.prose_without_repro(tight).strip()
+        check(prose == "**Requested:** note.",
+              f"resizing ignores </details> inside the script ({prose!r})")
+        check(tight.rstrip().endswith("</details>") and "<!-- repro:demo-1/f5.py -->" in tight,
+              "the resized block still closes")
+
         again = comment_draft.attach_repro(drafted, path)
         check(again.count("<summary>f1.rb</summary>") == 1, "a second attach does not duplicate the block")
         other = directory / "other"

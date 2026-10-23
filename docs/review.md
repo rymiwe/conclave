@@ -1339,7 +1339,12 @@ in the comment is cut inside the fence, and a note after the fence says how
 many bytes were kept and names `repro/<filename>`. The comment prose is not
 cut. A comment moved into the review body is sized to the room left in that
 body, including its permalink. A block that was already attached is resized
-to that room; it is not left at the line-comment size. A fenced script is not prose: `scripts/check-comment-links.py` skips
+to that room; it is not left at the line-comment size. The resize closes the
+block at the `</details>` outside the fence, so a script that contains that
+tag is not cut in half. A draft marks the block with the filename. Posting
+uses the ballot and the filename, and adopts the draft marker instead of
+attaching the script twice. Each later script keeps room for a truncated
+block, so one large script does not drop the next one. A fenced script is not prose: `scripts/check-comment-links.py` skips
 citations and internal words inside the fence, and a label inside the fence
 does not count.
 

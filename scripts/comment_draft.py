@@ -176,11 +176,26 @@ def _cut_span(body: str, start: int, end: int) -> str:
     return head or tail
 
 
+def _details_end(body: str, start: int) -> int:
+    """Index of the </details> that closes the block, not one inside a fence."""
+    token = "</details>"
+    fences = links().fence_spans(body)
+    covered = links().covered
+    idx = start
+    while True:
+        end = body.find(token, idx)
+        if end < 0:
+            return -1
+        if not covered((end, end + len(token)), fences):
+            return end
+        idx = end + len(token)
+
+
 def _drop_marked_block(body: str, marker: str) -> str:
     start = body.find(marker)
     if start < 0:
         return body
-    end = body.find("</details>", start)
+    end = _details_end(body, start)
     if end < 0:
         return body
     return _cut_span(body, start, end + len("</details>"))
@@ -194,10 +209,51 @@ def _drop_summary_block(body: str, filename: str) -> str:
     start = body.rfind("<details>", 0, at)
     if start < 0:
         return body
-    end = body.find("</details>", at)
+    end = _details_end(body, at)
     if end < 0:
         return body
     return _cut_span(body, start, end + len("</details>"))
+
+
+def prose_without_repro(body: str) -> str:
+    """Comment text with repro details blocks removed.
+
+    A later resize can cut the script. It cannot cut this prose. A
+    `</details>` inside the fenced script is not the end of the block.
+    """
+    for _ in range(20):
+        marker_at = body.find("<!-- repro:")
+        details_at = body.find("<details>")
+        if marker_at >= 0 and (details_at < 0 or marker_at <= details_at):
+            start = marker_at
+        elif details_at >= 0:
+            window = body[details_at:details_at + 200]
+            summary = re.search(r"<summary>([^<]+)</summary>", window)
+            name = summary.group(1) if summary else ""
+            if summary and "." in name and re.fullmatch(r"[\w.-]+", name):
+                start = details_at
+            else:
+                break
+        else:
+            break
+        end = _details_end(body, start)
+        if end < 0:
+            break
+        nxt = _cut_span(body, start, end + len("</details>"))
+        if nxt == body:
+            break
+        body = nxt
+    return body
+
+
+def repro_floor(filename: str, *, key: str | None = None) -> int:
+    """Characters a truncated block needs, including its marker and note."""
+    marker = f"<!-- repro:{key or filename} -->"
+    note = _note(filename, "0", "999999")
+    fence = fence_for("", language_for(filename))
+    return len(
+        f"{marker}\n<details><summary>{filename}</summary>\n\n{fence}\n{note}\n</details>\n"
+    )
 
 
 def attach_repro(
@@ -219,6 +275,11 @@ def attach_repro(
     """
     filename = script_path.name
     marker = f"<!-- repro:{key or filename} -->"
+    # A draft uses the filename as its marker. Posting uses ballot/filename.
+    # Adopt the draft marker instead of appending a second copy of the script.
+    legacy = f"<!-- repro:{filename} -->"
+    if legacy in body and legacy != marker:
+        body = body.replace(legacy, marker, 1)
     if marker in body and len(body) <= limit:
         return body
     if marker in body:
