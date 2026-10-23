@@ -29,7 +29,7 @@ copies and `PROMPT.md` under `preview/` only.
 | 1 | `scripts/conclave.sh <id>` | One worktree per voter, read-only baseline. The default ballot is the lineup. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, excluding a named author or a caller-passed builder or --builder-vendor and nobody when none of those is set, and falls back to Fable and Astra when that route is missing, fails, or asks.<!-- ballot-rule:end --> Fable is on the reviewer brief. The other seated legs run native, in parallel. Opus native is a coverage leg on review kind; its agreement with Fable is one vote. Then model check, baseline compare, `scripts/blind.sh`, stop. |
 | 2 | Chair | Read only `blind/leg-*.md`. Write `findings.json`. Do not read `blind/key.txt` yet. |
 | 3 | `scripts/conclave.sh <id> --findings` | One Jev `choice` per finding, or no call when there are no findings. Writes `judgment.md` (fixed header, then the convergence table) and `decide.md` beside it. `convergence.md` is the same table without the header. |
-| 4 | Chair | Fill `decide.md`: replace every `TODO(chair)`. The what-breaks line says what breaks and for whom, with no code identifiers. Then draft comments. `scripts/check-comment-links.py` checks citations. The script writes no comment prose and posts nothing. |
+| 4 | Chair | Fill `decide.md`: replace every `TODO(chair)`. The what-breaks line says what breaks and for whom, with no code identifiers. Then draft comments. Save a throwaway repro script as `repro/<finding-id>.<ext>` in the ballot directory. `scripts/check-comment-links.py` checks citations. `scripts/check-comment-labels.py` checks labels on a post payload. The script writes no comment prose and posts nothing. |
 
 Phase 0 prints pace from `~/.local/bin/seat-usage` when that file is executable
 (`CONCLAVE_SEAT_USAGE` overrides the path). Otherwise the pace cell is
@@ -594,7 +594,7 @@ Round A writes the receipt only after its brief passes the checks. A `brief.md` 
 
 - **Chair round A.** A fresh `cursor-agent` session reads the PR, the shared context, and `stack.md`, and writes `brief.md`. It does not run the script. The runner refuses a brief without `kind: review` or with a forbidden family word.
 - **Phase 1.** The runner runs `conclave.sh <id> --dry-run`, then the full run, with the Fable flags below. Phase 1 stops if the target repo is shallow.
-- **Chair round B.** The round A session, resumed, or a fresh session when round A ran in an earlier invocation. It writes `findings.json` from `blind/leg-*.md` only, runs `--findings`, fills `decide.md`, and drafts `comments.md`. Comment labels are **Question:**, **Requested:**, and **Advisory:**.
+- **Chair round B.** The round A session, resumed, or a fresh session when round A ran in an earlier invocation. It writes `findings.json` from `blind/leg-*.md` only, runs `--findings`, fills `decide.md`, and drafts `comments.md`. On someone else's pull request, a new inline comment starts with **Requested:**, **Advisory:**, or **Informational:**. **Question:** is not drafted. The review summary does not open with a label. A bullet in the summary may. A reply to an existing comment has no label. A throwaway script that verified a finding is saved as `repro/<finding-id>.<ext>` in the ballot directory.
 
 Each cursor-agent chair the runner starts has `CONCLAVE_CHAIR=1` in its environment. That is the chair marker; `CONCLAVE_CHAIR_MODEL` is only the model id.
 
@@ -937,10 +937,12 @@ The chair writes `tmp/council/<id>/findings.json`:
 ```
 
 An executed finding's `evidence` starts with the exact command or script the
-chair ran, then that run's output. A script written for the repro goes in
-whole, or by its path under the ballot directory. The output alone is not
-enough: on one stack the commands lived only in chair transcripts, and a
-posted comment could not be traced back to its run (2026-10-05).
+chair ran, then that run's output. A script written for the repro is saved as
+`repro/<finding-id>.<ext>` in the ballot directory (`repro/f1.rb`, `repro/f2.py`,
+`repro/f3.sh`). The drafter attaches that file to the finding's comment. The
+output alone is not enough: on one stack the commands lived only in chair
+transcripts, and a posted comment could not be traced back to its run
+(2026-10-05).
 
 Before Jev, run every read-only finding that a repro script already in the
 ballot directory can execute with changed inputs. Mark it executed when it
@@ -1288,12 +1290,102 @@ A finding that is held stays in the report and does not become a comment.
    then the body. Most findings belong here.
 2. **One review-level comment** for what cannot attach to a line. A few
    sentences. If nothing qualifies, skip it.
+3. **Replies** to an existing review comment. These are not new line comments.
 
 Write as the user.
+
+On someone else's pull request, a new inline comment starts with one label:
+**Requested:**, **Advisory:**, or **Informational:**. **Question:** is not
+drafted. It still counts as a label, so an older draft that uses it is
+labeled, a reply that still carries it is stripped, and a summary that
+opens with it is stripped by the drafter and refused by the lint. A reply
+carries no label, on anyone's pull request. The review summary does not
+open with a label, on anyone's pull request.
+
+A summary opens with a label when, after lines that are empty or only
+whitespace, the first remaining line starts with one of those bold labels.
+Spaces and tabs before the label on that line do not count. A label later
+on the line, or on a later line, does not open the summary. A label inside
+a fenced script does not count. `post-review.py` appends a comment that
+fell outside the diff after the summary. That block starts with the heading
+**Outside this diff**, which is not one of the four labels, and the block
+is appended, so the heading and the moved comment's own label do not make
+the summary open with a label. When the summary is empty, that heading is
+the first line, and it is still not a comment label.
+
+A bullet in the summary may keep a label while
+`SUMMARY_BULLETS_MAY_HAVE_LABELS` in `scripts/comment_draft.py` is True.
+That is the default, pending confirmation. The drafter and
+`scripts/check-comment-labels.py` both read that constant. Set it to False
+and the drafter strips a bullet's label and the lint flags the line. A
+bullet is a line that, after optional indentation, starts with `-`, `*`,
+`+`, or a number (`1.` or `1)`), then whitespace, then the label.
+
+On your own pull request, write no labels. The lint does not enforce that
+on an inline comment: it does not flag a label there, and it does not
+require one. It does flag a summary that opens with a label, and a labeled
+reply, on every pull request.
+
+`scripts/comment_draft.py` strips every label from a reply, strips a label
+that opens the summary, and refuses to draft a new inline comment on
+someone else's pull request that does not start with a label. A repro file
+is attached there, except on a reply.
+
+When the pull request author and the reviewer are not both known, an unlabeled
+new inline comment is refused rather than treated as your own.
+
+### Repro script
+
+When a finding was verified by running a throwaway script, save that script in
+the ballot directory as `repro/<finding-id>.<ext>`. One file per finding. The
+extension is the script's own (`.rb`, `.py`, `.sh`). The drafted comment for
+that finding gets one collapsed block:
+
+````html
+<details><summary>f1.rb</summary>
+
+```ruby
+# the full script
+```
+
+</details>
+````
+
+The summary is the filename. Two findings that share a filename, from two
+ballots on one review, each get a block. An HTML comment above the details
+tag names the ballot and the filename so the second is not dropped. The fence language is the usual name for that
+extension (`rb` → `ruby`, `py` → `python`, `sh` → `bash`); an extension with
+no usual name is the extension itself. The fence is longer than any backtick
+run in the script, so the script cannot close it. A finding with no file gets
+no block. A reply does not get the block.
+
+GitHub's review-comment limit is 65536 characters. A script that does not fit
+in the comment is cut inside the fence, and a note after the fence says how
+many bytes were kept and names `repro/<filename>`. The comment prose is not
+cut. A comment moved into the review body is sized to the room left in that
+body, including its permalink. A block that was already attached is resized
+to that room; it is not left at the line-comment size. The resize closes the
+block at the `</details>` outside the fence, so a script that contains that
+tag is not cut in half. A draft marks the block with the filename. Posting
+uses the ballot and the filename, and adopts the draft marker instead of
+attaching the script twice. Each later script keeps room for a truncated
+block, including a script that belongs to a body finding, so one large
+script does not drop the next one. A rerun checks every reply the receipt
+already lists before it sends another, and a dry run does that check too. A fenced script is not prose: `scripts/check-comment-links.py` skips
+citations and internal words inside the fence, and a label inside the fence
+does not count.
+
 Every ticket id, `#N`, bare SHA, and `file:line` sits inside a markdown link.
 `scripts/check-comment-links.py` fails the draft otherwise, and when a public comment uses an internal word. The error names the plain replacement. A pure decimal
 run of digits is not treated as a SHA, and neither is an all-letter hex
 word. A SHA in this check includes a hex letter and a decimal digit.
+`scripts/check-comment-labels.py` fails a post payload whose summary opens
+with a label, whose reply carries a label, or whose new inline comment on
+someone else's pull request does not start with a label. With
+`SUMMARY_BULLETS_MAY_HAVE_LABELS` set to False it also fails a labeled
+bullet in the summary. The check runs in `scripts/post-review.py` before
+any POST. A moved-outside-the-diff block appended to the summary is not
+an opening label.
 
 Show every draft in full in chat, as it would go out, in the message that
 asks whether to post. A file path is not a preview.
@@ -1381,20 +1473,36 @@ script calls the posting helper. When the human says post:
    `body`, and optionally `severity` and `expect`, text that must be on that
    line), and `body_findings` for findings carried in the summary. A finding
    id is `f2` for the payload's `ballot` (default `<id>`) or `<ballot>:f2`.
-   The format is in the header of `scripts/post-review.py`.
+   A reply is a comment with `in_reply_to` set to the existing comment's id.
+   It has a body and no line. `pr_author` and `reviewer` are GitHub logins.
+   When they are omitted, `post-review.py` reads the author from the pull
+   request and the reviewer from `gh api user`, and it reads the reviewer
+   only when a new inline comment does not start with a label. The format
+   is in the header of `scripts/post-review.py`.
 2. Run `scripts/post-review.py <id> <pr> --dry-run`. It checks the PR head
    against `commit_id`, checks each line against the `pulls/<pr>/files`
    hunks, moves a line outside the diff into the review body with a
    permalink (as on one stacked pull request), checks `expect` on that line against the
-   file at `commit_id`, runs the link check on every body, and
-   writes `post-<pr>.request.json`. It posts nothing.
+   file at `commit_id`, attaches `repro/<finding-id>.<ext>` from that finding's
+   ballot directory when the file is there, runs the link check and the label
+   check on every body, and writes `post-<pr>.request.json`. A reply is recorded
+   under `replies` and is not a new line comment. It posts nothing.
 3. Read the plan, then run the same command without `--dry-run`. It posts
    one review (`side: RIGHT`, `commit_id`, line), writes
    `post-<pr>.pending.json` with the review id, then reads the comments back.
    The pending file is written before that read. A failed read-back still
    leaves the receipt, and a rerun looks the review up on GitHub and refuses
    to post again. A review with the same commit and body is refused too.
-   After a successful read-back it writes `tmp/council/<id>/posted.json`:
+   A reply is posted after that read, to `pulls/<pr>/comments/<id>/replies`,
+   and is not a new line on the review. Two replies to the same comment are
+   refused. The pending receipt stores the review request that was posted and
+   lists each reply that succeeded, with the text that was posted. If a reply
+   POST fails, the receipt stays, and a rerun sends the replies it does not
+   yet list. It does not post the review again. A rerun whose commit, review
+   body, or inline comments differ from that stored request stops, and it
+   does not record the new payload as posted. A rerun also stops when an
+   already posted reply's text changed.
+   After the replies are sent it writes `tmp/council/<id>/posted.json`:
    the review id and url, and each comment's url keyed by
    `<ballot>:<finding>`. A PR already in `posted.json` is refused.
 4. Run `scripts/evidence-index.py <id> [<id> ...]`. It writes

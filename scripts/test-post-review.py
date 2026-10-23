@@ -49,12 +49,21 @@ base = path.split('?')[0]
 from urllib.parse import parse_qs, urlsplit
 page = int(parse_qs(urlsplit(path).query).get('page', ['1'])[0])
 if '-X' in args:
-    if base != repo + '/reviews':
+    if base.endswith('/replies'):
+        fail = os.environ.get('GH_REPLY_FAIL', '')
+        if fail == '1' or (fail and f'/comments/{fail}/replies' in base):
+            sys.stderr.write('HTTP 502 Bad Gateway\\n')
+            sys.exit(1)
+        req = json.loads(sys.stdin.read())
+        (state / 'posted-reply.json').write_text(json.dumps({'url': base, 'body': req}))
+        print(json.dumps({'id': 77, 'html_url': 'https://github.com/example/widgets/pull/7#discussion_r77'}))
+    elif base != repo + '/reviews':
         sys.exit('unexpected POST ' + base)
-    req = json.loads(sys.stdin.read())
-    (state / 'posted-request.json').write_text(json.dumps(req))
-    print(json.dumps({'id': 900, 'state': 'COMMENTED',
-                      'html_url': 'https://github.com/example/widgets/pull/7#pullrequestreview-900'}))
+    else:
+        req = json.loads(sys.stdin.read())
+        (state / 'posted-request.json').write_text(json.dumps(req))
+        print(json.dumps({'id': 900, 'state': 'COMMENTED',
+                          'html_url': 'https://github.com/example/widgets/pull/7#pullrequestreview-900'}))
 elif base == repo:
     print(json.dumps({'head': {'sha': os.environ.get('GH_HEAD', '1' * 40)}}))
 elif base == repo + '/files':
@@ -375,6 +384,310 @@ def test_findings_shape(root: Path) -> None:
           f'f11 a list findings file is a named gap ({proc.returncode} {proc.stderr.strip()} index={out.is_file()})')
 
 
+def test_repro_and_labels(root: Path) -> None:
+    """Repro files are attached. A labeled reply and an unlabeled new inline comment are refused."""
+    f = Fixture(root / 'repro')
+    script = "```\n# council\nputs 'abc1234'\n# app/widget.rb:3\n```\n"
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f1.rb').write_text(script, encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'repro comment passes the link check ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    body = req['comments'][0]['body']
+    check('<summary>f1.rb</summary>' in body and '````ruby\n' in body and script in body,
+          'in-diff comment carries the ruby repro block')
+    check('Truncated to' not in body, 'a short script is not truncated')
+    check(all('<summary>' not in c['body'] for c in req['comments'][1:]),
+          'a finding with no repro file gets no block')
+    check('council' not in proc.stderr and 'outside a markdown link' not in proc.stderr,
+          'the fenced script does not trip the citation or word lint')
+
+    f = Fixture(root / 'labeled-reply')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 42, 'body': '**Requested:** still broken.'})
+    f.set_payload(payload)
+    refused(f, 'a labeled reply is refused before POST', 'labeled reply')
+
+    f = Fixture(root / 'summary-label')
+    payload = f.payload()
+    payload['body'] = '\n\n**Requested:** four notes on the widget change.\n'
+    f.set_payload(payload)
+    refused(f, 'a summary that opens with a label is refused before POST', 'summary body opens with a label')
+
+    f = Fixture(root / 'summary-bullets')
+    payload = f.payload()
+    payload['body'] = (
+        'Four notes on the widget change. The earlier fix is '
+        '[#6](https://github.com/example/widgets/pull/6).\n\n'
+        '- **Advisory:** the helper drops a row.\n'
+    )
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0 and f.posts() == 0,
+          f'a summary bullet and a moved comment label are accepted ({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'unlabeled-inline')
+    payload = f.payload()
+    payload['pr_author'] = 'author'
+    payload['reviewer'] = 'me'
+    payload['comments'][0]['body'] = 'size counts deleted items.'
+    f.set_payload(payload)
+    refused(f, 'an unlabeled new inline comment on someone else\'s PR is refused', 'unlabeled new inline comment')
+
+    f = Fixture(root / 'buried-label')
+    payload = f.payload()
+    payload['pr_author'] = 'author'
+    payload['comments'][0]['body'] = 'size counts deleted items. as **Requested:** above'
+    f.set_payload(payload)
+    proc = f.post()
+    check(proc.returncode != 0 and 'unlabeled new inline comment' in proc.stderr
+          and 'cannot tell' not in proc.stderr and f.posts() == 0,
+          'a new inline comment whose label is not at the start is refused '
+          f'({proc.returncode} {proc.stderr.strip()} posts={f.posts()})')
+
+    f = Fixture(root / 'labeled-inline')
+    payload = f.payload()
+    payload['pr_author'] = 'author'
+    payload['reviewer'] = 'me'
+    payload['comments'][0]['body'] = '**Informational:** size counts deleted items.'
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0 and f.posts() == 0, f'a labeled new inline comment is accepted ({proc.stderr.strip()})')
+
+    f = Fixture(root / 'plain-reply')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 42, 'body': 'The next build picks this up.'})
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'an unlabeled reply is accepted ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    check(req['replies'] == [{'in_reply_to': 42, 'body': 'The next build picks this up.'}],
+          'a reply is recorded separately')
+    check(all('in_reply_to' not in c for c in req['comments']), 'a reply is not a new line comment')
+    check(f.posts() == 0, 'dry run does not post the reply')
+
+    f = Fixture(root / 'post-reply')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 42, 'body': 'The next build picks this up.'})
+    f.set_payload(payload)
+    proc = f.post()
+    check(proc.returncode == 0, f'posting a reply exits zero ({proc.stderr.strip()})')
+    check(f.posts() == 2, f'review and reply are two POSTs ({f.posts()})')
+    reply = json.loads((f.state / 'posted-reply.json').read_text())
+    check(reply['url'].endswith('/comments/42/replies') and reply['body']['body'] == 'The next build picks this up.',
+          'the reply goes to the reply endpoint')
+    review = json.loads((f.state / 'posted-request.json').read_text())
+    check(all(c.get('body') != 'The next build picks this up.' for c in review['comments']),
+          'the review POST does not include the reply')
+
+    f = Fixture(root / 'two-ballots')
+    payload = f.payload()
+    payload['body_findings'] = ['f4', 'demo-2:f4']
+    f.set_payload(payload)
+    (f.council / 'demo-1' / 'repro').mkdir()
+    (f.council / 'demo-2' / 'repro').mkdir()
+    (f.council / 'demo-1' / 'repro' / 'f4.rb').write_text("from demo-1\n", encoding='utf-8')
+    (f.council / 'demo-2' / 'repro' / 'f4.rb').write_text("from demo-2\n", encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'two ballots with the same filename attach ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    check(req['body'].count('<summary>f4.rb</summary>') == 2, 'each ballot keeps its own summary')
+    check('from demo-1' in req['body'] and 'from demo-2' in req['body'], 'both scripts are in the review body')
+
+    f = Fixture(root / 'moved-huge')
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f2.rb').write_text('y' * 70000, encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a moved huge repro still dry-runs ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    check(len(req['body']) <= 65536, f'moved repro stays within the review body ({len(req["body"])})')
+    check('Truncated to' in req['body'] and '<summary>f2.rb</summary>' in req['body'],
+          'the moved script is truncated inside the review body')
+
+    f = Fixture(root / 'reply-retry')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 42, 'body': 'The next build picks this up.'})
+    f.set_payload(payload)
+    first = f.post(env={'GH_REPLY_FAIL': '1'})
+    pending = f.council / 'demo-1/post-7.pending.json'
+    first_posts = [c for c in f.calls() if '-X' in c]
+    review_posts = [c for c in first_posts if any(str(a).endswith('/reviews') for a in c)]
+    reply_posts = [c for c in first_posts if any(str(a).endswith('/replies') for a in c)]
+    # The reply POST is attempted and the stub records it before exiting 502.
+    # The review must not be recorded as posted, so a rerun can send the reply.
+    check(first.returncode != 0 and pending.is_file() and not (f.council / 'demo-1/posted.json').exists()
+          and len(review_posts) == 1 and len(reply_posts) == 1,
+          'a failed reply leaves the review pending and does not record it posted '
+          f'({first.returncode} {first.stderr.strip()} reviews={len(review_posts)} replies={len(reply_posts)})')
+    before = len(f.calls())
+    second = f.post()
+    new_posts = [c for c in f.calls()[before:] if '-X' in c]
+    check(second.returncode == 0 and len(new_posts) == 1
+          and any(str(arg).endswith('/comments/42/replies') for arg in new_posts[0]),
+          f'a rerun posts the reply and not the review again ({second.returncode} {new_posts} {second.stderr.strip()})')
+    check((f.council / 'demo-1/posted.json').is_file() and not pending.exists(),
+          'the retry records the review and clears the pending receipt')
+
+    f = Fixture(root / 'later-huge')
+    draft = load('comment_draft')
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    script = repro / 'f3.rb'
+    script.write_text('z' * 70000, encoding='utf-8')
+    payload = f.payload()
+    for c in payload['comments']:
+        if c.get('finding') == 'f3':
+            c['body'] = draft.attach_repro(c['body'], script, key='demo-1/f3.rb')
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a later preattached script still dry-runs ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    check(len(req['body']) <= 65536, f'a later preattached script stays within the review body ({len(req["body"])})')
+    check('should the label follow the locale' in req['body'] and '<summary>f3.rb</summary>' in req['body'],
+          'the earlier prose stays and the later script is still attached')
+
+    f = Fixture(root / 'two-body-scripts')
+    payload = f.payload()
+    payload['body_findings'] = ['f4', 'demo-2:f4']
+    f.set_payload(payload)
+    (f.council / 'demo-1' / 'repro').mkdir()
+    (f.council / 'demo-2' / 'repro').mkdir()
+    (f.council / 'demo-1' / 'repro' / 'f4.rb').write_text('a' * 70000, encoding='utf-8')
+    (f.council / 'demo-2' / 'repro' / 'f4.rb').write_text("puts :second\n", encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'two body scripts still dry-run ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    check(len(req['body']) <= 65536, f'two body scripts stay within the review body ({len(req["body"])})')
+    check('<!-- repro:demo-1/f4.rb -->' in req['body'] and '<!-- repro:demo-2/f4.rb -->' in req['body'],
+          'the second body script is not dropped')
+    check('puts :second' in req['body'], 'the short second script is whole')
+
+    f = Fixture(root / 'two-replies')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 81, 'body': 'First reply.'})
+    payload['comments'].append({'in_reply_to': 81, 'body': 'Second reply.'})
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and 'two replies to comment 81' in proc.stderr and f.posts() == 0,
+          f'two replies to one comment are refused before POST ({proc.returncode} {proc.stderr.strip()} posts={f.posts()})')
+
+    f = Fixture(root / 'preattached')
+    draft = load('comment_draft')
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    script = repro / 'f2.rb'
+    script.write_text('y' * 70000, encoding='utf-8')
+    payload = f.payload()
+    for c in payload['comments']:
+        if c.get('finding') == 'f2':
+            c['body'] = draft.attach_repro(c['body'], script, key='demo-1/f2.rb')
+            check(len(c['body']) <= 65536 and '<!-- repro:demo-1/f2.rb -->' in c['body'],
+                  f'the preattached draft fits a line comment ({len(c["body"])})')
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a preattached moved repro still dry-runs ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    check(len(req['body']) <= 65536, f'a preattached moved repro stays within the review body ({len(req["body"])})')
+    check(req['body'].count('<summary>f2.rb</summary>') == 1 and 'Truncated to' in req['body'],
+          'the preattached block is resized, not duplicated')
+
+    f = Fixture(root / 'changed-payload')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 42, 'body': 'The next build picks this up.'})
+    f.set_payload(payload)
+    first = f.post(env={'GH_REPLY_FAIL': '1'})
+    check(first.returncode != 0 and (f.council / 'demo-1/post-7.pending.json').is_file(),
+          f'changed-payload setup leaves a pending review ({first.returncode} {first.stderr.strip()})')
+    payload['body'] = 'A different summary, written after the review was posted.'
+    f.set_payload(payload)
+    before = f.posts()
+    second = f.post()
+    check(second.returncode != 0 and 'different payload' in second.stderr
+          and not (f.council / 'demo-1/posted.json').exists() and f.posts() == before,
+          'a changed payload is not recorded as posted '
+          f'({second.returncode} {second.stderr.strip()} posts={f.posts()} before={before})')
+
+    f = Fixture(root / 'moved-and-body')
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f2.rb').write_text('y' * 70000, encoding='utf-8')
+    (repro / 'f4.rb').write_text("puts :body\n", encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a moved script leaves room for a body script ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    check(len(req['body']) <= 65536, f'moved and body scripts stay within the review body ({len(req["body"])})')
+    check('<summary>f2.rb</summary>' in req['body'] and 'puts :body' in req['body'],
+          'the body script is attached after the moved script')
+
+    f = Fixture(root / 'reply-order')
+    payload = f.payload()
+    payload['comments'].append({'in_reply_to': 51, 'body': 'Posted first.'})
+    payload['comments'].append({'in_reply_to': 52, 'body': 'Fails second.'})
+    f.set_payload(payload)
+    first = f.post(env={'GH_REPLY_FAIL': '52'})
+    check(first.returncode != 0 and (f.council / 'demo-1/post-7.pending.json').is_file(),
+          f'reply-order setup posts one reply and leaves the next pending ({first.returncode} {first.stderr.strip()})')
+    payload['comments'] = [c for c in payload['comments'] if 'in_reply_to' not in c]
+    payload['comments'].append({'in_reply_to': 52, 'body': 'Fails second.'})
+    payload['comments'].append({'in_reply_to': 51, 'body': 'Changed after it was posted.'})
+    f.set_payload(payload)
+    before = f.posts()
+    dry = f.post('--dry-run')
+    check(dry.returncode != 0 and 'different text' in dry.stderr and f.posts() == before,
+          f'a dry run rejects a changed reply before posting ({dry.returncode} {dry.stderr.strip()} posts={f.posts()})')
+    second = f.post()
+    check(second.returncode != 0 and 'different text' in second.stderr and f.posts() == before,
+          'a changed reply stops the rerun before the unsent reply is posted '
+          f'({second.returncode} {second.stderr.strip()} posts={f.posts()} before={before})')
+
+    f = Fixture(root / 'own-pr')
+    payload = f.payload()
+    payload['pr_author'] = 'me'
+    payload['reviewer'] = 'me'
+    payload['comments'][0]['body'] = 'size counts deleted items.'
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'an unlabeled inline comment on your own PR is not flagged ({proc.stderr.strip()})')
+
+
+def test_moved_repro_keeps_its_block(root: Path) -> None:
+    """An 8-digit script used to be reserved with a 6-digit note, and the moved loop dropped it."""
+    f = Fixture(root / 'eight-digit')
+    payload = f.payload()
+    payload['body_findings'] = []
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') in ('f2', 'f3')]
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f2.rb').write_text('y' * 10_000_000, encoding='utf-8')
+    (repro / 'f3.rb').write_text('z' * 10_000_000, encoding='utf-8')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'two 8-digit moved scripts still dry-run ({proc.returncode} {proc.stderr.strip()})')
+    req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+    body = req['body']
+    check(len(body) <= 65536, f'8-digit moved scripts stay within the review body ({len(body)})')
+    check('<!-- repro:demo-1/f2.rb -->' in body and '<!-- repro:demo-1/f3.rb -->' in body,
+          'the second moved script is not dropped')
+    check('of 10000000 bytes' in body, 'the truncation note names the real byte length')
+
+
+def test_moved_repro_missing_block_dies(root: Path) -> None:
+    """A moved comment with no room for its script stops, instead of posting without it."""
+    f = Fixture(root / 'no-room')
+    payload = f.payload()
+    payload['body'] = 'N' * 65300
+    payload['body_findings'] = []
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f2']
+    f.set_payload(payload)
+    repro = f.council / 'demo-1' / 'repro'
+    repro.mkdir()
+    (repro / 'f2.rb').write_text('puts :hi\n', encoding='utf-8')
+    refused(f, 'a moved repro that does not fit is refused before POST',
+            'no room for repro demo-1/f2.rb')
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix='post-review-tests-') as raw:
         root = Path(raw)
@@ -389,6 +702,9 @@ def main() -> None:
         test_readback_does_not_double_post(root)
         test_other_reviewer_same_body(root)
         test_refusals(root)
+        test_repro_and_labels(root)
+        test_moved_repro_keeps_its_block(root)
+        test_moved_repro_missing_block_dies(root)
     print('all post-review checks passed')
 
 

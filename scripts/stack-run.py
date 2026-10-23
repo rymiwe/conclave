@@ -871,8 +871,13 @@ class Runner:
             prompt = (f"Round B. Ballot directory: {ballot}. Follow {ROOT / 'docs/review.md'} phases 2 to 4. "
                       'Read only blind/leg-*.md for reports; never voter-* files; never blind/key.txt until the convergence table exists. '
                       + instructions + f'Replace every TODO(chair) in {ballot / "decide.md"}. '
-                      f'Draft comments into {ballot / "comments.md"}, each labelled in bold **Question:**, **Requested:**, or **Advisory:**. '
+                      f'Draft comments into {ballot / "comments.md"}. '
+                      'On someone else\'s pull request, start each new inline comment with **Requested:**, **Advisory:**, or **Informational:**. '
+                      'Do not draft **Question:**. The review summary does not open with a label. A bullet in the summary may. A reply to an existing comment never gets a label. '
+                      f'When you verify a finding with a throwaway script, save it as {ballot / "repro"}/<finding-id>.<ext> '
+                      '(for example repro/f1.rb). The drafter attaches that file to the comment. A finding with no file there gets no block. '
                       'Drafts must pass scripts/check-comment-links.py. That check rejects an internal word in a public comment and names the plain replacement. '
+                      'A fenced script is not prose. A post payload must also pass scripts/check-comment-labels.py. '
                       + span + 'Write only in the ballot directory. Post nothing. ' + NO_SHALLOW)
             self.chair(row['ballot'] + '-chair-b', prompt, self.repo, row, 'chair_b', session)
             if not (ballot / 'findings.json').is_file() or state(ballot) != 'done':
