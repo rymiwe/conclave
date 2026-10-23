@@ -384,8 +384,16 @@ TMPDIR=<leg tmp> grok --cwd <worktree> \
   --output-format plain \
   -p "/review --local
 
-Additionally: ..."
+Write the review file before you explore further. ..."
 ```
+
+The first prompt used to demand an open-ended adversarial pass (scratch scripts
+for every boundary, unanchored patterns, pasted output) before the review file
+existed. That is what spent the 60-turn budget on 2026-10-13 and again on
+2026-10-22: the stop that was reported was 60, the first call's cap, and the
+resume at 80 had not produced a report, so the runs stayed not judgeable.
+The cap stays 60, and the resume stays 80. The prompt now tells the reviewer
+to write the file before any further exploration.
 
 Do not pass `--model`. The CLI default tracks the newest release. Use
 `--local`, never `--pr` or `--branch`. `--pr` deletes the review file on

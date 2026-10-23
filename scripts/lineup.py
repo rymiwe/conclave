@@ -115,7 +115,100 @@ def parse(raw: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+# Used when a route row omits vendor. Fable on either seat is still Anthropic.
+_FAMILY_VENDOR = {
+    "fable": "anthropic",
+    "astra": "openai",
+    "grok": "xai",
+    "muse": "meta",
+    "wonder": "meta",
+    "wonder-full": "meta",
+    "argon": "google",
+}
+
+
+def pick_replacement(raw: str, failed: str, builder: str, other: str, avoid_names: str = "") -> str:
+    """One replacement voter, or none.
+
+    `failed` is the conclave voter that just failed. `builder` and `other`
+    are vendor ids (`other` may be empty). `avoid_names` is a comma-separated
+    list of voter names that already failed or are already seated. The
+    replacement's vendor is neither the builder nor the other working voter.
+    A named voter in `avoid_names`, including the one that just failed, is
+    not returned. Output is `ok`, the voter name, and `cursor-fable` when
+    that is how Fable launches; or `none` and a reason.
+    """
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError:
+        return "none\nseat-usage returned unreadable json\n"
+    if isinstance(doc, list):
+        doc = doc[0] if doc else {}
+    if not isinstance(doc, dict):
+        return "none\nseat-usage returned unreadable json\n"
+    codes = []
+    for item in doc.get("skipped") or []:
+        if isinstance(item, dict) and item.get("code"):
+            codes.append(f"{item.get('family') or '-'}:{item['code']}")
+    code_text = ", ".join(codes)
+    if doc.get("mode") == "ask" or not isinstance(doc.get("lineup"), dict):
+        why = doc.get("reason") or doc.get("why") or "route asked"
+        extra = f" ({code_text})" if code_text else ""
+        return f"none\nno eligible replacement: {why}{extra}\n"
+    avoid_vendors = {v for v in (builder, other) if v}
+    avoid = {name.strip() for name in (avoid_names or "").split(",") if name.strip()}
+    if failed:
+        avoid.add(failed)
+    for row in doc["lineup"].get("voters") or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            leg = _leg(row)
+            name = voter_name(leg)
+        except ValueError:
+            continue
+        if name in avoid:
+            continue
+        vendor = row.get("vendor") or _FAMILY_VENDOR.get(leg.family) or ""
+        if vendor in avoid_vendors:
+            continue
+        if not vendor and avoid_vendors:
+            continue
+        lines = ["ok", name]
+        try:
+            if launch_for(leg) == "cursor-fable":
+                lines.append("cursor-fable")
+        except ValueError:
+            pass
+        return "\n".join(lines) + "\n"
+    why = doc.get("why") or doc.get("reason") or "route returned no other seat"
+    extra = f" ({code_text})" if code_text else ""
+    return (
+        "none\nno eligible replacement: vendor must differ from the builder "
+        f"and the other voter; {why}{extra}\n"
+    )
+
+
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "--replacement":
+        # --replacement <failed> <builder-vendor> <other-vendor> <json>
+        # or <failed> <builder> <other> <avoid-names> <json>. "-" is empty.
+        if len(argv) < 5:
+            sys.stdout.write("none\nreplacement needs the failed voter, both vendors, and json\n")
+            return 0
+        failed, builder, other = argv[1], argv[2], argv[3]
+        if len(argv) >= 6:
+            avoid, raw = argv[4], argv[5]
+        else:
+            avoid, raw = "", argv[4]
+        if builder == "-":
+            builder = ""
+        if other == "-":
+            other = ""
+        if avoid == "-":
+            avoid = ""
+        sys.stdout.write(pick_replacement(raw, failed, builder, other, avoid))
+        return 0
     raw = argv[0] if argv else sys.stdin.read()
     sys.stdout.write(parse(raw))
     return 0

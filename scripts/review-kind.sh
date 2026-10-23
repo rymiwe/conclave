@@ -44,10 +44,17 @@ every finding must state a concrete failure (the input or state, and the resulti
 EOF
 )
 
+# The first call stays at 60 turns and the resume at 80. On 2026-10-13 the inner
+# reviewer hit 60 with no report, and the resume of that inner session had never
+# been shown to produce one (docs/review.md). The 2026-10-22 councils were still
+# not judgeable after a 60-turn stop, so the stop that fired was this first cap,
+# not the resume's 80. Raising the cap keeps the same open-ended testing
+# instructions that spent the budget. The prompt now says to write the review
+# file before any further exploration.
 GROK_REVIEW_PROMPT=$(cat <<'EOF'
 /review --local
 
-Additionally: every finding must state a concrete failure (the input or state, and the resulting wrong behaviour). No concrete failure means it is not a finding. Do not pad; zero findings is a fine answer. For anything with computable behaviour (parsing, regexes, date arithmetic, boundary comparisons), execute it against real inputs in a scratch script instead of reasoning about it, and paste the output; a passing test suite only covers the cases someone already imagined. Never take your inputs from the existing test suite. Those are the cases the author already imagined, and they already pass, so running them tells you nothing. Invent inputs designed to defeat the code: values just inside and just outside every boundary; inputs that look like the target and must still be rejected; inputs that do not look like the target at all but coincidentally satisfy the pattern (this is the class reviewers miss most: the ID whose digits happen to form a valid date, the filename that parses by accident, the code that happens to match a prefix; ask what else in the real data could satisfy this pattern, not merely whether the intended thing does); empty, absent, malformed, duplicated, and extreme values. For a pattern match, look at what the pattern does not anchor (a missing digit or word boundary, an unanchored start, a greedy quantifier) and build an input that exploits it, then check whether a real-world value of that shape could plausibly occur in this system's data. End with a 'Checked and found clean' list naming the areas you examined that produced no finding, and the exact inputs you tried for anything you tested by hand.
+Write the review file before you explore further. Every finding must state a concrete failure (the input or state, and the resulting wrong behaviour). No concrete failure means it is not a finding. Do not pad; zero findings is a fine answer. Do not run an open-ended test campaign and do not re-read the tree after the first pass. If you test computable behaviour, one scratch script and its output is enough, then write the file. End with a 'Checked and found clean' list naming the areas you examined that produced no finding.
 EOF
 )
 
@@ -94,14 +101,24 @@ review_voters() {
   done
 }
 
+review_argon_policy_skip() {
+  # The optional-leg marker. A seated review voter that died does not match.
+  [ -n "${DIR:-}" ] && [ -s "$DIR/voter-argon.skipped" ] || return 1
+  grep -Eq 'kind review seats this leg|is not supported' "$DIR/voter-argon.skipped"
+}
+
 review_report_voters() {
-  # Voters that must produce a report. A skipped Argon stays in $VOTERS so
-  # the reason stays on disk, and is not required for the count or for blinding.
+  # Voters that must produce a report. A policy-skipped Argon stays in
+  # $VOTERS so the reason stays on disk, and is not required for the count
+  # or for blinding. On a review, a skip that is not that marker is a failed
+  # voter and stays in the count.
   local v
   while IFS= read -r v; do
     [ -n "$v" ] || continue
     if [ "$v" = argon ] && [ -n "${DIR:-}" ] && [ -s "$DIR/voter-argon.skipped" ]; then
-      continue
+      if [ "${KIND:-}" != review ] || review_argon_policy_skip; then
+        continue
+      fi
     fi
     printf '%s\n' "$v"
   done <<EOF
@@ -1105,6 +1122,9 @@ review_build_worktrees() {
       ref="$REVIEW_HEAD_OID"
       ;;
   esac
+  # Re-seat builds one more leg from the same commit and base.
+  REVIEW_LEG_REF="$ref"
+  REVIEW_LEG_BASE="$base"
   local v
   while IFS= read -r v; do
     case "$v" in
@@ -2263,6 +2283,7 @@ review_report_file() {
     codex) printf '%s\n' "$DIR/voter-codex.md" ;;
     grok) printf '%s\n' "$DIR/voter-grok-report.md" ;;
     muse) printf '%s\n' "$DIR/voter-muse.md" ;;
+    argon) printf '%s\n' "$DIR/voter-argon.md" ;;
     *) printf '\n' ;;
   esac
 }
@@ -2491,6 +2512,11 @@ review_print_result() {
   else
     printf '\nReview %s phase 1 stopped after blinding.\n' "$ID"
   fi
+  if [ -s "$DIR/reseat.md" ]; then
+    printf 'Re-seat:\n'
+    cat "$DIR/reseat.md"
+    printf '\n'
+  fi
   printf 'Lineup: tmp/council/%s/lineup.md\n' "$ID"
   printf 'Diff: %s\n' "$DIFFSHAPE"
   printf 'Read-only:\n'
@@ -2598,6 +2624,381 @@ review_reject_shallow() {
   fi
 }
 
+review_voter_vendor() {
+  case "$1" in
+    claude|opus) printf 'anthropic\n' ;;
+    codex) printf 'openai\n' ;;
+    grok) printf 'xai\n' ;;
+    muse) printf 'meta\n' ;;
+    argon) printf 'google\n' ;;
+    *) printf '\n' ;;
+  esac
+}
+
+review_failure_seat() {
+  # The seat-usage seat name, not the conclave voter name.
+  local via=""
+  case "$1" in
+    claude)
+      # Cursor Fable, including the overflow leg, is the cursor seat.
+      # A subscription failure stays on claude.
+      if [ -n "${DIR:-}" ] && [ -f "$DIR/voter-claude.via" ]; then
+        via="$(head -1 "$DIR/voter-claude.via" 2>/dev/null || true)"
+      fi
+      if [ "${CLAUDE_SKU:-}" = cursor-fable ] || [ "$via" = cursor ]; then
+        printf 'cursor\n'
+      else
+        printf 'claude\n'
+      fi
+      ;;
+    opus) printf 'claude\n' ;;
+    codex) printf 'chatgpt\n' ;;
+    grok) printf 'grok\n' ;;
+    muse) printf 'muse\n' ;;
+    argon) printf 'google\n' ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+review_classify_failure() {
+  # Fixed enum for a voter that did not produce a report. Empty when it did.
+  local v="$1" blob="" f
+  if review_report_present "$v"; then
+    printf '\n'
+    return 0
+  fi
+  for f in "$DIR/voter-$v.fail" "$DIR/voter-$v.err" "$DIR/voter-$v.stdout.md" \
+           "$DIR/voter-$v.json" "$DIR/voter-$v.md" "$DIR/voter-$v-report.md" \
+           "$DIR/voter-$v.skipped"; do
+    [ -f "$f" ] || continue
+    blob="$blob
+$(cat "$f" 2>/dev/null || true)"
+  done
+  if printf '%s\n' "$blob" | grep -Eiq 'requires usage credits|usage credits|out of extra usage'; then
+    printf 'credits\n'
+    return 0
+  fi
+  if printf '%s\n' "$blob" | grep -Eiq 'max[-_ ]turns|turn limit|error_max_turns|max_turns_reached'; then
+    printf 'max_turns\n'
+    return 0
+  fi
+  if printf '%s\n' "$blob" | grep -Eiq 'unauthorized|authentication failed|not logged in|not signed in|signed out|auth failure|invalid api key|HTTPError 401'; then
+    printf 'auth\n'
+    return 0
+  fi
+  if printf '%s\n' "$blob" | grep -Eiq 'rate.?limit|HTTPError 429'; then
+    printf 'rate_limited\n'
+    return 0
+  fi
+  printf 'nonzero\n'
+}
+
+review_record_seat_failure() {
+  # Fail soft. An older seat-usage has no --record-failure and must not stop the run.
+  local seat="$1" reason="$2" bin
+  [ -n "$seat" ] && [ -n "$reason" ] || return 0
+  bin="$(conclave_env SEAT_USAGE "$HOME/.local/bin/seat-usage")"
+  [ -n "$bin" ] && [ -x "$bin" ] || return 0
+  "$bin" --record-failure "$seat" --reason "$reason" >/dev/null 2>&1 || true
+}
+
+review_note_reseat() {
+  # Success and failure both show in the council output. Only a failed
+  # re-seat is an error: a successful replacement is not an errors.md line.
+  printf '%s\n' "$*" >>"$DIR/reseat.md"
+  printf '%s\n' "$*" >&2
+  if [ -f "$DIR/lineup.md" ]; then
+    printf '%s\n' "$*" >>"$DIR/lineup.md"
+  fi
+  case "$*" in
+    *"could not replace"*|*"also failed"*)
+      if [ -n "${ERRORS_FILE:-}" ]; then
+        printf '%s\n' "$*" >>"$ERRORS_FILE"
+      fi
+      ;;
+  esac
+}
+
+review_swap_voter() {
+  # Drop $1 and append $2 when it is not already seated.
+  local drop="$1" add="$2" out="" v seen_add=0
+  local IFS=','
+  for v in $VOTERS; do
+    v="$(printf '%s' "$v" | tr -d '[:space:]')"
+    [ -n "$v" ] || continue
+    if [ "$v" = "$drop" ]; then
+      continue
+    fi
+    if [ "$v" = "$add" ]; then
+      seen_add=1
+    fi
+    out="${out:+$out,}$v"
+  done
+  if [ "$seen_add" -eq 0 ]; then
+    out="${out:+$out,}$add"
+  fi
+  VOTERS="$out"
+}
+
+review_prepare_replacement_brief() {
+  case "$1" in
+    claude)
+      if [ ! -s "$DIR/voter-claude.brief.md" ]; then
+        review_write_claude_brief "$DIR/voter-claude.brief.md" || return 1
+      fi
+      ;;
+    muse)
+      if [ ! -s "$DIR/voter-muse.brief.md" ]; then
+        review_write_muse_brief "$DIR/voter-muse.brief.md" || return 1
+      fi
+      ;;
+    argon)
+      if [ ! -s "$DIR/voter-argon.brief.md" ]; then
+        review_write_muse_brief "$DIR/voter-argon.brief.md" || return 1
+      fi
+      ;;
+  esac
+  return 0
+}
+
+review_launch_one() {
+  # One voter, in the foreground. $1 voter, $2 worktree.
+  local v="$1" wt="$2"
+  case "$v" in
+    claude)
+      if [ "$CLAUDE_SKU" = cursor-fable ]; then
+        command -v "$(conclave_env CURSOR_AGENT cursor-agent)" >/dev/null 2>&1 || {
+          echo "claude: cursor-agent CLI not found" >"$DIR/voter-claude.fail"
+          return 1
+        }
+      elif ! command -v claude >/dev/null 2>&1; then
+        echo "claude: claude CLI not found" >"$DIR/voter-claude.fail"
+        return 1
+      fi
+      review_timed_leg claude review_run_claude "$wt"
+      ;;
+    codex)
+      review_timed_leg codex review_run_codex "$wt"
+      ;;
+    grok)
+      if ! command -v grok >/dev/null 2>&1; then
+        echo "grok: CLI not found" >"$DIR/voter-grok.fail"
+        return 1
+      fi
+      review_timed_leg grok review_run_grok "$wt" "$(review_leg_tmp "$wt")"
+      ;;
+    muse)
+      if ! command -v muse >/dev/null 2>&1; then
+        echo "muse: CLI not found" >"$DIR/voter-muse.fail"
+        return 1
+      fi
+      review_timed_leg muse review_run_muse "$wt" "$(review_leg_tmp "$wt")" no
+      ;;
+    argon)
+      review_timed_leg argon review_run_argon "$wt"
+      ;;
+    *)
+      echo "$v: no launch" >"$DIR/voter-$v.fail"
+      return 1
+      ;;
+  esac
+}
+
+review_route_json() {
+  # Print the lineup JSON. Each argument is an --exclude-seat value.
+  # Empty output means the command failed. Ask JSON is still output.
+  local bin raw seat
+  bin="$(conclave_env SEAT_USAGE "$HOME/.local/bin/seat-usage")"
+  [ -n "$bin" ] && [ -x "$bin" ] || return 1
+  local -a args=(--route lineup --json --kind review)
+  if [ -n "${HEADER_AUTHOR:-}" ]; then
+    args+=(--author "$HEADER_AUTHOR")
+    local vendor=""
+    vendor="$(review_author_vendor "$HEADER_AUTHOR" || true)"
+    if [ -n "$vendor" ]; then
+      args+=(--builder-vendor "$vendor")
+    fi
+  fi
+  if [ -n "${ID:-}" ]; then
+    args+=(--ballot "$ID")
+  fi
+  if [ -n "${REPO:-}" ]; then
+    args+=(--repo "$REPO")
+  fi
+  for seat in "$@"; do
+    [ -n "$seat" ] || continue
+    args+=(--exclude-seat "$seat")
+  done
+  raw="$("$bin" "${args[@]}" 2>/dev/null)" || return 1
+  [ -n "$raw" ] || return 1
+  printf '%s\n' "$raw"
+}
+
+review_reseat_avoid_names() {
+  # Voters that must not be returned: everyone seated, plus everyone who
+  # already failed on this ballot (including a voter already swapped out).
+  local v out="" seen="|"
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    case "$seen" in
+      *"|$v|"*) continue ;;
+    esac
+    seen="${seen}${v}|"
+    out="${out:+$out,}$v"
+  done <<EOF
+$(review_voters)
+$(printf '%s\n' "${RESEAT_FAILED:-}" | tr ',' '\n')
+EOF
+  printf '%s\n' "$out"
+}
+
+review_reseat_exclude_seats() {
+  # One seat-usage seat per line, for --exclude-seat. Duplicates are kept;
+  # the router treats a repeat as the same seat.
+  local v
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    review_failure_seat "$v"
+  done <<EOF
+$(review_voters)
+$(printf '%s\n' "${RESEAT_FAILED:-}" | tr ',' '\n')
+EOF
+}
+
+review_working_vendor() {
+  # Vendor of a voter other than $1 that already has a report.
+  local skip="$1" v
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    [ "$v" = "$skip" ] && continue
+    if review_report_present "$v"; then
+      review_voter_vendor "$v"
+      return 0
+    fi
+  done <<EOF
+$(review_voters)
+EOF
+  printf '\n'
+}
+
+review_reseat_one() {
+  # Replace $1 once. A replacement that fails is not replaced again.
+  local failed="$1" reason="$2" seat other builder raw picked name sku wt
+  seat="$(review_failure_seat "$failed")"
+  # The caller recorded this failure before the first route. Recording it
+  # again would write a second line for the same voter.
+  other="$(review_working_vendor "$failed")"
+  builder=""
+  if [ -n "${HEADER_AUTHOR:-}" ]; then
+    builder="$(review_author_vendor "$HEADER_AUTHOR" || true)"
+  fi
+  raw=""
+  local -a excludes=()
+  local ex
+  while IFS= read -r ex; do
+    [ -n "$ex" ] || continue
+    excludes+=("$ex")
+  done <<EOF
+$(review_reseat_exclude_seats)
+EOF
+  if ! raw="$(review_route_json "${excludes[@]}")"; then
+    # Older seat-usage rejects --exclude-seat. The failure file is the signal
+    # when the binary is new enough to have recorded it; otherwise the parse
+    # below still refuses to return a voter that already failed or is seated.
+    raw="$(review_route_json)" || raw=""
+  fi
+  if [ -z "$raw" ]; then
+    review_note_reseat "re-seat: could not replace $failed ($reason): seat-usage returned nothing"
+    return 1
+  fi
+  local avoid
+  avoid="$(review_reseat_avoid_names)"
+  picked="$(python3 "$ROOT/scripts/lineup.py" --replacement "$failed" \
+    "${builder:--}" "${other:--}" "${avoid:--}" "$raw" 2>/dev/null)" || picked=""
+  if [ "${picked%%$'\n'*}" != ok ]; then
+    local why
+    why="${picked#*$'\n'}"
+    why="${why%%$'\n'*}"
+    review_note_reseat "re-seat: could not replace $failed ($reason): ${why:-no eligible replacement}"
+    return 1
+  fi
+  name="$(printf '%s\n' "$picked" | sed -n '2p')"
+  sku="$(printf '%s\n' "$picked" | sed -n '3p')"
+  [ -n "$name" ] || {
+    review_note_reseat "re-seat: could not replace $failed ($reason): route named no voter"
+    return 1
+  }
+  if [ "$sku" = cursor-fable ]; then
+    CLAUDE_SKU="cursor-fable"
+  fi
+  if ! review_prepare_replacement_brief "$name"; then
+    review_note_reseat "re-seat: could not replace $failed ($reason): brief for $name was rejected"
+    return 1
+  fi
+  if [ -z "${REVIEW_LEG_REF:-}" ] || [ -z "${REVIEW_LEG_BASE:-}" ]; then
+    review_note_reseat "re-seat: could not replace $failed ($reason): no review leg commit"
+    return 1
+  fi
+  chmod u+r "$SCRATCH" 2>/dev/null || true
+  wt="$(review_make_leg "$REVIEW_LEG_REF" "$REVIEW_LEG_BASE")" || {
+    chmod 311 "$SCRATCH" 2>/dev/null || true
+    review_note_reseat "re-seat: could not replace $failed ($reason): worktree for $name failed"
+    return 1
+  }
+  chmod 311 "$SCRATCH" 2>/dev/null || true
+  review_swap_voter "$failed" "$name"
+  review_note_reseat "re-seat: $failed failed ($reason); replaced with $name"
+  review_launch_one "$name" "$wt" || true
+  if review_report_present "$name"; then
+    review_note_reseat "re-seat: $name produced a report"
+    return 0
+  fi
+  local again
+  again="$(review_classify_failure "$name")"
+  review_record_seat_failure "$(review_failure_seat "$name")" "$again"
+  RESEAT_FAILED="${RESEAT_FAILED:+$RESEAT_FAILED,}$name"
+  review_note_reseat "re-seat: $name also failed ($again); not replacing again"
+  return 1
+}
+
+review_reseat_failed() {
+  # Each original voter that failed is replaced at most once. The replacement
+  # is not itself replaced. Kind review only; an explicit --voters list stays.
+  [ "${KIND:-}" = review ] || return 0
+  [ "${VOTERS_EXPLICIT:-0}" -eq 0 ] || return 0
+  local v reason
+  local -a pending=()
+  RESEAT_FAILED=""
+  # Every seated voter, including an Argon that wrote voter-argon.skipped.
+  # review_report_voters omits that Argon because a skipped optional leg is
+  # not required for the count. On a review it was seated, so it is a failure.
+  while IFS= read -r v; do
+    [ -n "$v" ] || continue
+    if [ "$v" = argon ] && review_argon_policy_skip; then
+      continue
+    fi
+    review_report_present "$v" && continue
+    pending+=("$v")
+    RESEAT_FAILED="${RESEAT_FAILED:+$RESEAT_FAILED,}$v"
+  done <<EOF
+$(review_voters)
+EOF
+  [ "${#pending[@]}" -gt 0 ] || return 0
+  # Record every failure before the first re-route, so a later route cannot
+  # offer a voter whose failure has not been written yet.
+  for v in "${pending[@]}"; do
+    reason="$(review_classify_failure "$v")"
+    [ -n "$reason" ] || reason="nonzero"
+    review_record_seat_failure "$(review_failure_seat "$v")" "$reason"
+  done
+  for v in "${pending[@]}"; do
+    review_report_present "$v" && continue
+    reason="$(review_classify_failure "$v")"
+    [ -n "$reason" ] || reason="nonzero"
+    review_reseat_one "$v" "$reason" || true
+  done
+}
+
 review_run() {
   REVIEW_FAIL=0
   REVIEW_BLIND_FAILED=0
@@ -2651,6 +3052,7 @@ review_run() {
   printf '  target: %s\n' "$(review_target_line)"
   printf '  diff: %s\n' "$DIFFSHAPE"
   review_launch
+  review_reseat_failed
   review_compare_readonly
   review_assemble_model_check
   review_write_run_header
