@@ -13,7 +13,7 @@ from pathlib import Path
 _OPUS = "Opus"
 SENTENCE = (
     "Review seats two voters from seat-usage --route lineup --kind review, "
-    "on two vendor families, neither the builder's, and falls back to Fable and Astra "
+    "on two vendor families, excluding a named author or a caller-passed builder or --builder-vendor and nobody when none of those is set, and falls back to Fable and Astra "
     "when that route is missing, fails, or asks."
 )
 START = "<!-- ballot-rule:start -->"
