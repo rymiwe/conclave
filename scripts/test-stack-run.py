@@ -86,7 +86,7 @@ COUNCIL = '''\
 #!/usr/bin/env python3
 import json, os, pathlib, sys
 args = sys.argv[1:]
-with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['council', args, os.environ.get('COUNCIL_CHAIR_MODEL')])+'\\n')
+with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['council', args, os.environ.get('COUNCIL_CHAIR_MODEL'), os.environ.get('CONCLAVE_CHAIR')])+'\\n')
 d = pathlib.Path(os.environ['FIXTURE_ROOT'])/'tmp/council'/args[0]
 d.mkdir(parents=True, exist_ok=True)
 if '--dry-run' in args: sys.exit(0)
@@ -115,7 +115,7 @@ CURSOR = '''\
 #!/usr/bin/env python3
 import json, os, pathlib, re, signal, subprocess, sys, time
 args = sys.argv[1:]; prompt = args[-1]
-with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['cursor', args])+'\\n')
+with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['cursor', args, os.environ.get('CONCLAVE_CHAIR')])+'\\n')
 print(json.dumps({'type':'system', 'session_id':'test-session', 'model':'chair'}), flush=True)
 if os.environ.get('DETACH_HOLD'):
     pathlib.Path(os.environ['CHILD_PID']).write_text(str(os.getpid()))
@@ -203,6 +203,8 @@ class Fixture:
                         COUNCIL_CURSOR_AGENT=str(self.bin / 'cursor-agent'),
                         COUNCIL_SEAT_USAGE=str(self.bin / 'seat-usage'),
                         COUNCIL_SEAT_JSON=str(self.seat), TMPDIR=str(self.temp))
+        self.env.pop('CONCLAVE_CHAIR', None)
+        self.env.pop('COUNCIL_CHAIR', None)
 
     def ballot(self, number: int) -> Path:
         p = self.root / 'tmp/council' / f'p-{number}'
@@ -283,6 +285,10 @@ def test_runner(tmp: Path, mod) -> None:
     check(council == expected, 'exact phase 1 council arguments and findings commands')
     chairs = [c[1] for c in f.calls() if c[0] == 'cursor']
     check(all(c[:10] == ['-p','--model','test-chair','--output-format','stream-json','-f','--trust','--approve-mcps','--workspace',str(f.repo)] for c in chairs), 'chair argument shape')
+    cursor_rows = [c for c in f.calls() if c[0] == 'cursor']
+    check(cursor_rows and all(c[2] == '1' for c in cursor_rows), 'every chair process sees CONCLAVE_CHAIR=1')
+    phase1 = [c for c in f.calls() if c[0] == 'council' and '--findings' not in c[1]]
+    check(phase1 and all(c[3] is None for c in phase1), 'runner phase 1 does not see CONCLAVE_CHAIR')
     check(chairs[1][10:12] == ['--resume','test-session'] and chairs[3][10:12] == ['--resume','test-session'], 'round B resumes round A sessions')
     check(all(not mod.FORBIDDEN.search(prompt_outside_repo(c[-1], str(ROOT), str(f.repo))) for c in chairs),
           'chair prompts contain no model or vendor words')

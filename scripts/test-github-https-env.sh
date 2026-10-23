@@ -44,9 +44,14 @@ got="$("${base_env[@]}" COUNCIL_SOURCE_ONLY=1 bash -c \
   ". '$ROOT/scripts/conclave.sh' >/dev/null 2>&1; cursor-agent")"
 check "a cursor-agent child of conclave.sh fetches GitHub over HTTPS" "$https" "$got"
 
-# 4. The chair wrapper does the same for one command.
+# 4. The chair wrapper does the same for one command, and marks that process.
 check "with-github-https.sh cursor-agent fetches over HTTPS" "$https" \
   "$("${base_env[@]}" "$ROOT/scripts/with-github-https.sh" cursor-agent)"
+check "with-github-https.sh exports CONCLAVE_CHAIR=1 to the command" "1" \
+  "$("${base_env[@]}" "$ROOT/scripts/with-github-https.sh" bash -c 'printf %s "${CONCLAVE_CHAIR:-unset}"')"
+check "a child of conclave.sh is not marked CONCLAVE_CHAIR" "unset" \
+  "$("${base_env[@]}" COUNCIL_SOURCE_ONLY=1 bash -c \
+    ". '$ROOT/scripts/conclave.sh' >/dev/null 2>&1; printf %s \"\${CONCLAVE_CHAIR:-unset}\"")"
 
 # 5. A caller's own GIT_CONFIG_GLOBAL is kept (included), not dropped.
 printf '[user]\n\tname = Custom Global\n' >"$work/custom.gitconfig"

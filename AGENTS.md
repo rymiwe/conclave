@@ -11,7 +11,7 @@
 | **Judge** | **Jev** via `scripts/jev-judge.py` — outside the vote and implement set. No generative fallback judge. Without Jev there is no automatic Decision; the human decides from the options form. |
 | **Implementer** | Newest Grok via `cursor-agent`, pinned, one worktree per ticket — only when the human says to build. Today no kind builds without the human. Review returns post, hold, or second look and never `implement`. Design and mixed `implement*` Decisions go to the human with `judgment.md` until the calibration in `docs/routing.md` exists. Fallback: Opus at low effort. Not a voter. |
 
-Roles are families. Model IDs resolve at run time; do not write them into prose or prompts.
+Roles are families. Model IDs resolve at run time; do not write them into prose or prompts. Chair launchers export `CONCLAVE_CHAIR=1` on the chair process: `scripts/with-github-https.sh`, and each chair subprocess started by `scripts/stack-run.py`.
 
 ## Using from other projects
 
