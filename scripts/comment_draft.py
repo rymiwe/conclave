@@ -18,7 +18,8 @@ of labels on an inline comment on your own pull request.
 GitHub rejects a review comment body longer than 65536 characters. A script
 that does not fit is truncated inside the fence, with a note after the fence.
 When the prose leaves no room for that note, posting refuses the comment.
-A new inline comment or a reply over the limit is refused too.
+A new inline comment whose prose is over the limit, or a reply over it, is
+refused too.
 """
 from __future__ import annotations
 

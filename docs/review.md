@@ -1364,7 +1364,10 @@ in the comment is cut inside the fence, and a note after the fence says how
 many bytes were kept and names `repro/<filename>`. The comment prose is not
 cut. When the prose leaves no room for that note, posting stops and names the
 comment and the file instead of sending the comment without the script. A new
-inline comment or a reply longer than 65536 characters is refused. A comment
+inline comment whose prose, without its repro block, is longer than 65536
+characters is refused, and so is a reply over that limit. When comments are
+moved into the review body, a body finding's block is rendered again from
+`repro/<filename>` into the room they leave. A comment
 moved into the review body is sized to the room left in that
 body, including its permalink. A block that was already attached is resized
 to that room; it is not left at the line-comment size. The resize closes the

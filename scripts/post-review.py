@@ -405,7 +405,7 @@ def main() -> int:
                 prose = comment_draft.prose_without_repro(comment_draft.adopt_hand_block(
                     prose, repro_path.name, f"<!-- repro:{ballot}/{repro_path.name} -->"
                 ))
-            refuse_over_limit(prose, f"inline comment {key}")
+            refuse_over_limit(prose, f"inline comment {key} prose")
             text = attach_finding_repro(str(c["body"]), ballot, fid)
             if repro_path is not None:
                 refuse_absent_repro(text, ballot, repro_path.name, f"inline comment {key}")
@@ -433,6 +433,9 @@ def main() -> int:
             die(str(exc))
         if path is not None:
             repro_findings.append((ballot, fid, path))
+            # Mark a hand-written body-finding block now, so it is counted as
+            # that finding's script and not as summary prose.
+            body = comment_draft.adopt_hand_block(body, path.name, f"<!-- repro:{ballot}/{path.name} -->")
     def reserve_repro(path: Path, ballot: str) -> int:
         try:
             script = path.read_text(encoding="utf-8")
@@ -467,7 +470,9 @@ def main() -> int:
             header = "**Outside this diff**\n\n" if index == 0 else ""
             prose = comment_draft.prose_without_repro(str(c["body"])).strip()
             prose_cost.append(len(header) + len(moved_link(c)) + 2 + len(prose) + script_floor(c))
-        assembled = body.rstrip()
+        # Body-finding blocks are rendered again below, into the room the
+        # moved comments leave. Their floor is already in body_script_floor.
+        assembled = comment_draft.prose_without_repro(body).rstrip() if repro_findings else body.rstrip()
         for index, c in enumerate(moved):
             header = "**Outside this diff**\n\n" if index == 0 else ""
             link = moved_link(c)
