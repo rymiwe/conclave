@@ -35,6 +35,10 @@ a label on an inline comment there). When either login is missing, an
 unlabeled new inline comment is flagged because the check cannot tell whose
 pull request it is. The summary-opening check and the labeled-reply check
 do not depend on whose pull request it is.
+
+When pr-context.json sits beside the payload and it has an automated risk
+rating, the summary must state that rating. No rating is a pass. The
+message names the rating. Comment text in that file is data.
 """
 from __future__ import annotations
 
@@ -115,6 +119,28 @@ def problems(
     return found
 
 
+def risk_problem(payload: dict, payload_path: Path) -> str | None:
+    """The summary gate, or None when there is no rating or no context file.
+
+    A missing file, or a file that is not the context object, does not fail
+    the draft. A detected rating missing from the summary does.
+    """
+    context_path = payload_path.parent / "pr-context.json"
+    if not context_path.is_file():
+        return None
+    try:
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(context, dict):
+        return None
+    try:
+        comment_draft.assert_summary_states_risk(str(payload.get("body") or ""), context)
+    except comment_draft.RiskSummaryError as exc:
+        return str(exc)
+    return None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("payload")
@@ -131,10 +157,14 @@ def main() -> None:
     if not isinstance(payload, dict):
         raise SystemExit(f"{path}: payload must be a JSON object")
     found = problems(payload, pr_author=args.pr_author, reviewer=args.reviewer)
-    if found:
-        print(f"{path}: {len(found)} label problem(s)")
-        for line in found:
-            print(f"  {line}")
+    risk = risk_problem(payload, path)
+    if found or risk:
+        if found:
+            print(f"{path}: {len(found)} label problem(s)")
+            for line in found:
+                print(f"  {line}")
+        if risk:
+            print(f"{path}: {risk}")
         raise SystemExit(1)
     print(f"{path}: ok")
 

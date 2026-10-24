@@ -37,7 +37,9 @@ Steps, in order. Any failure stops before the POST.
 3. Every body must pass scripts/check-comment-links.py, and the payload must
    pass scripts/check-comment-labels.py. That check flags a summary that opens
    with a label, a labeled reply, and a new inline comment on someone
-   else's pull request that does not start with a label. A comment with
+   else's pull request that does not start with a label. When the ballot's
+   pr-context.json has an automated risk rating, the summary must state it.
+   A comment with
    in_reply_to is a reply and is not sent as a new line comment. A
    repro/<finding-id>.<ext> file in that finding's ballot directory is
    attached to the new inline comment, or to the review body when the
@@ -238,6 +240,22 @@ def finding_key(raw: str, default_ballot: str) -> tuple[str, str]:
     return (m.group(1) or default_ballot, m.group(2))
 
 
+def risk_context(home: Path) -> dict | None:
+    """The ballot's fetched pull-request context, or None when it is absent.
+
+    A missing or unreadable file does not fail posting. The summary gate
+    runs only when the file is a JSON object.
+    """
+    path = home / "pr-context.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def decode_blob(data: object) -> list[str] | None:
     """File lines from a GitHub contents response. None when it is not a utf-8 file."""
     if not isinstance(data, dict) or data.get("encoding") != "base64" or not isinstance(data.get("content"), str):
@@ -284,6 +302,7 @@ def main() -> int:
     if event not in EVENTS:
         die(f"event must be one of {', '.join(EVENTS)}")
     body = str(payload.get("body", ""))
+    summary_text = body
     comments = payload.get("comments", [])
     if not isinstance(comments, list):
         die("comments must be a list")
@@ -525,6 +544,12 @@ def main() -> int:
         {"body": body, "comments": comments}, pr_author=author, reviewer=reviewer
     ):
         errors.append(item)
+    context = risk_context(home)
+    if context is not None:
+        try:
+            comment_draft.assert_summary_states_risk(summary_text, context)
+        except comment_draft.RiskSummaryError as exc:
+            errors.append(str(exc))
     checked = [("body", body)]
     checked += [(f"comment {c['path']}:{c['line']}", c["body"]) for c in inline]
     checked += [(f"reply {r['in_reply_to']}", r["body"]) for r in replies]
