@@ -38,7 +38,10 @@ Steps, in order. Any failure stops before the POST.
    pass scripts/check-comment-labels.py. That check flags a summary that opens
    with a label, a labeled reply, and a new inline comment on someone
    else's pull request that does not start with a label. When the ballot's
-   pr-context.json has an automated risk rating, the summary must state it.
+   pr-context.json has an automated risk rating, the summary prose must state
+   it. A level only inside a code fence, a repro block, or the
+   moved-outside-the-diff block does not count. The same gate runs in
+   scripts/check-comment-labels.py.
    A comment with
    in_reply_to is a reply and is not sent as a new line comment. A
    repro/<finding-id>.<ext> file in that finding's ballot directory is
@@ -540,6 +543,9 @@ def main() -> int:
     # `body` here is the summary plus any moved-outside-the-diff block.
     # That block is appended, and it starts with **Outside this diff**, so
     # it cannot make the summary open with a comment label.
+    # The risk gate reads summary prose: fences, repro blocks, and that
+    # appended block do not state the rating. summary_text is the summary
+    # before those blocks are appended; the gate strips them either way.
     for item in label_check.problems(
         {"body": body, "comments": comments}, pr_author=author, reviewer=reviewer
     ):

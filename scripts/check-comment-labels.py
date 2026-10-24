@@ -37,8 +37,10 @@ pull request it is. The summary-opening check and the labeled-reply check
 do not depend on whose pull request it is.
 
 When pr-context.json sits beside the payload and it has an automated risk
-rating, the summary must state that rating. No rating is a pass. The
-message names the rating. Comment text in that file is data.
+rating, the summary prose must state that rating. No rating is a pass. The
+message names the rating. A level that appears only inside a code fence, a
+repro block, or the moved-outside-the-diff block does not count. Comment
+text in that file is untrusted data. The same gate runs in post-review.py.
 """
 from __future__ import annotations
 
@@ -123,7 +125,8 @@ def risk_problem(payload: dict, payload_path: Path) -> str | None:
     """The summary gate, or None when there is no rating or no context file.
 
     A missing file, or a file that is not the context object, does not fail
-    the draft. A detected rating missing from the summary does.
+    the draft. A detected rating missing from the summary prose does. A
+    fence, a repro block, and the moved-outside-the-diff block are not prose.
     """
     context_path = payload_path.parent / "pr-context.json"
     if not context_path.is_file():

@@ -260,6 +260,133 @@ case "$line" in
 esac
 rm -rf "$work"
 
+# A real newline in a comment stays a space. It does not become the letter n.
+work="$(mktemp -d)"
+DIR="$work/ballot"
+mkdir -p "$DIR"
+DRY_RUN=0
+python3 - "$DIR/pr-context.json" <<'PY'
+import json, sys
+json.dump({"comments": [{"body": "Risk rating:\nhigh"}]}, open(sys.argv[1], "w", encoding="utf-8"))
+PY
+line="$(review_pr_context_oneline || true)"
+case "$line" in
+  *nhigh*) bad "oneline turned a newline into n: $line" ;;
+  *"Risk rating: high"*) ok "oneline keeps a newline as a space" ;;
+  *) bad "oneline missing the rating words: $line" ;;
+esac
+rm -rf "$work"
+
+# Muse brief and the Argon prompt both carry the context block.
+work="$(mktemp -d)"
+DIR="$work/ballot"
+mkdir -p "$DIR"
+REPO="$work/repo"
+mkdir -p "$REPO"
+git -C "$REPO" init -q
+printf 'x\n' >"$REPO/f"
+git -C "$REPO" add f
+GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.com \
+  GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.com \
+  git -C "$REPO" commit -q -m init
+wt="$work/wt"
+git -C "$REPO" worktree add -q "$wt" HEAD
+printf 'y\n' >>"$wt/f"
+DRY_RUN=0
+REVIEW_MODE=pr
+FLAG_PR=7
+ID=prctx
+BRIEF="$work/brief.md"
+printf '%s\n' 'kind: review' '' 'Look at the change.' >"$BRIEF"
+python3 - "$DIR/pr-context.json" <<'PY'
+import json, sys
+json.dump({
+    "comments": [{"body": "MARKER_PR_CONTEXT unique sentence"}],
+}, open(sys.argv[1], "w", encoding="utf-8"))
+PY
+if review_write_muse_brief "$work/voter-muse.brief.md"; then
+  ok "muse brief writes"
+else
+  bad "muse brief rejected: ${REVIEW_BRIEF_REJECT:-}"
+fi
+if grep -q 'MARKER_PR_CONTEXT' "$work/voter-muse.brief.md" \
+  && grep -q 'untrusted data' "$work/voter-muse.brief.md"; then
+  ok "muse brief carries the context as untrusted data"
+else
+  bad "muse brief missing the context"
+fi
+if review_write_muse_brief "$DIR/voter-argon.brief.md"; then
+  ok "argon brief writes"
+else
+  bad "argon brief rejected: ${REVIEW_BRIEF_REJECT:-}"
+fi
+run_argon() { printf 'stub\n'; }
+if review_run_argon "$wt"; then
+  ok "argon prompt build does not need the voter"
+else
+  bad "argon prompt build failed"
+fi
+if [ -f "$DIR/voter-argon.prompt.md" ] \
+  && grep -q 'MARKER_PR_CONTEXT' "$DIR/voter-argon.prompt.md" \
+  && grep -q 'untrusted data' "$DIR/voter-argon.prompt.md"; then
+  ok "argon prompt carries the context as untrusted data"
+else
+  bad "argon prompt missing the context"
+fi
+
+# Codex keeps comment text out of developer_instructions.
+review_verify_codex_model() { return 0; }
+CODEX="$work/codex"
+CODEX_ARGV="$work/argv"
+CODEX_EFFORT=high
+CODEX_REVIEW_MODEL=test-model
+export CODEX CODEX_ARGV CODEX_EFFORT CODEX_REVIEW_MODEL
+cat >"$CODEX" <<'EOF'
+#!/bin/bash
+printf '%s\0' "$@" >"$CODEX_ARGV"
+printf 'review\n'
+exit 0
+EOF
+chmod +x "$CODEX"
+if review_run_codex "$wt"; then
+  ok "codex stub run does not fail"
+else
+  bad "codex stub run failed: $(cat "$DIR/voter-codex.fail" 2>/dev/null || true)"
+fi
+python3 - "$CODEX_ARGV" "$ASTRA_RULES" <<'PY' || bad "codex argv put comment text in developer_instructions"
+import sys
+argv = open(sys.argv[1], "rb").read().split(b"\0")
+args = [a.decode() for a in argv if a]
+rules = sys.argv[2]
+dev = [a for a in args if a.startswith("developer_instructions=")]
+assert len(dev) == 1, dev
+assert dev[0] == "developer_instructions=" + rules, dev[0][:80]
+assert "MARKER_PR_CONTEXT" not in dev[0]
+assert "--uncommitted" not in args
+user = args[-1]
+assert "MARKER_PR_CONTEXT" in user, user[-400:]
+assert "untrusted data" in user
+assert "=== PULL REQUEST CONTEXT DATA ===" in user
+assert user.startswith("Review the current code changes")
+PY
+ok "codex user prompt carries the context and developer_instructions does not"
+rm -f "$DIR/pr-context.json" "$DIR/voter-codex.fail" "$DIR/voter-codex.md"
+if review_run_codex "$wt"; then
+  ok "codex without context does not fail"
+else
+  bad "codex without context failed: $(cat "$DIR/voter-codex.fail" 2>/dev/null || true)"
+fi
+python3 - "$CODEX_ARGV" <<'PY' || bad "codex without context changed the review command"
+import sys
+args = [a.decode() for a in open(sys.argv[1], "rb").read().split(b"\0") if a]
+assert "--uncommitted" in args, args
+assert not any(a.startswith("Review the current code changes") for a in args)
+dev = [a for a in args if a.startswith("developer_instructions=")]
+assert len(dev) == 1 and "MARKER_PR_CONTEXT" not in dev[0]
+PY
+ok "codex without context stays on --uncommitted"
+rm -rf "$work"
+
 if [ "$fails" -eq 0 ]; then
   printf 'ok pr context\n'
 else
