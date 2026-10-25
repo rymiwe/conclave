@@ -357,4 +357,91 @@ grep -q 're-seat: argon failed (nonzero); replaced with grok' "$DIR/reseat.md" \
 [ "$VOTERS" = "grok,codex" ] || [ "$VOTERS" = "codex,grok" ] || fail "m2: voters=$VOTERS"
 printf 'ok an empty headless agy answer re-seats argon and records nonzero\n'
 
+write_design_ballot() {
+  cat >"$DIR/voter-$1.md" <<'EOF'
+## Findings
+ok
+## Approach
+ok
+## Would not do
+ok
+## Uncertainties
+ok
+EOF
+  : >"$DIR/voter-$1.ok"
+}
+
+# Design and mixed re-seat. seat-usage asks, and the claude stub exits 1.
+# The failed leg stays; the function does not return before the route.
+cat >"$work/bin/claude" <<'EOF'
+#!/bin/sh
+echo "claude: exit 1" >&2
+exit 1
+EOF
+chmod +x "$work/bin/claude"
+
+reset_case design-ask
+KIND=design
+rm -f "$DIR/voter-codex.md" "$DIR/voter-codex.model.txt" "$DIR/voter-claude.md" "$DIR/voter-claude.ok"
+write_design_ballot codex
+"$work/bin/claude" >/dev/null 2>"$DIR/voter-claude.err" || true
+cat >"$SEAT_JSON" <<'EOF'
+{"mode":"ask","reason":"need a replacement: ask Ryan"}
+EOF
+review_reseat_failed
+grep -q 'could not replace claude (nonzero)' "$DIR/reseat.md" \
+  || fail "design-ask: $(cat "$DIR/reseat.md" 2>/dev/null)"
+grep -q -- '--kind design' "$SEAT_LOG" || fail "design-ask kind: $(cat "$SEAT_LOG")"
+grep -q 'claude: exit 1' "$DIR/voter-claude.err" || fail "design-ask: claude stub did not exit 1"
+[ "$VOTERS" = "claude,codex" ] || fail "design-ask: voters=$VOTERS"
+printf 'ok design re-seat runs when seat-usage asks and claude exits 1\n'
+
+reset_case mixed-ask
+KIND=mixed
+rm -f "$DIR/voter-codex.md" "$DIR/voter-codex.model.txt" "$DIR/voter-claude.md" "$DIR/voter-claude.ok"
+write_design_ballot codex
+"$work/bin/claude" >/dev/null 2>"$DIR/voter-claude.err" || true
+cat >"$SEAT_JSON" <<'EOF'
+{"mode":"ask","reason":"need a replacement: ask Ryan"}
+EOF
+review_reseat_failed
+grep -q 'could not replace claude (nonzero)' "$DIR/reseat.md" \
+  || fail "mixed-ask: $(cat "$DIR/reseat.md" 2>/dev/null)"
+grep -q -- '--kind mixed' "$SEAT_LOG" || fail "mixed-ask kind: $(cat "$SEAT_LOG")"
+[ "$VOTERS" = "claude,codex" ] || fail "mixed-ask: voters=$VOTERS"
+printf 'ok mixed re-seat runs when seat-usage asks and claude exits 1\n'
+
+# A design replacement is the packet runner, picked by lineup.py --replacement.
+reset_case design-replace
+KIND=design
+rm -f "$DIR/voter-codex.md" "$DIR/voter-codex.model.txt" "$DIR/voter-claude.md" "$DIR/voter-claude.ok"
+write_design_ballot codex
+echo "claude: exit 1" >"$DIR/voter-claude.fail"
+cat >"$SEAT_JSON" <<'EOF'
+{"mode":"default","why":"ranked","lineup":{"voters":[
+  {"family":"grok","seat":"grok","vendor":"xai","model":"grok"}
+]}}
+EOF
+run_grok() {
+  cat >"$DIR/voter-grok.md" <<'EOF'
+## Findings
+g
+## Approach
+g
+## Would not do
+g
+## Uncertainties
+g
+EOF
+  : >"$DIR/voter-grok.ok"
+  return 0
+}
+review_reseat_failed
+grep -q 're-seat: claude failed (nonzero); replaced with grok' "$DIR/reseat.md" \
+  || fail "design-replace: $(cat "$DIR/reseat.md" 2>/dev/null)"
+grep -q 're-seat: grok produced a report' "$DIR/reseat.md" || fail "design-replace: no report"
+[ "$VOTERS" = "codex,grok" ] || fail "design-replace: voters=$VOTERS"
+voter_ballot_ok grok || fail "design-replace: grok ballot missing"
+printf 'ok design re-seat launches the packet replacement\n'
+
 printf 'ok re-seat\n'

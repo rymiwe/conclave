@@ -2444,7 +2444,16 @@ review_report_file() {
 review_report_present() {
   # $1 = voter. A .fail file, or a model check that FAILed, is not a report.
   # Leftover output (session-limit JSON, JSON with no .result) does not count.
+  # Design and mixed use the packet ballot (.ok and the schema headings).
   local v="$1" f model
+  case "${KIND:-}" in
+    design|mixed)
+      if voter_ballot_ok "$v"; then
+        return 0
+      fi
+      return 1
+      ;;
+  esac
   if [ -f "$DIR/voter-$v.fail" ]; then
     return 1
   fi
@@ -2941,6 +2950,61 @@ review_prepare_replacement_brief() {
   return 0
 }
 
+review_launch_packet() {
+  # Design and mixed replacement. Same packet-first runners as the ballot.
+  local v="$1" reason
+  case "$v" in
+    claude)
+      if [ "${CLAUDE_SKU:-}" = cursor-fable ]; then
+        if ! command -v "$(conclave_env CURSOR_AGENT cursor-agent)" >/dev/null 2>&1; then
+          log_err "claude: cursor-agent not found"
+          return 1
+        fi
+      elif ! command -v claude >/dev/null 2>&1; then
+        log_err "claude: CLI not found (command -v claude failed)"
+        return 1
+      fi
+      run_claude
+      ;;
+    codex)
+      if [ ! -x "${CODEX:-}" ]; then
+        log_err "codex: resolver binary is not executable: ${CODEX:-}"
+        return 1
+      fi
+      run_codex
+      ;;
+    grok)
+      if ! command -v grok >/dev/null 2>&1; then
+        log_err "grok: CLI not found (command -v grok failed)"
+        return 1
+      fi
+      run_grok
+      ;;
+    muse)
+      if ! command -v muse >/dev/null 2>&1; then
+        log_err "muse: CLI not found (command -v muse failed)"
+        return 1
+      fi
+      run_muse_voter
+      ;;
+    argon)
+      if [ "${ARGON_PREFLIGHT_OK:-0}" != 1 ]; then
+        reason=""
+        if ! reason="$(argon_preflight)"; then
+          argon_skip "$reason"
+          return 1
+        fi
+        ARGON_PREFLIGHT_OK=1
+      fi
+      run_argon
+      ;;
+    *)
+      log_err "unknown voter '$v'"
+      return 1
+      ;;
+  esac
+}
+
 review_launch_one() {
   # One voter, in the foreground. $1 voter, $2 worktree.
   local v="$1" wt="$2"
@@ -2990,10 +3054,9 @@ review_route_json() {
   local bin raw seat
   bin="$(conclave_env SEAT_USAGE "$HOME/.local/bin/seat-usage")"
   [ -n "$bin" ] && [ -x "$bin" ] || return 1
-  local -a args=(--route lineup --json --kind review)
+  local -a args=(--route lineup --json --kind "${KIND:-review}")
   # Same author and builder-vendor rule as load_lineup_ballot.
-  # Callers run only from a kind review (review_reseat_failed returns
-  # otherwise), so KIND is review and --builder-vendor is not dropped.
+  # --builder-vendor is added only when KIND is review.
   review_append_author_args args
   if [ -n "${ID:-}" ]; then
     args+=(--ballot "$ID")
@@ -3109,6 +3172,21 @@ EOF
   if [ "$sku" = cursor-fable ]; then
     CLAUDE_SKU="cursor-fable"
   fi
+  if [ "${KIND:-}" = design ] || [ "${KIND:-}" = mixed ]; then
+    review_swap_voter "$failed" "$name"
+    review_note_reseat "re-seat: $failed failed ($reason); replaced with $name"
+    review_launch_packet "$name" || true
+    if review_report_present "$name"; then
+      review_note_reseat "re-seat: $name produced a report"
+      return 0
+    fi
+    local again
+    again="$(review_classify_failure "$name")"
+    review_record_seat_failure "$(review_failure_seat "$name")" "$again"
+    RESEAT_FAILED="${RESEAT_FAILED:+$RESEAT_FAILED,}$name"
+    review_note_reseat "re-seat: $name also failed ($again); not replacing again"
+    return 1
+  fi
   if ! review_prepare_replacement_brief "$name"; then
     review_note_reseat "re-seat: could not replace $failed ($reason): brief for $name was rejected"
     return 1
@@ -3141,19 +3219,27 @@ EOF
 
 review_reseat_failed() {
   # Each original voter that failed is replaced at most once. The replacement
-  # is not itself replaced. Kind review only; an explicit --voters list stays.
-  [ "${KIND:-}" = review ] || return 0
+  # is not itself replaced. Review, design, and mixed. An explicit --voters
+  # list stays. Audit does not re-seat.
+  case "${KIND:-}" in
+    review|design|mixed) ;;
+    *) return 0 ;;
+  esac
   [ "${VOTERS_EXPLICIT:-0}" -eq 0 ] || return 0
   local v reason
   local -a pending=()
   RESEAT_FAILED=""
   # Every seated voter, including an Argon that wrote voter-argon.skipped.
   # review_report_voters omits that Argon because a skipped optional leg is
-  # not required for the count. On a review it was seated, so it is a failure.
+  # not required for the count. On a review it was seated, so it is a failure
+  # unless the skip is the policy marker. On design and mixed a skip is
+  # fail-soft and is not re-seated.
   while IFS= read -r v; do
     [ -n "$v" ] || continue
-    if [ "$v" = argon ] && review_argon_policy_skip; then
-      continue
+    if [ "$v" = argon ] && [ -n "${DIR:-}" ] && [ -s "$DIR/voter-argon.skipped" ]; then
+      if [ "${KIND:-}" != review ] || review_argon_policy_skip; then
+        continue
+      fi
     fi
     review_report_present "$v" && continue
     pending+=("$v")

@@ -345,6 +345,7 @@ def format_judgment_header(
     coverage_opus_model is included only when the Opus coverage leg ran.
     muse_model (and muse_seconds on review and audit) only when muse voted.
     argon_model when Argon voted. argon_skipped when that leg was named and skipped.
+    missing_voters when a named voter had no valid ballot and the run still judged.
     Those keys do not replace voter_a_model, voter_b_model, or voter_c_model.
     voter_b_reasoning_tokens and voter_b_effort always follow voter_b_model.
     Review and audit put each leg's wall seconds directly after its model line:
@@ -395,6 +396,9 @@ def format_judgment_header(
         lines.append(f"argon_model: {meta['argon_model']}")
     if meta.get("argon_skipped"):
         lines.append(f"argon_skipped: {meta['argon_skipped']}")
+    missing = meta.get("missing_voters")
+    if isinstance(missing, str) and missing.strip():
+        lines.append(f"missing_voters: {missing.strip()}")
     lines.extend(
         [
             f"builder_model: {meta.get('builder_model') or 'unknown'}",
