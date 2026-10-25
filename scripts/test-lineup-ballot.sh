@@ -639,5 +639,220 @@ REVIEW_PR_FACT_NUM=""
 REVIEW_PR_FACT_SKIP=""
 export PATH="$old_path"
 
+# Stubbed design run: seat-usage asks, claude exits 1, codex and argon vote,
+# and a local Jev stub writes judgment.md. Then --judge on that ballot, whose
+# voters.txt still names the missing voter.
+JEV_PID=""
+GATE_DIR=""
+trap 'if [ -n "${JEV_PID:-}" ]; then kill "$JEV_PID" 2>/dev/null || true; fi; rm -rf "$work" ${DIR:+"$DIR"} ${GATE_DIR:+"$GATE_DIR"}' EXIT
+
+mkdir -p "$work/gate/bin" "$work/gate/home/.codex"
+printf '%s\n' '[{"role":"lineup","mode":"ask","reason":"stub asked","lineup":null}]' >"$work/gate/ask.json"
+: >"$work/gate/seat.log"
+printf '%s\n' '{"models": [{"slug": "gpt-test-astra", "visibility": "list", "priority": 1}]}' \
+  >"$work/gate/home/.codex/models_cache.json"
+
+cat >"$work/gate/bin/seat-usage" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$SEAT_LOG"
+cat "$SEAT_JSON"
+exit 0
+EOF
+cat >"$work/gate/bin/claude" <<'EOF'
+#!/bin/sh
+cat >/dev/null
+touch "$CLAUDE_RAN"
+echo "claude: exit 1" >&2
+exit 1
+EOF
+cat >"$work/gate/bin/codex" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  echo "codex-cli 0.200.0"
+  exit 0
+fi
+out=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-o" ]; then
+    out="$a"
+  fi
+  prev="$a"
+done
+if [ -n "$out" ]; then
+  cat >"$out" <<'BALLOT'
+## Findings
+codex finds the gate holds
+## Approach
+keep two vendors
+## Would not do
+stop the ballot
+## Uncertainties
+none
+BALLOT
+fi
+exit 0
+EOF
+cat >"$work/gate/bin/agy" <<'EOF'
+#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = "/usage" ]; then
+    exit 0
+  fi
+done
+cat >/dev/null
+printf '%s\n' '{"event":"init","init":{"agent":"conclave-voter"}}'
+printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"## Findings\nargon finds the gate holds\n## Approach\nkeep two vendors\n## Would not do\nstop the ballot\n## Uncertainties\nnone\n"}}'
+exit 0
+EOF
+cat >"$work/gate/bin/grok" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "models" ]; then
+  echo "Default model: grok-test-1"
+  exit 0
+fi
+exit 0
+EOF
+cat >"$work/gate/bin/cursor-agent" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+cat >"$work/gate/bin/jev-op" <<'EOF'
+#!/bin/sh
+printf '%s' 'stub-not-a-key'
+EOF
+cat >"$work/gate/jev-server.py" <<'EOF'
+#!/usr/bin/env python3
+import json, os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+count_path = Path(os.environ["JEV_COUNT"])
+port_path = Path(os.environ["JEV_PORT_FILE"])
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n:
+            self.rfile.read(n)
+        body = json.dumps({
+            "model": "stub-jev",
+            "answers": {
+                "decision": {"choice": "no_automatic_decision", "confidence": 0.9},
+                "same_approach_shape": {"noul": 0.2},
+                "disagreements_only_minor": {"noul": 0.2},
+            },
+        }).encode()
+        prev = 0
+        if count_path.is_file():
+            prev = int(count_path.read_text() or "0")
+        count_path.write_text(str(prev + 1) + "\n")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        return
+
+httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+port_path.write_text(str(httpd.server_address[1]) + "\n")
+httpd.serve_forever()
+EOF
+chmod +x "$work/gate/bin/"* "$work/gate/jev-server.py"
+: >"$work/gate/jev.count"
+JEV_COUNT="$work/gate/jev.count"
+JEV_PORT_FILE="$work/gate/jev.port"
+export JEV_COUNT JEV_PORT_FILE
+python3 "$work/gate/jev-server.py" >/dev/null 2>&1 &
+JEV_PID=$!
+i=0
+while [ "$i" -lt 50 ]; do
+  [ -s "$work/gate/jev.port" ] && break
+  i=$((i + 1))
+  sleep 0.05
+done
+check "jev stub is listening" [ -s "$work/gate/jev.port" ]
+GATE_ID="twovendor$$"
+GATE_DIR="$ROOT/tmp/council/$GATE_ID"
+mkdir -p "$GATE_DIR"
+cat >"$GATE_DIR/brief.md" <<'EOF'
+kind: design
+difficulty: low
+
+# Goal
+Keep a two-vendor ballot.
+
+## Decision needed
+Proceed when two vendors voted.
+EOF
+
+run_gate() {
+  env -u TYPESAFE_API_KEY -u JEV_API_KEY -u COUNCIL_JEV_OP -u COUNCIL_JEV_OP_REF \
+    -u COUNCIL_SEAT_USAGE -u COUNCIL_CODEX_BIN -u COUNCIL_SKIP_UPDATE_CHECK \
+    -u CONCLAVE_VOTER -u COUNCIL_VOTER \
+    HOME="$work/gate/home" \
+    PATH="$work/gate/bin:$PATH" \
+    CONCLAVE_ARGON=1 \
+    CONCLAVE_GITHUB_HTTPS=0 \
+    CONCLAVE_SKIP_UPDATE_CHECK=1 \
+    CONCLAVE_CODEX_BIN="$work/gate/bin/codex" \
+    CONCLAVE_SEAT_USAGE="$work/gate/bin/seat-usage" \
+    CONCLAVE_AGY="$work/gate/bin/agy" \
+    CONCLAVE_MUSE_CATALOG="$work/muse-catalog.json" \
+    CONCLAVE_JEV_OP="$work/gate/bin/jev-op" \
+    CONCLAVE_JEV_OP_REF="op://test/stub" \
+    TYPESAFE_BASE_URL="http://127.0.0.1:$(tr -d '[:space:]' <"$work/gate/jev.port")" \
+    SEAT_LOG="$work/gate/seat.log" \
+    SEAT_JSON="$work/gate/ask.json" \
+    CLAUDE_RAN="$work/gate/claude.ran" \
+    SEAT_USAGE_RUNS="$work/gate/runs.jsonl" \
+    bash "$CONCLAVE" "$@"
+}
+
+rm -f "$work/gate/claude.ran"
+gate_ec=0
+run_gate "$GATE_ID" --repo "$work/target" >"$work/gate/out" 2>"$work/gate/err" || gate_ec=$?
+if [ "$gate_ec" -ne 0 ] || [ ! -s "$GATE_DIR/judgment.md" ]; then
+  printf 'gate out:\n' >&2
+  cat "$work/gate/out" >&2 || true
+  printf 'gate err:\n' >&2
+  cat "$work/gate/err" >&2 || true
+  printf 'errors.md:\n' >&2
+  cat "$GATE_DIR/errors.md" >&2 || true
+  printf 'jev log:\n' >&2
+  cat "$GATE_DIR/jev-judge.log" >&2 || true
+fi
+check "stubbed run exits 0" [ "$gate_ec" -eq 0 ]
+check "stubbed claude exited 1" [ -f "$work/gate/claude.ran" ]
+check "seat-usage ask was the route" grep -q -- '--route lineup' "$work/gate/seat.log"
+check "stubbed run writes judgment.md" [ -s "$GATE_DIR/judgment.md" ]
+check "errors.md names the missing voter" grep -q 'named voter missing: claude' "$GATE_DIR/errors.md"
+check "judgment header names the missing voter" grep -qx 'missing_voters: claude' "$GATE_DIR/judgment.md"
+check "voters.txt still names claude" grep -qx 'claude,codex,argon' "$GATE_DIR/voters.txt"
+check "stubbed run called Jev" [ "$(tr -d '[:space:]' <"$work/gate/jev.count")" -ge 1 ]
+jev_after_run="$(tr -d '[:space:]' <"$work/gate/jev.count")"
+rm -f "$GATE_DIR/judgment.md" "$GATE_DIR/options.md"
+gate_ec=0
+run_gate "$GATE_ID" --judge >"$work/gate/judge.out" 2>"$work/gate/judge.err" || gate_ec=$?
+if [ "$gate_ec" -ne 0 ] || [ ! -s "$GATE_DIR/judgment.md" ]; then
+  printf 'judge out:\n' >&2
+  cat "$work/gate/judge.out" >&2 || true
+  printf 'judge err:\n' >&2
+  cat "$work/gate/judge.err" >&2 || true
+  printf 'errors.md:\n' >&2
+  cat "$GATE_DIR/errors.md" >&2 || true
+  printf 'jev log:\n' >&2
+  cat "$GATE_DIR/jev-judge.log" >&2 || true
+fi
+check "--judge exits 0 with a missing named voter" [ "$gate_ec" -eq 0 ]
+check "--judge writes judgment.md" [ -s "$GATE_DIR/judgment.md" ]
+check "--judge header names the missing voter" grep -qx 'missing_voters: claude' "$GATE_DIR/judgment.md"
+check "--judge called Jev" [ "$(tr -d '[:space:]' <"$work/gate/jev.count")" -gt "$jev_after_run" ]
+kill "$JEV_PID" 2>/dev/null || true
+JEV_PID=""
+rm -rf "$GATE_DIR"
+GATE_DIR=""
+
 printf '%s passed, %s failed\n' "$passed" "$failed"
 [ "$failed" -eq 0 ]

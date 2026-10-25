@@ -521,6 +521,9 @@ repo trusted in agy. The leg is packet-first: cwd is the out-of-repo packet,
 a failed "agy -p /usage", an Argon row at 0% remaining, or a bad answer
 writes voter-argon.skipped and does not fail the run. The remaining voters
 still need two valid opinions. --judge does not fail because the leg was skipped.
+A named voter with no valid ballot does not stop design or mixed when two
+opinions from two vendors are already in hand. That name is written to
+errors.md and the judgment header. --judge uses the same rule.
 --attach and an attach: header copy regular files
 from the target repo or this clone into that packet, and put their contents
 in PROMPT.md under Attached files. A relative path is resolved against the
@@ -753,6 +756,80 @@ named_voters_missing() {
     missing="${missing:+$missing }$v"
   done
   printf '%s' "$missing"
+}
+
+opinion_vendor_count() {
+  # Distinct vendors among named voters that already have a valid ballot.
+  # A skipped Argon is not a ballot and is not a vendor.
+  local v seen=" " n=0 vendor
+  for v in claude opus codex grok muse argon; do
+    voter_is_named "$v" || continue
+    if [ "$v" = argon ] && [ -n "${DIR:-}" ] && [ -s "$DIR/voter-argon.skipped" ]; then
+      continue
+    fi
+    voter_ballot_ok "$v" || continue
+    vendor="$(review_voter_vendor "$v")"
+    [ -n "$vendor" ] || continue
+    case "$seen" in
+      *" $vendor "*) ;;
+      *) seen="$seen$vendor "; n=$((n + 1)) ;;
+    esac
+  done
+  printf '%s' "$n"
+}
+
+ballot_quorum_ok() {
+  # 0 when at least two valid opinions come from two vendors.
+  # A missing named voter is logged and does not by itself refuse the ballot.
+  local vendors
+  vendors="$(opinion_vendor_count)"
+  if [ "${OPINION_N:-0}" -ge 2 ] && [ "$vendors" -ge 2 ]; then
+    if [ -n "${MISSING_VOTERS:-}" ]; then
+      log_err "named voter missing: ${MISSING_VOTERS}; continuing with ${OPINION_N} opinions from ${vendors} vendors"
+    fi
+    return 0
+  fi
+  if [ -n "${MISSING_VOTERS:-}" ]; then
+    printf 'Named voter with no valid ballot: %s. See tmp/council/%s/errors.md\n' \
+      "$MISSING_VOTERS" "$ID" >&2
+  fi
+  if [ "${OPINION_N:-0}" -lt 2 ]; then
+    printf 'Need at least 2 valid opinions; got %s. See tmp/council/%s/errors.md\n' \
+      "${OPINION_N:-0}" "$ID" >&2
+    if [ -z "${ERRORS_FILE:-}" ] || [ ! -s "$ERRORS_FILE" ]; then
+      log_err "invalid ballot count: ${OPINION_N:-0}"
+    fi
+  else
+    log_err "fewer than 2 vendors with a valid ballot (${OPINION_N} opinions)"
+    printf 'Need at least 2 vendors with a valid opinion; got %s opinion(s) from %s vendor(s). See tmp/council/%s/errors.md\n' \
+      "${OPINION_N:-0}" "$vendors" "$ID" >&2
+  fi
+  return 1
+}
+
+record_missing_voters_header() {
+  # Merge the missing-voter line into header.json. --judge does not rewrite
+  # the rest of the header. An empty list leaves the file alone.
+  [ -n "${MISSING_VOTERS:-}" ] || return 0
+  [ -n "${DIR:-}" ] || return 0
+  HDR_MISSING_VOTERS="$MISSING_VOTERS"
+  HDR_DEST="$DIR/header.json"
+  export HDR_MISSING_VOTERS HDR_DEST
+  python3 - <<'PY'
+import json, os
+from pathlib import Path
+p = Path(os.environ["HDR_DEST"])
+meta = {}
+if p.is_file():
+    try:
+        loaded = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        loaded = {}
+    if isinstance(loaded, dict):
+        meta = loaded
+meta["missing_voters"] = os.environ["HDR_MISSING_VOTERS"]
+p.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+PY
 }
 
 build_review_snapshot() {
@@ -2767,9 +2844,10 @@ council_write_header_json() {
   HDR_VA_SECONDS="${HDR_VA_SECONDS:-}" HDR_VB_SECONDS="${HDR_VB_SECONDS:-}"
   HDR_VC_SECONDS="${HDR_VC_SECONDS:-}" HDR_VOPUS_SECONDS="${HDR_VOPUS_SECONDS:-}"
   export HDR_VA_SECONDS HDR_VB_SECONDS HDR_VC_SECONDS HDR_VOPUS_SECONDS
+  HDR_MISSING_VOTERS="${MISSING_VOTERS:-}"
   export HDR_KIND HDR_BRANCH HDR_PR HDR_VA HDR_VB HDR_BUILDER HDR_HAS_C HDR_VC
   export HDR_HAS_OPUS HDR_VOPUS HDR_VB_REASONING HDR_VB_EFFORT HDR_STACK
-  export HDR_HEAD_OID
+  export HDR_HEAD_OID HDR_MISSING_VOTERS
   HDR_DEST="$DIR/header.json"
   HDR_VOTERS="${VOTERS:-}" HDR_DIR="$DIR"
   export HDR_DEST HDR_VOTERS HDR_DIR
@@ -2844,6 +2922,9 @@ for key, env in (
     val = os.environ.get(env, "")
     if val:
         meta[key] = val
+missing = (os.environ.get("HDR_MISSING_VOTERS") or "").strip()
+if missing:
+    meta["missing_voters"] = missing
 Path(os.environ["HDR_DEST"]).write_text(
     json.dumps(meta, indent=2) + "\n", encoding="utf-8"
 )
@@ -3457,12 +3538,11 @@ if [ "$JUDGE_MODE" -eq 1 ]; then
     die "--judge is for design and mixed; kind: audit uses --findings or --verdicts"
   fi
   judge_load_voters
-  missing="$(named_voters_missing)"
-  if [ -n "$missing" ]; then
-    printf 'Named voter with no valid ballot: %s. See tmp/council/%s/errors.md\n' \
-      "$missing" "$ID" >&2
+  publish_voter_opinions
+  if ! ballot_quorum_ok; then
     exit 1
   fi
+  record_missing_voters_header
   rm -f "$DIR/options.md"
   if run_jev_judge; then
     printf 'Jev wrote tmp/council/%s/judgment.md\n' "$ID"
@@ -3641,17 +3721,14 @@ for pid in $PIDS; do
 done
 muse_load_status
 
+# Design and mixed: replace a failed leg once. Ask, or an explicit --voters
+# list, leaves that leg missing. Two opinions from two vendors still judge.
+review_reseat_failed
+save_ballot_voters
+
 publish_voter_opinions
 
-if [ -n "$MISSING_VOTERS" ]; then
-  printf 'Named voter with no valid ballot: %s. See tmp/council/%s/errors.md\n' \
-    "$MISSING_VOTERS" "$ID" >&2
-  exit 1
-fi
-if [ "$OPINION_N" -lt 2 ]; then
-  printf 'Need at least 2 valid opinions; got %s. See tmp/council/%s/errors.md\n' \
-    "$OPINION_N" "$ID" >&2
-  [ -s "$ERRORS_FILE" ] || log_err "invalid ballot count: $OPINION_N"
+if ! ballot_quorum_ok; then
   exit 1
 fi
 
