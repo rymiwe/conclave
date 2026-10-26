@@ -20,30 +20,16 @@ mkdir -p "$WORK/bin" "$WORK/empty" "$WORK/out" "$WORK/repo/config"
 cat >"$WORK/bin/pg_isready" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >>"$FAKE_PG_LOG"
-if [ -f "$FAKE_STARTED" ] && [ "${FAKE_PG_AFTER_START:-up}" = up ]; then
-  exit 0
-fi
 exit "${FAKE_PG_EXIT:-0}"
 SH
-# The fake docker logs each call. FAKE_DOCKER_STATUS is the container state;
-# empty means no such container. `start` marks the container started.
+# The fake docker records its argv. Conclave must never start, stop, or
+# restart a container, so a lifecycle call here is a failure.
 cat >"$WORK/bin/docker" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"
 case "$1" in
-  info) exit "${FAKE_DOCKER_INFO_EXIT:-0}" ;;
-  inspect)
-    [ -n "${FAKE_DOCKER_STATUS:-}" ] || exit 1
-    printf '%s\n' "$FAKE_DOCKER_STATUS"
-    ;;
-  start)
-    # FAKE_START_DELAY: Postgres answers only some seconds after the start.
-    if [ -n "${FAKE_START_DELAY:-}" ]; then
-      (sleep "$FAKE_START_DELAY"; : >"$FAKE_STARTED") >/dev/null 2>&1 &
-    else
-      : >"$FAKE_STARTED"
-    fi
-    ;;
+  info) exit 0 ;;
+  inspect) printf '%s\n' "${FAKE_DOCKER_STATUS:-exited}" ;;
   *) exit 99 ;;
 esac
 SH
@@ -79,14 +65,12 @@ DIR="$WORK/out"
 ERRORS_FILE="$DIR/errors.md"
 export FAKE_PG_LOG="$WORK/pg.log"
 export FAKE_DOCKER_LOG="$WORK/docker.log"
-export FAKE_STARTED="$WORK/started"
 unset DB_HOST DB_PORT
 
 reset() {
   : >"$ERRORS_FILE"
   : >"$FAKE_PG_LOG"
   : >"$FAKE_DOCKER_LOG"
-  rm -f "$FAKE_STARTED"
 }
 
 # Reachable: no WARN, no note, pg_isready asked the ERB defaults.
@@ -129,11 +113,16 @@ PATH="$WORK/empty" review_check_db
 [ ! -s "$ERRORS_FILE" ] || fail "no pg_isready note"
 
 # The chair. Each case runs in a subshell because die exits.
-# chair STATUS PG_AFTER_START -> stdout "rc=N", stderr to $WORK/chair.err
+# chair STATUS -> stdout "rc=N", stderr to $WORK/chair.err
 chair() {
-  ( FAKE_DOCKER_STATUS="$1" FAKE_PG_AFTER_START="$2" FAKE_PG_EXIT=2 \
-    CONCLAVE_DB_WAIT=2 PATH="$WORK/bin:$PATH" review_chair_db ) 2>"$WORK/chair.err"
+  ( FAKE_DOCKER_STATUS="$1" FAKE_PG_EXIT=2 \
+    PATH="$WORK/bin:$PATH" review_chair_db ) 2>"$WORK/chair.err"
   printf 'rc=%s\n' "$?"
+}
+
+no_lifecycle() {
+  ! grep -qE '(^|[[:space:]])(start|stop|restart)([[:space:]]|$)' "$FAKE_DOCKER_LOG" \
+    || fail "$1 called docker start/stop/restart: $(cat "$FAKE_DOCKER_LOG")"
 }
 
 # Database answers: the chair touches nothing.
@@ -142,57 +131,38 @@ rc="$( ( FAKE_PG_EXIT=0 PATH="$WORK/bin:$PATH" review_chair_db ); printf 'rc=%s'
 [ "$rc" = rc=0 ] || fail "up: $rc"
 [ ! -s "$FAKE_DOCKER_LOG" ] || fail "up called docker: $(cat "$FAKE_DOCKER_LOG")"
 
-# Stopped container: docker start on the setup.yml name, then the run goes on.
-for st in exited created; do
+# Database down, whatever the container state: refuse, name the container and
+# host:port, exit non-zero, no leg. Docker is never asked to start anything.
+for st in exited created running "" paused; do
   reset
-  rc="$(set +e; chair "$st" up)"
-  [ "$rc" = rc=0 ] || fail "$st: $rc $(cat "$WORK/chair.err")"
-  grep -qx 'start db-test' "$FAKE_DOCKER_LOG" || fail "$st start: $(cat "$FAKE_DOCKER_LOG")"
-  grep -q '^note: chair started container db-test' "$ERRORS_FILE" \
-    || fail "$st note: $(cat "$ERRORS_FILE")"
-done
-
-# Postgres answers a second after the start: the chair waits for it.
-reset
-rc="$(set +e; FAKE_START_DELAY=1 chair exited up)"
-[ "$rc" = rc=0 ] || fail "slow start: $rc $(cat "$WORK/chair.err")"
-
-# Started but still silent after the wait: die, no leg.
-reset
-rc="$(set +e; chair exited down)"
-[ "$rc" = rc=1 ] || fail "still down: $rc"
-grep -q 'started db-test and waited 2s' "$WORK/chair.err" || fail "still down msg: $(cat "$WORK/chair.err")"
-
-# Running, missing, or paused: never start, restart, or create. Die.
-for st in running "" paused; do
-  reset
-  rc="$(set +e; chair "$st" up)"
+  rc="$(set +e; chair "$st")"
   [ "$rc" = rc=1 ] || fail "status '$st': $rc"
-  ! grep -qE '^(start|restart|run|create)' "$FAKE_DOCKER_LOG" \
-    || fail "status '$st' mutated: $(cat "$FAKE_DOCKER_LOG")"
-  grep -q 'Voters not launched' "$WORK/chair.err" || fail "status '$st' msg: $(cat "$WORK/chair.err")"
+  no_lifecycle "status '$st'"
+  for want in 'Container db-test' 'localhost:5433' 'Conclave does not start containers' \
+    'Start it yourself' 'Voters not launched'; do
+    grep -qF "$want" "$WORK/chair.err" || fail "status '$st' msg lacks '$want': $(cat "$WORK/chair.err")"
+  done
 done
 
-# Docker daemon down: say so, do not inspect or start.
-reset
-rc="$( ( FAKE_DOCKER_INFO_EXIT=1 FAKE_DOCKER_STATUS=exited FAKE_PG_EXIT=2 \
-  PATH="$WORK/bin:$PATH" review_chair_db ) 2>"$WORK/chair.err"; printf 'rc=%s' "$?")"
-[ "$rc" = rc=1 ] || fail "daemon down: $rc"
-grep -q 'docker daemon does not answer' "$WORK/chair.err" || fail "daemon msg: $(cat "$WORK/chair.err")"
-[ "$(cat "$FAKE_DOCKER_LOG")" = info ] || fail "daemon down calls: $(cat "$FAKE_DOCKER_LOG")"
-
-# No setup.yml: die without calling docker.
+# No setup.yml: refuse with no container name, without calling docker.
 reset
 mv "$WORK/repo/config/setup.yml" "$WORK/setup.yml"
-rc="$(set +e; chair exited up)"
+rc="$(set +e; chair exited)"
 mv "$WORK/setup.yml" "$WORK/repo/config/setup.yml"
 [ "$rc" = rc=1 ] || fail "no setup.yml: $rc"
 grep -q 'No container name in config/setup.yml' "$WORK/chair.err" || fail "no setup msg: $(cat "$WORK/chair.err")"
+grep -qF 'Conclave does not start containers' "$WORK/chair.err" || fail "no setup msg: $(cat "$WORK/chair.err")"
 [ ! -s "$FAKE_DOCKER_LOG" ] || fail "no setup.yml called docker"
 
 # The reviewer brief carries the rule on both review and audit kinds.
 rule='Never start, stop, restart, or reconfigure a database server, container, or other shared service. If a database is unreachable, say so in the report and review without executing.'
 review_claude_brief_instructions | grep -qxF "$rule" || fail "review brief lacks the rule"
 review_claude_brief_instructions audit | grep -qxF "$rule" || fail "audit brief lacks the rule"
+
+# No launcher script may start, stop, or restart a container. Every non-test
+# file under scripts/ is checked, comments included.
+hits="$(find "$ROOT/scripts" -type f ! -name 'test-*' -print0 \
+  | xargs -0 grep -nE 'docker[[:space:]]+(container[[:space:]]+)?(start|stop|restart)' || true)"
+[ -z "$hits" ] || fail "container lifecycle in launcher scripts: $hits"
 
 printf 'test-db-check: ok\n'

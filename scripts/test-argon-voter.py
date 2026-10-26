@@ -773,6 +773,48 @@ printf 'bare-expected=%s bare-present=%s bare-missing=[%s]\\n' \
           f"argon without a skip file is still required ({proc.stdout} {proc.stderr[-200:]})")
 
 
+def test_present_argon_blinded(tmp: Path, env):
+    d = tmp / "blind-three"
+    d.mkdir()
+    (d / "voter-claude.json").write_text(
+        json.dumps({"result": "first leg report"}) + "\n", encoding="utf-8")
+    (d / "voter-claude.model.txt").write_text("claude: ok model=fable\n", encoding="utf-8")
+    (d / "voter-codex.md").write_text("second leg report\n", encoding="utf-8")
+    (d / "voter-codex.model.txt").write_text("codex: ok model=astra\n", encoding="utf-8")
+    (d / "voter-argon.md").write_text("third leg report text\n", encoding="utf-8")
+    (d / "voter-argon.model.txt").write_text("argon: ok model=gemini\n", encoding="utf-8")
+    proc = bash(HEAD + f"""
+DIR={d}
+ERRORS_FILE={d}/errors.md
+: >"$ERRORS_FILE"
+KIND=review
+VOTERS=claude,codex,argon
+VOTERS_EXPLICIT=1
+REVIEW_FAIL=0
+review_count_reports
+printf 'expected=%s present=%s\\n' "$REVIEW_REPORTS_EXPECTED" "$REVIEW_REPORTS_PRESENT"
+if review_blind; then echo blind-ok; else echo blind-bad; fi
+printf 'fail=%s\\n' "$REVIEW_FAIL"
+printf 'legs=%s\\n' "$(find "$DIR/blind" -maxdepth 1 -name 'leg-*.md' | wc -l | tr -d ' ')"
+""", env)
+    out = proc.stdout
+    check("expected=3 present=3" in out and "blind-ok" in out and "fail=0" in out
+          and "legs=3" in out,
+          f"review blinds all three reports with argon present ({out} {proc.stderr[-300:]})")
+    blind = d / "blind"
+    texts = [p.read_text(encoding="utf-8") for p in sorted(blind.glob("leg-*.md"))]
+    check(any("third leg report text" in t for t in texts),
+          f"a blinded leg carries the argon report ({texts})")
+    key = (blind / "key.txt").read_text(encoding="utf-8") if (blind / "key.txt").exists() else ""
+    check(any(line.split("=", 1)[1].endswith("/voter-argon.md")
+              for line in key.splitlines() if "=" in line),
+          f"key.txt maps a leg to voter-argon ({key!r})")
+    errors = (d / "errors.md").read_text(encoding="utf-8")
+    check("no report to blind" not in errors and "unknown voter" not in errors,
+          f"no blind failure notes ({errors!r})")
+
+
+
 def write_exe(path: Path, body: str):
     path.write_text(textwrap.dedent(body), encoding="utf-8")
     path.chmod(0o755)
@@ -983,6 +1025,7 @@ def main():
             test_smoke_seam()
             test_judge_key_hidden(tmp, env)
             test_skipped_argon_not_required(tmp, env)
+            test_present_argon_blinded(tmp, env)
             test_dry_run(tmp)
             test_open_stdin(tmp, env)
     finally:
