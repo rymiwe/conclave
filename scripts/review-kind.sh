@@ -2604,6 +2604,8 @@ review_blind() {
     return 0
   fi
   while IFS= read -r v; do
+    # The here-doc yields one empty line when no voter must report.
+    [ -n "$v" ] || continue
     # One voter-to-report map, shared with review_report_present.
     f="$(review_report_file "$v")"
     if [ -z "$f" ]; then

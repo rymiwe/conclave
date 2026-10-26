@@ -4,6 +4,7 @@
     merge_gate.py extract <gate.stream.jsonl> <gate.md>
     merge_gate.py parse <gate.md>
     merge_gate.py merge <pr_url> <out_dir>
+    merge_gate.py pick <gate-route.json>
 
 The reviewer ends its answer with `one_way: yes` or `one_way: no`, and on yes
 one `one_way_at: <file>:<line> <what>` line per step a git revert cannot undo.
@@ -16,6 +17,11 @@ yes, missing, conflicting, or malformed, when gate-head.txt is missing, when
 the PR has the `one-way` label, or when gh cannot read the labels. Otherwise
 it runs `gh pr merge <pr> --squash --match-head-commit <reviewed sha>` and
 returns gh's exit code. MERGE_GATE_GH overrides the gh binary.
+
+pick reads the `seat-usage --route review --json --runner agy` output and
+prints the reviewer model. When the route asked, named no reviewer, or did not
+apply the agy runner (an older seat-usage), it prints one line saying why and
+exits 3.
 """
 from __future__ import annotations
 
@@ -171,6 +177,30 @@ def merge(pr: str, out_dir: str) -> int:
                            "--match-head-commit", head]).returncode
 
 
+RUNNER = "agy"
+
+
+def pick(route_json: str) -> tuple[str | None, str]:
+    """(model, "") for the router's agy-runnable reviewer, else (None, why)."""
+    try:
+        rows = json.loads(Path(route_json).read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError) as e:
+        return None, f"seat-usage output is not JSON ({type(e).__name__})"
+    row = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
+    if row is None or row.get("role") != "review":
+        return None, "seat-usage output has no review row"
+    if row.get("runner") != RUNNER:
+        return None, f"seat-usage did not apply --runner {RUNNER}; update quartermaster"
+    reviewers = row.get("reviewers") if isinstance(row.get("reviewers"), list) else []
+    if row.get("mode") == "ask" or not reviewers:
+        why = " ".join(str(row.get("reason") or "no reviewer").split())
+        return None, f"no {RUNNER}-runnable reviewer: {why}"
+    model = reviewers[0].get("model") if isinstance(reviewers[0], dict) else None
+    if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model):
+        return None, "seat-usage reviewer has no usable model id"
+    return model, ""
+
+
 def main(argv: list[str]) -> int:
     if len(argv) == 3 and argv[0] == "extract":
         return extract(argv[1], argv[2])
@@ -181,6 +211,13 @@ def main(argv: list[str]) -> int:
         return 0
     if len(argv) == 3 and argv[0] == "merge":
         return merge(argv[1], argv[2])
+    if len(argv) == 2 and argv[0] == "pick":
+        model, why = pick(argv[1])
+        if model is None:
+            print(why)
+            return REFUSED
+        print(model)
+        return 0
     print(__doc__.split("\n\n")[1], file=sys.stderr)
     return 2
 
