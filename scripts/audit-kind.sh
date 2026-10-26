@@ -267,6 +267,7 @@ audit_write_lineup() {
       printf '%s\n' "$(excluded_line)"
     fi
     printf 'effort: high (every leg on the brief)\n'
+    voter_sandbox_line
     if [ "${OPUS_LEG_SKIPPED:-0}" -eq 1 ]; then
       printf 'opus leg skipped: the claude leg is Opus\n'
     fi
@@ -606,10 +607,12 @@ audit_run_grok_cursor() {
     echo 'grok: audit brief exceeds 100000 bytes' >"$DIR/voter-grok.fail"
     return 1
   fi
+  local -a sandbox=()
+  [ "$(voter_sandbox_mode)" = test-db ] || sandbox=(--sandbox enabled)
   (
     cd -- "$wt" || exit 1
     "$(conclave_env CURSOR_AGENT cursor-agent)" -p --model "$CURSOR_GROK" \
-      --output-format stream-json -f --trust --workspace "$wt" "$(cat "$brief")"
+      --output-format stream-json -f --trust "${sandbox[@]}" --workspace "$wt" "$(cat "$brief")"
   ) >"$DIR/voter-grok.stream.jsonl" 2>"$DIR/voter-grok.err" || ec=$?
   if [ "$ec" -ne 0 ]; then
     echo "grok: Cursor exit $ec" >"$DIR/voter-grok.fail"
@@ -905,6 +908,7 @@ EOF
 
 audit_run() {
   local vpid=""
+  voter_sandbox_check
   REVIEW_FAIL=0
   REVIEW_BLIND_FAILED=0
   audit_reject_foreign_flags

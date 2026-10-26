@@ -540,6 +540,12 @@ directory the script was started from. Review kind gives each voter its own work
 default Anthropic leg is Fable on the reviewer brief. Opus native is a
 coverage leg on review kind; its agreement with Fable is one vote. OpenAI
 and Grok stay on native methods. See docs/review.md.
+CONCLAVE_VOTER_SANDBOX (COUNCIL_VOTER_SANDBOX is the alias) is read-only
+by default: the review Codex leg runs read-only with no network, and the
+cursor-agent review and audit legs pass --sandbox enabled. test-db is the
+opt-in: Codex gets workspace-write and network, plus a rule to use only the
+test database inside a rolled-back transaction. Any other value stops the
+run before any leg. Conclave never starts, stops, or restarts a container.
 
 Writes under tmp/council/<id>/:
   routing.md
@@ -3648,6 +3654,8 @@ case "$ID" in
     die "invalid id: use a simple token (e.g. smoke, auth-v1)"
     ;;
 esac
+# A bad CONCLAVE_VOTER_SANDBOX stops the run here, before any leg launches.
+voter_sandbox_check
 
 if [ "$ASK_MODE" -eq 1 ]; then
   ask_main

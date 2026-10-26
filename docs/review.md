@@ -229,15 +229,14 @@ The read-only hash covers the target checkout only. It cannot see a leg that
 restarts a database. On 2026-10-13 one Fable leg started its own Postgres on
 5434 and another restarted a project's database container. The reviewer brief now
 says never to start, stop, restart, or reconfigure a database server,
-container, or other shared service. The chair stands the database up before
+container, or other shared service. The chair checks the database before
 any leg launches. It reads host and port from `config/database.yml` and runs
-`pg_isready`. When the database is down, the chair runs `docker start` on the
-stopped container named by `database.name` in `config/setup.yml`, then checks
-again once a second for up to 30 seconds (`CONCLAVE_DB_WAIT`). It does not
-create a container, and it does not restart one that is already running. It
-does not start Docker itself. If the database still does not answer, the run
-stops and no leg launches. With no `database.yml` or no `pg_isready`, the
-check is skipped. Test: `scripts/test-db-check.sh`.
+`pg_isready`. Conclave never starts, stops, or restarts a container. When the
+database is down, the run stops with a message that names the host and port
+and the container from `database.name` in `config/setup.yml`. You start it,
+then rerun. No leg launches. With no `database.yml` or no `pg_isready`, the
+check is skipped. Test: `scripts/test-db-check.sh`. It also fails if any
+non-test script under `scripts/` runs `docker start`, `stop`, or `restart`.
 
 Gems and node are the other way a worktree stops running code. When the
 branch's `Gemfile` matches the main checkout but `Gemfile.lock` is newer,
@@ -326,8 +325,8 @@ exits 0). The column reads `<id> (via cursor)`. See "Fable on Cursor" under
 "$CODEX" -C <worktree> review --uncommitted \
   -c model="$CODEX_REVIEW_MODEL" \
   -c model_reasoning_effort=$CODEX_EFFORT \
-  -c sandbox_mode=workspace-write \
-  -c sandbox_workspace_write.network_access=true \
+  -c sandbox_mode=read-only \
+  -c sandbox_workspace_write.network_access=false \
   -c developer_instructions="$ASTRA_RULES" \
   --title "<bare target>" \
   < /dev/null
@@ -338,11 +337,40 @@ Review kind sets `CODEX_EFFORT` to `high`. An explicit brief `effort:` header ov
 `-C` is a top-level option on the resolver's binary (`codex --help`).
 `codex review --help` does not list it. Passing it after `review` is rejected.
 
-Both sandbox flags are required. `codex review` defaults to workspace-write
-with no network, so Rails cannot reach host Postgres, and a leg then tries to
-boot its own cluster and still emits reasoned findings (2026-09-11, a work
-pull request). Do not use `danger-full-access`. Do not put `network_access` in
-`~/.codex/config.toml`.
+### Voter sandbox
+
+`CONCLAVE_VOTER_SANDBOX` (`COUNCIL_VOTER_SANDBOX` is the alias) sets what
+review and audit voters may touch. Voters may touch only the test database,
+inside a transaction that is rolled back. Nobody starts, stops, or restarts a
+container.
+
+- `read-only` is the default, when the variable is unset or empty. The Codex
+  review leg gets `-c sandbox_mode=read-only` and
+  `-c sandbox_workspace_write.network_access=false`. The cursor-agent voter
+  legs (Fable review, Grok review, Grok audit) get `--sandbox enabled`.
+- `test-db` is an opt-in. The Codex review leg gets
+  `-c sandbox_mode=workspace-write` and
+  `-c sandbox_workspace_write.network_access=true`, the only way it can
+  reach a local Postgres. Its `developer_instructions` gain a fixed rule:
+  only the test database (`RAILS_ENV=test`), only inside a rolled-back
+  transaction, no other database, host, or port, and no container or
+  docker commands. The cursor-agent legs run as before, with no `--sandbox`.
+- Any other value stops the run before any leg launches.
+
+Codex's sandbox cannot limit network to one port. Under `test-db` the
+database scope is the rule plus the opt-in, not a jail. A Codex leg
+with workspace-write and network reached another project's database
+container. That is why read-only is the default.
+
+`codex review` (codex-cli 0.160.0) has no `--sandbox` flag. Only `codex exec`
+has `-s`. The review leg sets the mode with `-c` keys. Do not use
+`danger-full-access`. Do not put `network_access` in `~/.codex/config.toml`.
+
+Under `read-only`, Rails cannot reach host Postgres, and the leg cannot write
+a scratch script. It reviews by reading. The Opus native coverage leg is not
+covered: `claude -p` has no read-only, no-network switch that keeps
+`/code-review` working, so it still runs with `bypassPermissions`. The lineup
+and `readonly.txt` carry a `voter sandbox:` line with the mode.
 
 Codex runs commands in a login shell, which skips mise or asdf activation.
 On one Rails stack native Astra hit `ruby: command not found` on 16 of 17 ballots

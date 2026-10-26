@@ -50,6 +50,40 @@ every finding must state a concrete failure (the input or state, and the resulti
 EOF
 )
 
+# Voter sandbox. CONCLAVE_VOTER_SANDBOX (COUNCIL_VOTER_SANDBOX is the alias)
+# is read-only when unset or empty. test-db is the only opt-in. A Codex
+# review leg with workspace-write and network reached another project's
+# database container. Codex cannot limit network to one port, so test-db scopes
+# the database by this rule plus the opt-in.
+VOTER_TEST_DB_RULE='Database rule: you may use only the test database (RAILS_ENV=test, the test entry of config/database.yml), and only inside a transaction that you roll back. Do not connect to any other database, host, or port. Never start, stop, restart, or create a container or service. Do not run docker commands.'
+
+voter_sandbox_check() {
+  # Dies on a bad value. conclave.sh calls this before any leg launches.
+  local m
+  m="$(conclave_env VOTER_SANDBOX)"
+  case "$m" in
+    ''|read-only|test-db) ;;
+    *) die "$(conclave_env_name VOTER_SANDBOX)='$m' is not a voter sandbox. Use read-only (the default) or test-db. No leg launched." ;;
+  esac
+}
+
+voter_sandbox_mode() {
+  # Fails closed: anything but test-db is read-only.
+  if [ "$(conclave_env VOTER_SANDBOX)" = test-db ]; then
+    printf 'test-db\n'
+  else
+    printf 'read-only\n'
+  fi
+}
+
+voter_sandbox_line() {
+  if [ "$(voter_sandbox_mode)" = test-db ]; then
+    printf 'voter sandbox: test-db (opt-in; Codex workspace-write with network, test database in a rolled-back transaction by instruction; cursor-agent legs unsandboxed)\n'
+  else
+    printf 'voter sandbox: read-only (Codex read-only, no network; cursor-agent legs --sandbox enabled)\n'
+  fi
+}
+
 # The first call stays at 60 turns and the resume at 80. On 2026-10-13 the inner
 # reviewer hit 60 with no report, and the resume of that inner session had never
 # been shown to produce one (docs/review.md). The 2026-10-22 councils were still
@@ -557,6 +591,7 @@ review_write_lineup() {
       printf 'effort: OpenAI %s; Fable on cursor-agent; Grok on %s\n' "$CODEX_EFFORT" "$(grok_launch_cli)"
     fi
     printf 'voters: %s\n' "$VOTERS"
+    voter_sandbox_line
     printf '%s\n' "$(ballot_source_line)"
     if [ -n "${BALLOT_ROUTE_WARNING:-}" ]; then
       printf '%s\n' "$BALLOT_ROUTE_WARNING"
@@ -761,64 +796,18 @@ review_check_db() {
 }
 
 review_chair_db() {
-  # The chair stands the target database up before any leg. The only mutation
-  # is `docker start` of a stopped container named in config/setup.yml.
-  # A running container is not restarted. A missing container is not created.
-  # When the database still does not answer, this exits and no leg launches.
-  local container status wait
+  # The chair checks the target database before any leg. Conclave never starts,
+  # stops, or restarts a container. When the database does not answer, this
+  # names the container from config/setup.yml, exits, and no leg launches.
+  local container
   review_check_db
   [ -n "$REVIEW_DB_WARN" ] || return 0
   container="$(review_setup_db_container)"
-  if [ -z "$container" ]; then
-    log_err "note: $REVIEW_DB_WARN"
-    die "chair: $REVIEW_DB_WARN No container name in config/setup.yml. Voters not launched."
+  log_err "note: $REVIEW_DB_WARN"
+  if [ -n "$container" ]; then
+    die "chair: $REVIEW_DB_WARN Container $container (config/setup.yml) is not answering. Conclave does not start containers. Start it yourself, then rerun. Voters not launched."
   fi
-  case "$container" in
-    *[!A-Za-z0-9_.-]*)
-      log_err "note: $REVIEW_DB_WARN"
-      die "chair: $REVIEW_DB_WARN Container name '$container' is not a docker name. Voters not launched."
-      ;;
-  esac
-  if ! command -v docker >/dev/null 2>&1; then
-    log_err "note: $REVIEW_DB_WARN"
-    die "chair: $REVIEW_DB_WARN docker is not on PATH. Voters not launched."
-  fi
-  if ! docker info >/dev/null 2>&1; then
-    log_err "note: $REVIEW_DB_WARN"
-    die "chair: $REVIEW_DB_WARN The docker daemon does not answer. Start Docker, then rerun. Voters not launched."
-  fi
-  status="$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null || true)"
-  case "$status" in
-    running)
-      log_err "note: $REVIEW_DB_WARN"
-      die "chair: $REVIEW_DB_WARN Container $container is already running. Not restarting it. Voters not launched."
-      ;;
-    exited|created)
-      docker start "$container" >/dev/null \
-        || die "chair: docker start $container failed. Voters not launched."
-      # Postgres takes a few seconds to accept connections after a start.
-      wait="${CONCLAVE_DB_WAIT:-30}"
-      review_check_db
-      while [ -n "$REVIEW_DB_WARN" ] && [ "$wait" -gt 0 ]; do
-        sleep 1
-        wait=$((wait - 1))
-        review_check_db
-      done
-      if [ -n "$REVIEW_DB_WARN" ]; then
-        log_err "note: $REVIEW_DB_WARN"
-        die "chair: started $container and waited ${CONCLAVE_DB_WAIT:-30}s. $REVIEW_DB_WARN Voters not launched."
-      fi
-      log_err "note: chair started container $container. The database answers."
-      ;;
-    "")
-      log_err "note: $REVIEW_DB_WARN"
-      die "chair: $REVIEW_DB_WARN Container $container does not exist. Not creating one. Voters not launched."
-      ;;
-    *)
-      log_err "note: $REVIEW_DB_WARN"
-      die "chair: $REVIEW_DB_WARN Container $container status is $status. Not starting it. Voters not launched."
-      ;;
-  esac
+  die "chair: $REVIEW_DB_WARN No container name in config/setup.yml. Conclave does not start containers. Start the database yourself, then rerun. Voters not launched."
 }
 
 review_alloc_scratch() {
@@ -1575,10 +1564,12 @@ review_run_cursor_fable() {
     echo 'claude: reviewer brief exceeds 100000 bytes' >"$DIR/voter-claude.fail"
     return 1
   fi
+  local -a sandbox=()
+  [ "$(voter_sandbox_mode)" = test-db ] || sandbox=(--sandbox enabled)
   (
     cd -- "$wt" || exit 1
     "$(conclave_env CURSOR_AGENT cursor-agent)" -p --model "$CURSOR_FABLE" \
-      --output-format stream-json -f --trust --workspace "$wt" "$(cat "$brief")"
+      --output-format stream-json -f --trust "${sandbox[@]}" --workspace "$wt" "$(cat "$brief")"
   ) >"$DIR/voter-claude.stream.jsonl" 2>"$DIR/voter-claude.err" || ec=$?
   if [ "$ec" -ne 0 ]; then
     echo "claude: Cursor exit $ec" >"$DIR/voter-claude.fail"
@@ -1876,6 +1867,13 @@ review_run_codex() {
   # and goes in the user prompt. The CLI rejects that prompt together with
   # --uncommitted, so the prompt names the same uncommitted changes.
   rules="$ASTRA_RULES"
+  local -a sandbox
+  if [ "$(voter_sandbox_mode)" = test-db ]; then
+    sandbox=(-c sandbox_mode=workspace-write -c sandbox_workspace_write.network_access=true)
+    rules="$rules $VOTER_TEST_DB_RULE"
+  else
+    sandbox=(-c sandbox_mode=read-only -c sandbox_workspace_write.network_access=false)
+  fi
   block="$(review_pr_context_block || true)"
   if [ -n "$block" ]; then
     user_prompt="$(printf '%s\n\n%s' \
@@ -1884,8 +1882,7 @@ review_run_codex() {
     "$CODEX" -C "$wt" review \
       -c "model=${CODEX_REVIEW_MODEL}" \
       -c "model_reasoning_effort=${CODEX_EFFORT}" \
-      -c sandbox_mode=workspace-write \
-      -c sandbox_workspace_write.network_access=true \
+      "${sandbox[@]}" \
       -c "developer_instructions=${rules}" \
       --title "$title" \
       "$user_prompt" \
@@ -1894,8 +1891,7 @@ review_run_codex() {
     "$CODEX" -C "$wt" review --uncommitted \
       -c "model=${CODEX_REVIEW_MODEL}" \
       -c "model_reasoning_effort=${CODEX_EFFORT}" \
-      -c sandbox_mode=workspace-write \
-      -c sandbox_workspace_write.network_access=true \
+      "${sandbox[@]}" \
       -c "developer_instructions=${rules}" \
       --title "$title" \
       </dev/null >"$out" 2>"$err" || ec=$?
@@ -2121,10 +2117,12 @@ review_run_grok_cursor() {
 
 $block"
   fi
+  local -a sandbox=()
+  [ "$(voter_sandbox_mode)" = test-db ] || sandbox=(--sandbox enabled)
   (
     cd -- "$wt" || exit 1
     "$(conclave_env CURSOR_AGENT cursor-agent)" -p --model "$CURSOR_GROK" \
-      --output-format stream-json -f --trust --workspace "$wt" "$prompt"
+      --output-format stream-json -f --trust "${sandbox[@]}" --workspace "$wt" "$prompt"
   ) >"$DIR/voter-grok.stream.jsonl" 2>"$DIR/voter-grok.err" || ec=$?
   if [ "$ec" -ne 0 ]; then
     echo "grok: Cursor exit $ec" >"$DIR/voter-grok.fail"
@@ -2370,6 +2368,7 @@ review_compare_readonly() {
   fi
   rm -f "$outside_file"
   {
+    voter_sandbox_line
     printf 'before: %s\n' "$REVIEW_RO_BEFORE"
     if [ "$REVIEW_HASH_OK" -ne 1 ]; then
       printf 'after: incomplete\n'
@@ -2605,14 +2604,12 @@ review_blind() {
     return 0
   fi
   while IFS= read -r v; do
-    case "$v" in
-      claude) f="$DIR/voter-claude.json" ;;
-      opus) f="$DIR/voter-opus.json" ;;
-      codex) f="$DIR/voter-codex.md" ;;
-      grok) f="$DIR/voter-grok-report.md" ;;
-      muse) f="$DIR/voter-muse.md" ;;
-      *) continue ;;
-    esac
+    # One voter-to-report map, shared with review_report_present.
+    f="$(review_report_file "$v")"
+    if [ -z "$f" ]; then
+      review_note_fail "$v: unknown voter, no report path to blind"
+      continue
+    fi
     if [ -s "$f" ]; then
       reports+=("$f")
     else
@@ -3235,6 +3232,7 @@ EOF
 }
 
 review_run() {
+  voter_sandbox_check
   REVIEW_FAIL=0
   REVIEW_BLIND_FAILED=0
   review_resolve_repo
