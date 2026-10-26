@@ -4,9 +4,11 @@
 REVIEW_KIND_DIR="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Phase 0 (--dry-run): lineup, target, diff shape. Writes only under preview/.
 # Phase 1 (the run): worktrees for the route's voters (or --voters). Fable on
-# the reviewer brief when seated, Opus native only when --voters names it
-# (skipped when the claude leg is already Opus native), Argon packet-first
-# when seated, Muse with contributor mode off, model check, read-only compare, blind.
+# the reviewer brief through cursor-agent when seated, Opus native only when
+# the route or --voters names it (skipped when the claude leg is already Opus
+# native), Grok through cursor-agent unless CONCLAVE_GROK_NATIVE=1, Argon
+# packet-first when seated, Muse with contributor mode off, model check,
+# read-only compare, blind.
 # Phase 2 is the chair (findings.json). Phase 3 is jev-judge.py --findings.
 # Phase 4 is the chair's comments; scripts/check-comment-links.py checks links
 # and scripts/check-comment-labels.py checks labels. When pr-context.json has
@@ -63,6 +65,12 @@ EOF
 )
 
 GROK_RESUME_PROMPT='Stop testing. Write the report now from what you already found. Do not re-read the tree. Zero findings is an acceptable answer.'
+
+# cursor-agent has no /review slash command. The final message is the report.
+GROK_CURSOR_REVIEW_PROMPT=$(cat <<'EOF'
+Write the review as your final message. Write it before you explore further. Every finding must state a concrete failure (the input or state, and the resulting wrong behaviour). No concrete failure means it is not a finding. Do not pad; zero findings is a fine answer. Do not run an open-ended test campaign and do not re-read the tree after the first pass. If you test computable behaviour, one scratch script and its output is enough, then write the review. Include the whole script in the finding and name its extension. End with a 'Checked and found clean' list naming the areas you examined that produced no finding.
+EOF
+)
 
 review_cleanup_worktrees() {
   # EXIT traps fire in voter subshells. Only the parent removes worktrees.
@@ -542,11 +550,11 @@ review_write_lineup() {
     printf 'target: %s\n' "$(review_target_line)"
     printf 'diff: %s\n' "$(review_cell "$DIFFSHAPE")"
     if [ "${CLAUDE_SKU:-fable}" = "opus" ]; then
-      printf 'effort: OpenAI %s; Anthropic and Grok high (native review commands)\n' "$CODEX_EFFORT"
+      printf 'effort: OpenAI %s; Opus native; Grok on %s\n' "$CODEX_EFFORT" "$(grok_launch_cli)"
     elif voter_is_named opus; then
-      printf 'effort: OpenAI %s; Anthropic and Grok high (Fable on the brief; Opus native and the other legs native)\n' "$CODEX_EFFORT"
+      printf 'effort: OpenAI %s; Fable on cursor-agent; Opus native; Grok on %s\n' "$CODEX_EFFORT" "$(grok_launch_cli)"
     else
-      printf 'effort: OpenAI %s; Anthropic and Grok high (native for OpenAI and Grok; Anthropic on the brief)\n' "$CODEX_EFFORT"
+      printf 'effort: OpenAI %s; Fable on cursor-agent; Grok on %s\n' "$CODEX_EFFORT" "$(grok_launch_cli)"
     fi
     printf 'voters: %s\n' "$VOTERS"
     printf '%s\n' "$(ballot_source_line)"
@@ -578,9 +586,9 @@ review_write_lineup() {
           fi
           pool="Claude"
           pace="$(review_pace_cell claude)"
-          if [ "${CLAUDE_SKU:-fable}" = cursor-fable ]; then
+          if claude_leg_uses_cursor; then
             model="${CURSOR_FABLE:-}"
-            cli="cursor-agent ($(review_cli_version cursor-agent))"
+            cli="cursor-agent ($(review_cli_version "$(conclave_env CURSOR_AGENT cursor-agent)"))"
             pool="Cursor Other Models"
             pace="$(review_pace_cell cursor)"
           fi
@@ -602,12 +610,20 @@ review_write_lineup() {
           pace="$(review_pace_cell chatgpt)"
           ;;
         grok)
-          model="${GROK_NATIVE_MODEL:-} (CLI default; the launch does not pass --model)"
-          ver="$(review_cli_version grok)"
-          cli="grok ($ver)"
-          meth="native"
-          pool="Grok"
-          pace="$(review_pace_cell grok)"
+          if grok_native_requested; then
+            model="${GROK_NATIVE_MODEL:-} (native CLI; CONCLAVE_GROK_NATIVE=1)"
+            ver="$(review_cli_version grok)"
+            cli="grok ($ver)"
+            meth="native"
+            pool="Grok"
+            pace="$(review_pace_cell grok)"
+          else
+            model="${CURSOR_GROK:-}"
+            cli="cursor-agent ($(review_cli_version "$(conclave_env CURSOR_AGENT cursor-agent)"))"
+            meth="prompt"
+            pool="Cursor Other Models"
+            pace="$(review_pace_cell cursor)"
+          fi
           ;;
         muse)
           model="${MUSE_WONDER_MODEL:-}"
@@ -642,20 +658,19 @@ EOF
       "TypeSafe" "resolved when findings are judged" "scripts/jev-judge.py" \
       "choice per finding" "metered" "n/a"
     printf '\n'
-    if [ "${CLAUDE_SKU:-fable}" = cursor-fable ]; then
-      printf 'Cursor Fable: selected (--claude-model cursor-fable): %s\n' "${CURSOR_FABLE:-unavailable}"
-    elif [ "${FABLE_OVERFLOW:-}" = cursor ]; then
-      printf 'Cursor Fable: overflow armed (--fable-overflow cursor): %s\n' "${CURSOR_FABLE:-unavailable}"
-    else
-      printf 'Cursor Fable fallback (not selected): %s\n' "${CURSOR_FABLE:-unavailable}"
-    fi
-    printf 'Cursor stuck-builder (xhigh, not a voter): %s\n' "${CURSOR_GROK:-unavailable}"
-    printf 'Builder (high, fast, not a voter): %s\n' "${CURSOR_BUILDER:-unavailable}"
-    if [ "${CLAUDE_SKU:-fable}" = cursor-fable ]; then
+    if claude_leg_uses_cursor; then
+      printf 'Cursor Fable: selected: %s\n' "${CURSOR_FABLE:-unavailable}"
       printf 'The Cursor Fable leg is proven from its stream init model; Cursor reports no modelUsage.\n'
     else
+      printf 'Cursor Fable fallback (not selected): %s\n' "${CURSOR_FABLE:-unavailable}"
       printf 'Anthropic model id is proven from modelUsage after the run. The lineup cell is the launch alias.\n'
     fi
+    if grok_native_requested; then
+      printf 'Grok voter: native grok CLI (CONCLAVE_GROK_NATIVE=1), model %s\n' "${GROK_NATIVE_MODEL:-unavailable}"
+    else
+      printf 'Grok voter: cursor-agent %s\n' "${CURSOR_GROK:-unavailable}"
+    fi
+    printf 'Builder (high, fast, not a voter): %s\n' "${CURSOR_BUILDER:-unavailable}"
     printf 'Opus native is a coverage leg on review kind; its agreement with Fable is one vote.\n'
     printf '\n'
     if [ "$SEAT_STATUS" = "ok" ]; then
@@ -1546,37 +1561,8 @@ review_run_opus_native() {
 }
 
 review_run_claude_max() {
-  local wt="$1" ec brief
-  local out="$DIR/voter-claude.json" err="$DIR/voter-claude.err"
-  REVIEW_CLAUDE_PROCESS_EXIT=0
-  if [ "$CLAUDE_SKU" = "opus" ]; then
-    review_run_opus_native "$wt" claude
-    return
-  fi
-  ec=0
-  brief="$DIR/voter-claude.brief.md"
-  if [ ! -s "$brief" ]; then
-    echo "claude: reviewer brief missing" >"$DIR/voter-claude.fail"
-    return 1
-  fi
-  cd -- "$wt" || {
-    echo "claude: cannot cd to worktree" >"$DIR/voter-claude.fail"
-    return 1
-  }
-  env CLAUDE_CODE_SUBAGENT_MODEL=opus \
-    claude -p --model fable --effort high --permission-mode bypassPermissions \
-      --output-format json \
-      <"$brief" >"$out" 2>"$err" || ec=$?
-  REVIEW_CLAUDE_PROCESS_EXIT=$ec
-  if [ "$ec" -ne 0 ]; then
-    echo "claude: exit $ec" >"$DIR/voter-claude.fail"
-    return 1
-  fi
-  if [ ! -s "$out" ] || ! jq -e '.result | strings' "$out" >/dev/null 2>&1; then
-    echo "claude: output has no .result string" >"$DIR/voter-claude.fail"
-    return 1
-  fi
-  review_verify_claude_model "$out"
+  # Opus native only. Fable never calls the claude CLI.
+  review_run_opus_native "$1" claude
 }
 
 review_run_cursor_fable() {
@@ -1632,46 +1618,14 @@ PY
 }
 
 review_run_claude() {
-  local wt="$1" ec=0 before after ext failed=0
-  if [ "$CLAUDE_SKU" = cursor-fable ]; then
-    review_run_cursor_fable "$wt"
-    return
-  fi
-  if [ "$CLAUDE_SKU" != fable ] || [ "${FABLE_OVERFLOW:-}" != cursor ]; then
+  # Fable, including the lineup fallback and cursor-fable, is cursor-agent.
+  # Opus is the only native claude leg. --fable-overflow does not change this.
+  local wt="$1"
+  if [ "${CLAUDE_SKU:-fable}" = opus ]; then
     review_run_claude_max "$wt"
     return
   fi
-  printf 'max\n' >"$DIR/voter-claude.via"
-  before="$(git -C "$wt" status --porcelain)" || return 1
-  review_run_claude_max "$wt" || ec=$?
-  if [ "$ec" -ne 0 ] || ! jq -e '.is_error != true and (.result | strings | length > 0)' \
-    "$DIR/voter-claude.json" >/dev/null 2>&1 || \
-    grep -q 'FAIL' "$DIR/voter-claude.model.txt" 2>/dev/null; then
-    failed=1
-  fi
-  if [ "$failed" -eq 1 ] && { [ "$REVIEW_CLAUDE_PROCESS_EXIT" -ne 0 ] ||
-    jq -e '.is_error == true' "$DIR/voter-claude.json" >/dev/null 2>&1;
-  } && {
-    cat "$DIR/voter-claude.err" 2>/dev/null
-    jq -r '.result | strings' "$DIR/voter-claude.json" 2>/dev/null || true
-  } | grep -Eiq 'usage limit|limit reached|hit your .*limit|session limit|weekly limit|requires usage credits|out of extra usage'; then
-    after="$(git -C "$wt" status --porcelain)" || return 1
-    if [ "$before" != "$after" ]; then
-      log_err 'note: the Claude subscription leg changed its worktree before the overflow rerun'
-    fi
-    for ext in json err fail model.txt; do
-      [ ! -f "$DIR/voter-claude.$ext" ] || mv "$DIR/voter-claude.$ext" "$DIR/voter-claude.max.$ext"
-    done
-    printf 'cursor\n' >"$DIR/voter-claude.via"
-    log_err 'note: fable overflow: the Claude subscription leg hit a usage limit; the claude leg ran on Cursor Fable'
-    review_run_cursor_fable "$wt"
-    return
-  fi
-  if [ "$failed" -eq 1 ] && [ "$ec" -eq 0 ]; then
-    echo 'claude: unsuccessful Claude subscription result or model proof' >"$DIR/voter-claude.fail"
-    return 1
-  fi
-  return "$ec"
+  review_run_cursor_fable "$wt"
 }
 
 review_run_opus() {
@@ -2153,7 +2107,46 @@ review_collect_grok_report() {
   find "$dir" -type f -name 'grok-review-*.md' -exec cp -- {} "$dest" \;
 }
 
+review_run_grok_cursor() {
+  # $1 worktree. The final message is the report. No grok session resume.
+  local wt="$1" ec=0 prompt block=""
+  if [ -z "${CURSOR_GROK:-}" ]; then
+    echo 'grok: CURSOR_GROK is empty; refusing to launch' >"$DIR/voter-grok.fail"
+    return 1
+  fi
+  prompt="$GROK_CURSOR_REVIEW_PROMPT"
+  block="$(review_pr_context_block || true)"
+  if [ -n "$block" ]; then
+    prompt="$prompt
+
+$block"
+  fi
+  (
+    cd -- "$wt" || exit 1
+    "$(conclave_env CURSOR_AGENT cursor-agent)" -p --model "$CURSOR_GROK" \
+      --output-format stream-json -f --trust --workspace "$wt" "$prompt"
+  ) >"$DIR/voter-grok.stream.jsonl" 2>"$DIR/voter-grok.err" || ec=$?
+  if [ "$ec" -ne 0 ]; then
+    echo "grok: Cursor exit $ec" >"$DIR/voter-grok.fail"
+    return 1
+  fi
+  if ! cursor_write_text_result "$DIR/voter-grok.stream.jsonl" "$CURSOR_GROK" grok grok \
+    "$DIR/voter-grok-report.md" "$DIR/voter-grok.model.txt"; then
+    echo 'grok: Cursor output missing or model unproven' >"$DIR/voter-grok.fail"
+    rm -f "$DIR/voter-grok-report.md"
+    return 1
+  fi
+}
+
 review_run_grok() {
+  if grok_native_requested; then
+    review_run_grok_native "$@"
+    return
+  fi
+  review_run_grok_cursor "$1"
+}
+
+review_run_grok_native() {
   local wt="$1" legtmp="$2" ec rc sess uuid role why resumed=""
   local out="$DIR/voter-grok.stdout.md" err="$DIR/voter-grok.err"
   ec=0
@@ -2314,10 +2307,7 @@ review_launch() {
     }
     case "$v" in
       claude)
-        claude_cli=claude
-        [ "$CLAUDE_SKU" != cursor-fable ] || claude_cli="$(conclave_env CURSOR_AGENT cursor-agent)"
-        if ! command -v "$claude_cli" >/dev/null 2>&1; then
-          echo "claude: $claude_cli CLI not found" >"$DIR/voter-claude.fail"
+        if ! claude_leg_available "$DIR/voter-claude.fail"; then
           continue
         fi
         council_bg review_timed_leg claude review_run_claude "$wt"
@@ -2336,8 +2326,7 @@ review_launch() {
         pids="$pids $!"
         ;;
       grok)
-        if ! command -v grok >/dev/null 2>&1; then
-          echo "grok: CLI not found" >"$DIR/voter-grok.fail"
+        if ! grok_leg_available "$DIR/voter-grok.fail"; then
           continue
         fi
         tmp="$(review_leg_tmp "$wt")"
@@ -2500,6 +2489,10 @@ review_voter_header_value() {
   fi
   line="$(head -1 "$f")"
   if [ "$v" = claude ] && printf '%s\n' "$line" | grep -q '^claude: ok via=cursor '; then
+    printf '%s\n' "$line" | sed -nE 's/.* model=([^ ]+).*/\1 (via cursor)/p'
+    return
+  fi
+  if [ "$v" = grok ] && printf '%s\n' "$line" | grep -q '^grok: ok via=cursor '; then
     printf '%s\n' "$line" | sed -nE 's/.* model=([^ ]+).*/\1 (via cursor)/p'
     return
   fi
@@ -2834,7 +2827,7 @@ review_failure_seat() {
       if [ -n "${DIR:-}" ] && [ -f "$DIR/voter-claude.via" ]; then
         via="$(head -1 "$DIR/voter-claude.via" 2>/dev/null || true)"
       fi
-      if [ "${CLAUDE_SKU:-}" = cursor-fable ] || [ "$via" = cursor ]; then
+      if claude_leg_uses_cursor || [ "$via" = cursor ]; then
         printf 'cursor\n'
       else
         printf 'claude\n'
@@ -2955,15 +2948,7 @@ review_launch_packet() {
   local v="$1" reason
   case "$v" in
     claude)
-      if [ "${CLAUDE_SKU:-}" = cursor-fable ]; then
-        if ! command -v "$(conclave_env CURSOR_AGENT cursor-agent)" >/dev/null 2>&1; then
-          log_err "claude: cursor-agent not found"
-          return 1
-        fi
-      elif ! command -v claude >/dev/null 2>&1; then
-        log_err "claude: CLI not found (command -v claude failed)"
-        return 1
-      fi
+      claude_leg_available || return 1
       run_claude
       ;;
     codex)
@@ -2974,10 +2959,7 @@ review_launch_packet() {
       run_codex
       ;;
     grok)
-      if ! command -v grok >/dev/null 2>&1; then
-        log_err "grok: CLI not found (command -v grok failed)"
-        return 1
-      fi
+      grok_leg_available || return 1
       run_grok
       ;;
     muse)
@@ -3010,25 +2992,14 @@ review_launch_one() {
   local v="$1" wt="$2"
   case "$v" in
     claude)
-      if [ "$CLAUDE_SKU" = cursor-fable ]; then
-        command -v "$(conclave_env CURSOR_AGENT cursor-agent)" >/dev/null 2>&1 || {
-          echo "claude: cursor-agent CLI not found" >"$DIR/voter-claude.fail"
-          return 1
-        }
-      elif ! command -v claude >/dev/null 2>&1; then
-        echo "claude: claude CLI not found" >"$DIR/voter-claude.fail"
-        return 1
-      fi
+      claude_leg_available "$DIR/voter-claude.fail" || return 1
       review_timed_leg claude review_run_claude "$wt"
       ;;
     codex)
       review_timed_leg codex review_run_codex "$wt"
       ;;
     grok)
-      if ! command -v grok >/dev/null 2>&1; then
-        echo "grok: CLI not found" >"$DIR/voter-grok.fail"
-        return 1
-      fi
+      grok_leg_available "$DIR/voter-grok.fail" || return 1
       review_timed_leg grok review_run_grok "$wt" "$(review_leg_tmp "$wt")"
       ;;
     muse)

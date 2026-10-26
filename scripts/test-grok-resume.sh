@@ -23,6 +23,8 @@ export FAKE_OUTER=01a13641-0000-7000-8000-000000000001
 export FAKE_INNER=01a13642-0000-7000-8000-000000000002
 export FAKE_MODEL=grok-fake-model
 export PATH="$work/bin:$PATH"
+# Resume is the native grok CLI. The default voter does not call it.
+export CONCLAVE_GROK_NATIVE=1
 
 # Fake grok. A first call writes both sessions: the outer one ends completed,
 # the inner one ends FAKE_INNER_END. A review file appears only when

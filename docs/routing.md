@@ -15,7 +15,7 @@ outer loop never holds the repo and never reads a diff.
 | Bridge | Bot desktop app local execution | the executor machine | none |
 | Per-task chair (inner loop) | `cursor-agent`, newest Grok pinned, Fast variant at high (2026-10-02) | executor, one worktree per ticket | Cursor Models pool |
 | Chair fallback | Opus on the Claude subscription when both Grok pools are over pace or unusable. Native Grok Build chairs when that pool is the one to spend (Ryan, 2026-10-08). | executor | the pool the lineup names |
-| Voter A | Fable on the reviewer brief (`CLAUDE_CODE_SUBAGENT_MODEL=opus` stays set). Why not native `/code-review`: `docs/review.md` Targets. `--claude-model opus` turns this seat into Opus native and skips the coverage leg. When the Claude subscription's Fable allowance caps, `--claude-model cursor-fable` runs the same brief on Cursor Fable; `--fable-overflow cursor` switches only after a usage-limit failure on the Claude subscription. | executor, own login | Claude subscription; Cursor Other Models when on Cursor Fable |
+| Voter A | Fable on the reviewer brief through `cursor-agent` and the resolver's `CURSOR_FABLE` id, including the lineup fallback and the no-lineup default. Why not native `/code-review`: `docs/review.md` Targets. `--claude-model opus` is the only native Claude leg and skips the coverage leg. `--claude-model cursor-fable` is the same Cursor leg. `--fable-overflow cursor` does not start a Claude subscription leg. | executor, own login | Cursor Other Models; Claude subscription only for Opus |
 | Coverage | Opus native, review kind only, own worktree. Opus native is a coverage leg on review kind; its agreement with Fable is one vote. Design and mixed reject `opus` in `--voters`. | executor, own login | Claude subscription |
 | Voter B | Astra on the resolver's Codex (newest stable `N.N.N` at or above 0.159.3, else newest `-alpha` at or above 0.154; `-beta` and `-rc` rejected) | executor, own login | ChatGPT subscription |
 | Judge | Jev | executor | metered, cents |
@@ -76,9 +76,10 @@ rejected pairs.
   Fable, Astra, Grok, and Muse. A voter's vendor is the model's
   provider, not the seat it bills to. At most one vendor sits out, and only
   for the reason the kind names. A capped pool is not seated. A pool ahead of pace
-  still votes, at low. An unknown reading asks. When
-  Claude's 5-hour window is full, Fable votes through Cursor Other Models
-  if that pool has room. One remaining voter is a weaker lineup, not an ask.
+  still votes, at low. An unknown reading asks. Fable always votes through
+  Cursor Other Models (`cursor-agent`, `CURSOR_FABLE`). The Grok voter uses
+  `cursor-agent` and `CURSOR_GROK` unless `CONCLAVE_GROK_NATIVE=1`, which
+  keeps the native `grok` CLI. One remaining voter is a weaker lineup, not an ask.
 - Jev is not in this choice.
 - `--route host` suggests Grok Bot, then Opus at high on the Claude subscription. It does not
   start a session (`selects` is false). The JSON row includes both hosts.

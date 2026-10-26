@@ -35,10 +35,11 @@ Phase 0 prints pace from `~/.local/bin/seat-usage` when that file is executable
 (`CONCLAVE_SEAT_USAGE` overrides the path). Otherwise the pace cell is
 `pace unknown`. The script does not move a leg because of pace. Ahead of pace
 is not a reason to drop Fable (2026-09-30). A capped Fable slice is the chair's
-decision to pass `--claude-model opus`. Cursor Fable is the chair's decision
-when the Claude subscription is session-limited: `--claude-model cursor-fable`, or
-`--fable-overflow cursor` to switch only if the subscription leg hits a usage limit.
-See "Fable on Cursor" under "Stack review". The script never chooses any of
+decision to pass `--claude-model opus`. Fable itself always runs on
+`cursor-agent` with the resolver's Cursor Fable id. `--claude-model cursor-fable`
+is that same leg. `--fable-overflow cursor` is accepted on review and does not
+start a Claude subscription leg. See "Fable on Cursor" under "Stack review".
+The script never chooses any of
 these from pace. The stack runner does, from `seat-usage`.
 
 When the Conclave reviews its own repo, run `conclave.sh` from a pinned
@@ -636,11 +637,13 @@ The brief asks for problems that span PRs: a contract one PR sets and a later PR
 
 ### Fable on Cursor
 
-`--claude-model cursor-fable` runs the Fable seat on the resolver's Cursor Fable id, on the same reviewer brief, in the leg's own worktree, through `cursor-agent`. Opus native still runs on the Claude subscription. The proof is the stream's init event naming Fable; Cursor reports no token usage. The column reads `<id> (via cursor)`. It draws Cursor Other Models, about $5.55 a review leg (2026-09-15).
+Every Fable leg (design, mixed, review, audit, ask, the lineup fallback, and the no-lineup default) runs on `cursor-agent` with the resolver's `CURSOR_FABLE` id. Review uses the reviewer brief in the leg's worktree. Design, mixed, and ask stay packet-first and tool-less (`--mode ask`). Opus native still runs on the Claude subscription, and only when the route, the lineup, or `--claude-model opus` names it. The proof is the stream's init event naming Fable; Cursor reports no token usage. The column reads `<id> (via cursor)`. It draws Cursor Other Models.
 
-`--fable-overflow cursor` arms the switch without using it. When the Fable leg on the Claude subscription fails on a usage limit, the script reruns that leg on Cursor Fable in the same worktree. A usage limit is a subscription leg that exited non-zero or returned `is_error`, whose stderr or error result matches a limit message, such as `usage limit`, `limit reached`, or `requires usage credits`. The full pattern is in `review_run_claude`. A run that only failed the model check, or any other failure, stays a failure. The subscription attempt is kept as `voter-claude.max.*`, `voter-claude.via` says `cursor`, and `errors.md` gets a `note: fable overflow:` line.
+`--claude-model cursor-fable` is the same leg. `--fable-overflow cursor` is accepted on kind review and does not start a Claude subscription attempt. The stack runner may still pass either flag. `--claude-model opus` is unchanged.
 
-Before each phase 1 the stack runner runs `seat-usage` and reads the Fable percent from its cache. A cache older than 15 minutes counts as unreadable. It passes `--claude-model opus` when the weekly Fable slice is at or above 95%. It passes `--claude-model cursor-fable` for every ballot after one whose overflow fired, including a ballot from an earlier invocation. Otherwise, including when the percent cannot be read, it passes `--fable-overflow cursor`. A single `conclave.sh` run uses neither unless the chair passes it.
+### Grok on Cursor
+
+The Grok voter runs on `cursor-agent` with the resolver's `CURSOR_GROK` id. Design, mixed, and ask stay packet-first and tool-less. Review and audit run in the leg worktree; the final message is the report. `CONCLAVE_GROK_NATIVE=1` keeps the native `grok` CLI, including review session resume and `--reasoning-effort`. The default does not call that CLI.
 
 ## Revision recipes
 
@@ -696,8 +699,9 @@ not the case that motivated the change). On 2026-09-12 the only finding came
 from the brief-driven leg; both native legs returned clean. Native review
 follows the diff's topic, and a revision's risk is usually one step to the
 side. The default Anthropic leg is already on the script's reviewer brief
-for every diff, including a fresh PR (Targets). OpenAI and Grok stay native
-on a fresh PR. A revision wants the targeted completeness question, so put
+for every diff, including a fresh PR (Targets). OpenAI stays on its native
+review command. Grok uses `cursor-agent` unless `CONCLAVE_GROK_NATIVE=1`.
+A revision wants the targeted completeness question, so put
 every voter on that brief for a revision. The script does not do that
 switch; the chair runs the brief-mode commands below, or says so and does
 not pretend the diff review asked the completeness question.

@@ -103,6 +103,8 @@ EOF
 fi
 emit CODEX "$codex_bin"
 # xAI native: no pin; grok's default tracks its newest release.
+# The Grok voter uses CURSOR_GROK. GROK_NATIVE_MODEL is the opt-in
+# CONCLAVE_GROK_NATIVE=1 path only.
 emit GROK_NATIVE_MODEL "$(grok models 2>/dev/null |
   sed -nE 's/^Default model: ([A-Za-z0-9.-]+).*/\1/p')"
 # Newest Wonder full id. Empty when the listing fails or has no full id; the leg skips.

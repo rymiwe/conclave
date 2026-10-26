@@ -853,6 +853,10 @@ def test_cursor_leg(tmp: Path) -> None:
     write_exe(bindir / 'claude', '''\
         #!/usr/bin/env python3
         import json, os, pathlib, sys
+        argv = os.environ.get('CLAUDE_ARGV')
+        if argv:
+            with open(argv, 'a', encoding='utf-8') as fh:
+                fh.write('\\n'.join(sys.argv[1:]) + '\\n---\\n')
         pathlib.Path('max-touched').write_text('dirty')
         print(json.dumps({'is_error':os.environ.get('MAX_IS_ERROR','true') == 'true',
                           'result':os.environ.get('MAX_MESSAGE','Claude usage limit reached')}))
@@ -888,7 +892,7 @@ review_voter_header_value claude
         dest = tmp / name
         dest.mkdir()
         (wt / 'max-touched').unlink(missing_ok=True)
-        proc = run(['bash','-c',shell,'bash',str(SCRIPTS / 'council.sh'),str(dest),str(wt),sku,overflow], env=dict(env, **(extra or {})))
+        proc = run(['bash','-c',shell,'bash',str(SCRIPTS / 'council.sh'),str(dest),str(wt),sku,overflow], env=dict(env, CLAUDE_ARGV=str(dest / 'claude.argv'), **(extra or {})))
         check(proc.returncode == 0, f'{name} seam exits normally ({proc.stderr})')
         return dest, proc
     d, p = invoke('cursor-ok','cursor-fable')
@@ -899,24 +903,18 @@ review_voter_header_value claude
     d, p = invoke('cursor-wrong','cursor-fable',extra={'CURSOR_DISPLAY':'Wrong Model'})
     check((d / 'voter-claude.fail').exists() and (d / 'voter-claude.model.txt').read_text() == 'claude: FAIL via=cursor ran=Wrong_Model (lineup said claude-fable-test)\n', 'wrong init model fails with proof line')
     check('Wrong_Model (lineup said claude-fable-test)' in p.stdout, 'failed Cursor header reports model that ran')
-    d, p = invoke('overflow','fable','cursor')
-    check('rc=0' in p.stdout and (d / 'voter-claude.via').read_text() == 'cursor\n', 'usage limit reruns on Cursor')
-    check(all((d / f'voter-claude.max.{ext}').exists() for ext in ('json','err','fail')), 'subscription attempt preserved')
-    check('note: fable overflow:' in (d / 'errors.md').read_text() and 'note: the Claude subscription leg changed its worktree before the overflow rerun' in (d / 'errors.md').read_text(), 'overflow and dirty-worktree notes recorded')
-    d, p = invoke('no-overflow','fable')
-    check('rc=1' in p.stdout and not (d / 'voter-claude.stream.jsonl').exists(), 'no rerun without overflow flag')
-    d, p = invoke('other-error','fable','cursor',{'MAX_MESSAGE':'Network unavailable'})
-    check('rc=1' in p.stdout and (d / 'voter-claude.via').read_text() == 'max\n' and not (d / 'voter-claude.stream.jsonl').exists(), 'unrelated failure never overflows')
-    for name, extra in (
-        ('model-only', {'MAX_IS_ERROR':'false','MAX_EXIT':'0','MAX_MESSAGE':'Complete review: rate limit handling and usage limit display are correct.'}),
-        ('model-only-stderr', {'MAX_IS_ERROR':'false','MAX_EXIT':'0','MAX_MESSAGE':'Complete review.', 'MAX_STDERR':'usage limit reached'}),
-        ('retry-500', {'MAX_MESSAGE':'HTTP 500','MAX_STDERR':'retrying after rate limit backoff'})):
-        d, p = invoke(name,'fable','cursor',extra)
-        check('rc=1' in p.stdout and (d / 'voter-claude.via').read_text() == 'max\n'
-              and not (d / 'voter-claude.stream.jsonl').exists(), f'item 4 {name} stays on the Claude subscription')
-    d, p = invoke('real-cap-zero','fable','cursor', {'MAX_EXIT':'0'})
-    check('rc=0' in p.stdout and (d / 'voter-claude.via').read_text() == 'cursor\n',
-          'item 4 is_error true usage cap overflows even with zero process exit')
+    def claude_argv(d):
+        f = d / 'claude.argv'
+        return f.read_text() if f.exists() else ''
+    d, p = invoke('fable-default','fable')
+    check('rc=0' in p.stdout and (d / 'voter-claude.stream.jsonl').exists(), 'sku fable uses cursor-agent')
+    check('fable' not in claude_argv(d) and not claude_argv(d), 'sku fable does not call claude')
+    check(json.loads((d / 'voter-claude.json').read_text())['via'] == 'cursor', 'sku fable result is via cursor')
+    d, p = invoke('fable-overflow','fable','cursor')
+    check('rc=0' in p.stdout and not (d / 'voter-claude.max.json').exists() and not claude_argv(d),
+          'fable overflow does not attempt the claude CLI')
+    d, p = invoke('opus-native','opus')
+    check('opus' in claude_argv(d) and 'fable' not in claude_argv(d), 'opus still calls claude --model opus')
     d, p = invoke('cursor-unicode','cursor-fable',extra={'CURSOR_RESULT':'Review\u2028text\u0085done'})
     check('rc=0' in p.stdout and json.loads((d / 'voter-claude.json').read_text())['result'] == 'Review\u2028text\u0085done',
           'item 11 Cursor leg accepts literal U+2028 and U+0085')

@@ -43,7 +43,13 @@ cat >"$work/bin/grok" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-chmod +x "$work/bin/seat-usage" "$work/bin/grok"
+# Default Grok and Fable legs preflight cursor-agent. The launch functions
+# below are stubs; this binary only has to be on PATH.
+cat >"$work/bin/cursor-agent" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$work/bin/seat-usage" "$work/bin/grok" "$work/bin/cursor-agent"
 
 # The real leg launch is not what this test is measuring.
 review_make_leg() {
@@ -89,6 +95,10 @@ reset_case() {
   VOTERS_EXPLICIT=0
   VOTERS="claude,codex"
   CLAUDE_SKU="fable"
+  # A fable seat is cursor-agent. The availability check refuses an empty id.
+  CURSOR_GROK="grok-test"
+  CURSOR_FABLE="claude-fable-test"
+  export CURSOR_GROK CURSOR_FABLE
   HEADER_AUTHOR=""
   ID="reseat-$1"
   REPO=""
@@ -122,7 +132,7 @@ grep -q 're-seat: claude failed (nonzero); replaced with grok' "$DIR/reseat.md" 
   || fail "nonzero: $(cat "$DIR/reseat.md" 2>/dev/null)"
 grep -q 're-seat: grok produced a report' "$DIR/reseat.md" || fail "nonzero: no report note"
 [ "$VOTERS" = "codex,grok" ] || fail "nonzero: voters=$VOTERS"
-grep -q -- '--record-failure claude --reason nonzero' "$SEAT_LOG" || fail "nonzero: record: $(cat "$SEAT_LOG")"
+grep -q -- '--record-failure cursor --reason nonzero' "$SEAT_LOG" || fail "nonzero: record: $(cat "$SEAT_LOG")"
 review_report_present grok || fail "nonzero: grok report not counted"
 review_report_present claude && fail "nonzero: failed claude still counted"
 printf 'ok non-zero failure re-seats grok\n'
@@ -254,7 +264,7 @@ grep -q 'replaced with grok' "$DIR/reseat.md" || fail "both: $(cat "$DIR/reseat.
 grep -q 'replaced with argon' "$DIR/reseat.md" || fail "both second: $(cat "$DIR/reseat.md")"
 grep -q 'replaced with codex\|replaced with claude' "$DIR/reseat.md" && fail "both: reseated a failure: $(cat "$DIR/reseat.md")"
 [ "$VOTERS" = "grok,argon" ] || fail "both: voters=$VOTERS"
-grep -q -- '--exclude-seat claude' "$SEAT_LOG" || fail "both: exclude claude: $(cat "$SEAT_LOG")"
+grep -q -- '--exclude-seat cursor' "$SEAT_LOG" || fail "both: exclude cursor: $(cat "$SEAT_LOG")"
 grep -q -- '--exclude-seat chatgpt' "$SEAT_LOG" || fail "both: exclude chatgpt: $(cat "$SEAT_LOG")"
 printf 'ok both failures are excluded before either is replaced\n'
 
