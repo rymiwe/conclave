@@ -2,6 +2,11 @@
 # Conclave chair: route, run print-only voters in parallel, anonymize, call Jev.
 # Does not judge in this process. Does not edit application source.
 # scripts/council.sh is a deprecated alias that execs this file.
+# Needs bash 4.4+ (mapfile -d, local -n, associative arrays); macOS /bin/bash is 3.2.
+if [ "${BASH_VERSINFO[0]}" -lt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -lt 4 ]; }; then
+  echo "conclave: needs bash 4.4 or newer; this is bash ${BASH_VERSION}" >&2
+  exit 1
+fi
 set -eu
 
 INVOKE_CWD="$(pwd -P)"
