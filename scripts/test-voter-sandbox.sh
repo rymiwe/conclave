@@ -27,7 +27,19 @@ cat >"$WORK/cursor-agent" <<'SH'
 #!/bin/sh
 for a in "$@"; do printf '%s\n' "$a"; done >"$ARGV_LOG"
 SH
-chmod +x "$WORK/codex" "$WORK/cursor-agent"
+# The claude stub also copies the diff file it was given (--add-dir) aside.
+cat >"$WORK/claude" <<'SH'
+#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a"; done >"$ARGV_LOG"
+prev=''
+for a in "$@"; do
+  [ "$prev" = --add-dir ] && cp "$a/changes.diff" "$ARGV_LOG.diff"
+  prev="$a"
+done
+printf '{"result": "report"}\n'
+SH
+chmod +x "$WORK/codex" "$WORK/cursor-agent" "$WORK/claude"
+PATH="$WORK:$PATH"
 
 CODEX="$WORK/codex"
 CODEX_EFFORT=high
@@ -98,6 +110,42 @@ for fn in review_run_cursor_fable review_run_grok_cursor audit_run_grok_cursor; 
   argv="$WORK/$fn.test-db.argv"
   ! has "$argv" --sandbox || fail "$fn test-db passed --sandbox: $(cat "$argv")"
   has "$argv" --trust || fail "$fn test-db lost --trust: $(cat "$argv")"
+done
+
+# Opus native coverage leg: read-only tools by default, Bash plus the
+# test-database rule on test-db, never bypassPermissions. A staged change in
+# the worktree reaches the leg as a diff file outside the worktree.
+git -C "$WORK/wt" init -q
+printf 'a\n' >"$WORK/wt/f.txt"
+git -C "$WORK/wt" add f.txt
+after() { grep -A1 -x -- "$2" "$1" | sed -n 2p; }
+for mode in unset '' read-only test-db; do
+  leg "$mode" review_run_opus
+  argv="$WORK/review_run_opus.$mode.argv"
+  ! mentions "$argv" bypassPermissions || fail "opus ($mode) has bypassPermissions: $(cat "$argv")"
+  [ "$(after "$argv" --permission-mode)" = dontAsk ] || fail "opus ($mode) not dontAsk: $(cat "$argv")"
+  has "$argv" --strict-mcp-config || fail "opus ($mode) loads MCP servers: $(cat "$argv")"
+  has "$argv" /code-review\ high || fail "opus ($mode) lost the slash command: $(cat "$argv")"
+  grep -qF '+a' "$argv.diff" || fail "opus ($mode) diff file lacks the staged change"
+  dd="$(after "$argv" --add-dir)"
+  case "$dd" in "$WORK/wt"*) fail "opus ($mode) diff dir is inside the worktree: $dd" ;; esac
+  [ ! -e "$dd" ] || fail "opus ($mode) left its diff dir behind: $dd"
+  if [ "$mode" = test-db ]; then
+    [ "$(after "$argv" --tools)" = Read,Grep,Glob,Bash ] || fail "opus test-db tools: $(cat "$argv")"
+    [ "$(after "$argv" --allowedTools)" = Read,Grep,Glob,Bash ] || fail "opus test-db allowed: $(cat "$argv")"
+    [ "$(after "$argv" --disallowedTools)" = Task,Edit,Write,NotebookEdit,WebFetch,WebSearch ] \
+      || fail "opus test-db denied: $(cat "$argv")"
+    for want in 'only the test database (RAILS_ENV=test' 'roll back' 'Do not run docker commands'; do
+      after "$argv" --append-system-prompt | grep -qF -- "$want" \
+        || fail "opus test-db system prompt lacks '$want': $(cat "$argv")"
+    done
+  else
+    [ "$(after "$argv" --tools)" = Read,Grep,Glob ] || fail "opus ($mode) tools: $(cat "$argv")"
+    [ "$(after "$argv" --allowedTools)" = Read,Grep,Glob ] || fail "opus ($mode) allowed: $(cat "$argv")"
+    [ "$(after "$argv" --disallowedTools)" = Task,Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch ] \
+      || fail "opus ($mode) denied: $(cat "$argv")"
+    ! mentions "$argv" 'Database rule:' || fail "opus ($mode) has the test-db rule"
+  fi
 done
 
 # The lineup line names the mode.

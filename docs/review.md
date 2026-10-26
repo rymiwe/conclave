@@ -283,15 +283,27 @@ uses when `CLAUDE_SKU=opus`; it is not a second copy of the command.
 into this same launch. The coverage leg is then skipped. The lineup says
 `opus leg skipped: the claude leg is Opus native`.
 
-Same flags, `--model opus`, the subagent variable unset, and the slash
+`--model opus`, the subagent variable unset, read-only tools, and the slash
 command as an argument:
 
 ```
 env -u CLAUDE_CODE_SUBAGENT_MODEL \
-  claude -p --model opus --permission-mode bypassPermissions \
+  claude -p --model opus --effort high --permission-mode dontAsk \
+  --strict-mcp-config --tools Read,Grep,Glob --allowedTools Read,Grep,Glob \
+  --disallowedTools Task,Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch \
+  --add-dir <diff dir> --append-system-prompt "<the diff is in <diff dir>/changes.diff>" \
   --output-format json \
   "/code-review <bare target> high"
 ```
+
+With no shell the leg cannot run `git diff` or `gh`, so the script writes the
+worktree's staged diff to `changes.diff` in a temp dir outside the worktree,
+lets the leg read that dir, and removes it after the run. The dir name has no
+model word, because the report may quote the path. Under
+`CONCLAVE_VOTER_SANDBOX=test-db` the leg also gets Bash (still no Task, Edit,
+Write, or web) and the test-database rule in the appended system prompt. On
+2026-10-26 a default run on a one-line staged bug returned its `.result`
+report and `opus: ok` model proof.
 
 Whole codebase and ref-pair: `/code-review high` with no target. A PR passes
 the number only. The prompt has an explicit effort word and no model words.
@@ -347,7 +359,10 @@ container.
 - `read-only` is the default, when the variable is unset or empty. The Codex
   review leg gets `-c sandbox_mode=read-only` and
   `-c sandbox_workspace_write.network_access=false`. The cursor-agent voter
-  legs (Fable review, Grok review, Grok audit) get `--sandbox enabled`.
+  legs (Fable review, Grok review, Grok audit) get `--sandbox enabled`. The
+  Opus native coverage leg gets `--permission-mode dontAsk`,
+  `--strict-mcp-config`, and only Read, Grep, and Glob (Task, Bash, Edit,
+  Write, NotebookEdit, WebFetch, and WebSearch denied).
 - `test-db` is an opt-in. The Codex review leg gets
   `-c sandbox_mode=workspace-write` and
   `-c sandbox_workspace_write.network_access=true`, the only way it can
@@ -355,6 +370,8 @@ container.
   only the test database (`RAILS_ENV=test`), only inside a rolled-back
   transaction, no other database, host, or port, and no container or
   docker commands. The cursor-agent legs run as before, with no `--sandbox`.
+  The Opus native leg also gets Bash, and the same rule in its appended
+  system prompt.
 - Any other value stops the run before any leg launches.
 
 Codex's sandbox cannot limit network to one port. Under `test-db` the
@@ -367,9 +384,9 @@ has `-s`. The review leg sets the mode with `-c` keys. Do not use
 `danger-full-access`. Do not put `network_access` in `~/.codex/config.toml`.
 
 Under `read-only`, Rails cannot reach host Postgres, and the leg cannot write
-a scratch script. It reviews by reading. The Opus native coverage leg is not
-covered: `claude -p` has no read-only, no-network switch that keeps
-`/code-review` working, so it still runs with `bypassPermissions`. The lineup
+a scratch script. It reviews by reading. The Opus native coverage leg is
+covered too: `dontAsk` with only Read, Grep, and Glob, no MCP servers, and the
+staged diff in a file (above). It no longer runs with `bypassPermissions`. The lineup
 and `readonly.txt` carry a `voter sandbox:` line with the mode.
 
 Codex runs commands in a login shell, which skips mise or asdf activation.

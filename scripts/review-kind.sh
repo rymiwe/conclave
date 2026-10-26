@@ -78,9 +78,9 @@ voter_sandbox_mode() {
 
 voter_sandbox_line() {
   if [ "$(voter_sandbox_mode)" = test-db ]; then
-    printf 'voter sandbox: test-db (opt-in; Codex workspace-write with network, test database in a rolled-back transaction by instruction; cursor-agent legs unsandboxed)\n'
+    printf 'voter sandbox: test-db (opt-in; Codex workspace-write with network, test database in a rolled-back transaction by instruction; cursor-agent legs unsandboxed; Opus native adds Bash)\n'
   else
-    printf 'voter sandbox: read-only (Codex read-only, no network; cursor-agent legs --sandbox enabled)\n'
+    printf 'voter sandbox: read-only (Codex read-only, no network; cursor-agent legs --sandbox enabled; Opus native Read/Grep/Glob only)\n'
   fi
 }
 
@@ -1509,7 +1509,7 @@ review_opus_usage_limited() {
 review_run_opus_native() {
   # Shared Opus native launch. $1 = worktree, $2 = voter id (claude or opus).
   # The claude seat uses this only when CLAUDE_SKU=opus. The opus seat always does.
-  local wt="$1" voter="$2" prompt ec extra=""
+  local wt="$1" voter="$2" prompt ec extra="" diffdir system tools denied
   local out="$DIR/voter-$voter.json" err="$DIR/voter-$voter.err"
   prompt="$(review_prompt_claude)"
   prompt="$(printf '%s' "$prompt" | tr -d '\n')"
@@ -1525,11 +1525,34 @@ review_run_opus_native() {
     echo "$voter: cannot cd to worktree" >"$DIR/voter-$voter.fail"
     return 1
   }
+  # Read-only by default like the other voters: file reads only, no shell, no
+  # web, no MCP servers, and dontAsk denies anything else. With no shell the
+  # leg cannot run git diff, so the staged diff goes in a file it may read,
+  # outside the worktree. test-db adds Bash and the test-database rule.
+  diffdir="$(mktemp -d "${SCRATCH:-${TMPDIR:-/tmp}}/leg-diff.XXXXXX")" || {
+    echo "$voter: mktemp for the diff failed" >"$DIR/voter-$voter.fail"
+    return 1
+  }
+  git -C "$wt" diff --cached >"$diffdir/changes.diff" 2>/dev/null || : >"$diffdir/changes.diff"
+  tools='Read,Grep,Glob'
+  denied='Task,Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch'
+  system="The changes under review are staged in this worktree. Their full diff is in $diffdir/changes.diff; read it to see what changed. If it is empty, review the worktree as it is."
+  if [ "$(voter_sandbox_mode)" = test-db ]; then
+    tools='Read,Grep,Glob,Bash'
+    denied='Task,Edit,Write,NotebookEdit,WebFetch,WebSearch'
+    system="$system $VOTER_TEST_DB_RULE"
+  else
+    system="$system You have no shell and no network."
+  fi
   ec=0
   env -u CLAUDE_CODE_SUBAGENT_MODEL \
-    claude -p --model opus --effort high --permission-mode bypassPermissions \
+    claude -p --model opus --effort high --permission-mode dontAsk \
+      --strict-mcp-config --tools "$tools" --allowedTools "$tools" \
+      --disallowedTools "$denied" --add-dir "$diffdir" \
+      --append-system-prompt "$system" \
       --output-format json \
       "$prompt" >"$out" 2>"$err" || ec=$?
+  rm -rf -- "$diffdir"
   if [ "$ec" -ne 0 ]; then
     echo "$voter: exit $ec" >"$DIR/voter-$voter.fail"
     return 1
