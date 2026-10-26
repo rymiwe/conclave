@@ -7,7 +7,9 @@
 
 The reviewer ends its answer with `one_way: yes` or `one_way: no`, and on yes
 one `one_way_at: <file>:<line> <what>` line per step a git revert cannot undo.
-Lines inside code fences are quotes and do not count.
+Lines inside code fences are quotes and do not count. A line counts only when
+its first token is `one_way:` or `one_way_at:`; prose that mentions one_way is
+ignored, and a directive with a value other than yes/no is unparseable.
 
 merge fails closed. It refuses (exit 3, nothing merged) when the verdict is
 yes, missing, conflicting, or malformed, when gate-head.txt is missing, when
@@ -26,7 +28,10 @@ from pathlib import Path
 
 LABEL = "one-way"
 REFUSED = 3
-VERDICT = re.compile(r"^one_way\s*:\s*(\S+)\s*$", re.I)
+# A directive is a line whose first token is one_way: or one_way_at: (colon
+# required). A garbled value after the colon is unparseable; prose is not a directive.
+VERDICT = re.compile(r"^one_way\s*:(.*)$", re.I)
+DIRECTIVE_AT = re.compile(r"^one_way_at\s*:", re.I)
 ITEM = re.compile(r"^one_way_at\s*:\s*(\S+:\d+)\s*(.*)$", re.I)
 
 
@@ -53,18 +58,17 @@ def parse(text: str) -> dict:
         if m:
             items.append({"at": m.group(1), "what": m.group(2).strip()})
             continue
-        if line.lower().startswith("one_way_at"):
+        if DIRECTIVE_AT.match(line):
             bad.append(line)
             continue
         m = VERDICT.match(line)
         if m:
-            v = m.group(1).lower()
+            v = m.group(1).strip().lower()
             if v in ("yes", "no"):
                 values.append(v)
             else:
                 bad.append(line)
-        elif re.match(r"^one_way\b", line, re.I):
-            bad.append(line)
+        # Anything else that only mentions one_way (prose, a bullet) is ignored.
     out: dict = {"one_way": None, "items": items, "error": None}
     if bad:
         out["error"] = "unparseable one_way line: " + "; ".join(repr(b) for b in bad)
