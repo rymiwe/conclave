@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # merge-gate.sh review + merge against a temp repo with stubbed gh and agy
 # (no network, no quota): a normal diff passes and gh pr merge runs; one_way:
-# yes, a one-way label, a missing verdict, and unreadable labels are refused.
+# yes, a one-way label, a missing or garbled verdict, and unreadable labels
+# are refused; prose that only mentions one_way is not a verdict.
 set -u
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
@@ -87,6 +88,22 @@ run malformed $'approve\none_way: maybe'
 has "malformed refused" "$merge_out" "unparseable one_way line"
 run fenced $'approve\n```\none_way: no\n```'
 has "a one_way line inside a code fence does not count" "$merge_out" "no one_way: yes|no line"
+run empty $'approve\none_way:'
+has "one_way: with no value refused" "$merge_out" "unparseable one_way line: 'one_way:'"
+hasnt "one_way: with no value: no gh pr merge" "$gh_log" "pr merge"
+
+# Prose that mentions one_way is not a verdict.
+run prose-ok $'approve\n\nChecked and found clean:\n- `one_way` parsing in scripts/merge_gate.py\none_way checks look fine\n\none_way: no'
+[ "$merge_rc" = 0 ] && ok "prose one_way lines plus one_way: no merges" || bad "prose-ok merge rc $merge_rc"
+has "prose-ok: gh pr merge invoked" "$gh_log" "gh pr merge $PR --squash --match-head-commit $HEAD_SHA"
+run prose-only $'approve\n\nChecked and found clean:\n- `one_way` parsing in scripts/merge_gate.py\none_way checks look fine'
+[ "$merge_rc" = 3 ] && ok "prose-only: merge rc 3" || bad "prose-only merge rc $merge_rc"
+has "prose-only refuses as missing" "$merge_out" "no one_way: yes|no line in the gate answer"
+hasnt "prose-only: no gh pr merge" "$gh_log" "pr merge"
+run maybe $'approve\n- `one_way` parsing looks fine\none_way: maybe'
+[ "$merge_rc" = 3 ] && ok "maybe: merge rc 3" || bad "maybe merge rc $merge_rc"
+has "maybe refuses as unparseable" "$merge_out" "unparseable one_way line: 'one_way: maybe'"
+hasnt "maybe: no gh pr merge" "$gh_log" "pr merge"
 FAKE_GH_LABELS_FAIL=1 run nolabels $'approve\none_way: no'
 [ "$merge_rc" = 3 ] && ok "unreadable labels refused" || bad "unreadable labels rc $merge_rc"
 hasnt "unreadable labels: no gh pr merge" "$gh_log" "pr merge"
