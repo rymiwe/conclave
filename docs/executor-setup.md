@@ -29,10 +29,10 @@ All logins are device-auth: post the URL and code, never a token.
 
 | CLI | Install | Login | Verify |
 |---|---|---|---|
-| `claude` | npm global | `claude` then `/login` (a plan that includes Fable) | `/usage` shows a `Current week (Fable)` line |
+| `claude` | npm global | `claude` then `/login` (Opus on the Claude subscription) | Fable does not use this CLI. Opus does, when the route names it |
 | `codex` | Put a stable `codex` at or above 0.159.3 on PATH, or cache an alpha with `npx @openai/codex@alpha --version`. `scripts/resolve-models.sh` takes every `codex` on PATH and every npx-cached binary. The version is the token after `codex-cli ` on the `--version` line. Stable means exactly `N.N.N`. Alpha means `N.N.N-alpha...`. A `-beta` or `-rc` build is rejected. It picks the newest stable at or above 0.159.3 (the first stable verified to run Astra, on the executor, 2026-10-01). Only if there is none, it picks the newest `-alpha` at or above 0.154. Stable 0.154.0 is rejected (it rejects Astra). `CONCLAVE_CODEX_BIN` overrides that pick. | `login --device-auth` on the binary the resolver picked (a ChatGPT plan that includes Astra) | That binary's `--version` is stable `N.N.N` at or above 0.159.3, or `-alpha` at or above 0.154 |
 | `cursor-agent` | Cursor's installer | `cursor-agent login` | `cursor-agent models` lists the newest `grok-*` and `claude-fable-*` |
-| `grok` | xAI installer to `~/.local/bin/grok` | `grok login` (a Grok subscription) | `grok models` prints a default model |
+| `grok` | xAI installer to `~/.local/bin/grok` | `grok login` (a Grok subscription) | The voter uses `cursor-agent` and `CURSOR_GROK`. `CONCLAVE_GROK_NATIVE=1` uses this CLI instead. `grok models` prints a default model for that opt-in |
 | `muse` | Meta installer at `https://dev.meta.ai/install.sh`, binary at `~/.local/bin/muse` | `muse login` | `muse exec --help` shows the headless command. The shadow leg is off unless `CONCLAVE_MUSE_SHADOW=1` |
 | `agy` | Google Antigravity CLI, binary on PATH or at `~/.local/bin/agy`. `CONCLAVE_AGY` overrides it (`COUNCIL_AGY` is the alias) | Sign in before a ballot. `agy -p "/usage"` prints the pool rows | Design and mixed seat Argon unless `CONCLAVE_ARGON=0`. Do not opt in to data sharing. Do not mark the repo trusted in `agy`. `CONCLAVE_ARGON_MODEL` overrides the model id. `CONCLAVE_ARGON_TIMEOUT` is the print timeout in seconds (default 900) |
 

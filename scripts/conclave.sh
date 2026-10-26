@@ -418,8 +418,11 @@ Options:
   --record-review        Append the review phase for an existing run and exit.
                          Requires --run-id and --review-file. Does not launch voters.
   --claude-model NAME    fable | opus | cursor-fable
-                         cursor-fable runs on Cursor for review, design, and mixed.
-  --fable-overflow cursor  Retry a usage-limited Fable leg on Cursor (review only)
+                         fable and cursor-fable run on cursor-agent (CURSOR_FABLE).
+                         opus is the only native claude leg.
+  --fable-overflow cursor  Accepted on kind review. Fable already runs on
+                         cursor-agent, so this does not start a Claude
+                         subscription leg.
   --kind KIND            design | review | mixed | audit
   --difficulty LEVEL     low | med | high
   --repo DIR             Target repo for every kind (default: the directory this script was started from)
@@ -1229,9 +1232,8 @@ resolve_routing() {
   fi
 
   case "$CLAUDE_SKU" in
-    fable) CLAUDE_MODEL_ALIAS="fable" ;;
+    fable|cursor-fable) CLAUDE_MODEL_ALIAS="${CURSOR_FABLE:-}" ;;
     opus) CLAUDE_MODEL_ALIAS="opus" ;;
-    cursor-fable) CLAUDE_MODEL_ALIAS="${CURSOR_FABLE:-}" ;;
     *) die "invalid claude sku: $CLAUDE_SKU (want fable|opus|cursor-fable)" ;;
   esac
   if [ -n "$FABLE_OVERFLOW" ] && [ "$KIND" != review ]; then
@@ -1797,9 +1799,23 @@ seat_argon() {
 
 write_routing_md() {
   local codex_model_line="$CODEX_MODEL"
-  local muse_enabled="no"
+  local muse_enabled="no" claude_cli claude_note grok_cli grok_model
   if muse_shadow_on; then
     muse_enabled="yes"
+  fi
+  if claude_leg_uses_cursor; then
+    claude_cli="cursor-agent"
+    claude_note="fable on this seat through cursor-agent; opus is the only native claude leg and is a review coverage leg"
+  else
+    claude_cli="claude"
+    claude_note="opus native on this seat; a fable leg runs on cursor-agent"
+  fi
+  if grok_native_requested; then
+    grok_cli="grok"
+    grok_model="${GROK_NATIVE_MODEL:-} (native CLI; CONCLAVE_GROK_NATIVE=1)"
+  else
+    grok_cli="cursor-agent"
+    grok_model="${CURSOR_GROK:-} (cursor-agent)"
   fi
 
   local excl=""
@@ -1823,18 +1839,21 @@ voters: $VOTERS
 
 sku: $CLAUDE_SKU
 model_alias: $CLAUDE_MODEL_ALIAS
+cli: $claude_cli
 effort: $CLAUDE_EFFORT
-notes: fable on this seat; opus is a review coverage leg and is rejected here
+notes: $claude_note
 
 ## Codex voter
 
 model: $codex_model_line
+cli: $CODEX
 effort: $CODEX_EFFORT
 config: model_reasoning_effort=$CODEX_EFFORT
 
 ## Grok voter
 
-model: $GROK_NATIVE_MODEL (standard; never Fast)
+model: $grok_model
+cli: $grok_cli
 reasoning_effort: $GROK_EFFORT
 $(argon_routing_section)
 
@@ -1859,7 +1878,7 @@ voter_cwd: out-of-repo temp dir (never under git worktree; mirrored for humans)
 mirror_real_vote: tmp/council/$ID/packet/
 mirror_dry_run: tmp/council/$ID/preview/packet/
 contents: brief + review-snapshot + PROMPT + attached files
-notes: all voters start with cwd=packet; Claude/Grok tool-less; Codex read-only sandbox (not a full FS jail)
+notes: all voters start with cwd=packet; Fable and Grok are tool-less on cursor-agent; Codex read-only sandbox (not a full FS jail)
 EOF
 }
 
@@ -2607,8 +2626,118 @@ PY
   return 0
 }
 
+claude_leg_uses_cursor() {
+  # Opus is the only native claude leg, and only when the route or lineup names it.
+  [ "${CLAUDE_SKU:-fable}" != opus ]
+}
+
+grok_native_requested() {
+  # The native grok CLI is opt-in. The default voter is cursor-agent.
+  [ "${CONCLAVE_GROK_NATIVE:-}" = 1 ]
+}
+
+claude_launch_cli() {
+  if claude_leg_uses_cursor; then
+    printf 'cursor-agent'
+  else
+    printf 'claude'
+  fi
+}
+
+grok_launch_cli() {
+  if grok_native_requested; then
+    printf 'grok'
+  else
+    printf 'cursor-agent'
+  fi
+}
+
+grok_launch_model() {
+  if grok_native_requested; then
+    printf '%s' "${GROK_NATIVE_MODEL:-}"
+  else
+    printf '%s' "${CURSOR_GROK:-}"
+  fi
+}
+
+claude_leg_available() {
+  # $1 is a fail-file path, or empty to log_err. Returns 1 when the leg cannot start.
+  local dest="${1:-}" msg=""
+  if claude_leg_uses_cursor; then
+    if [ -z "${CURSOR_FABLE:-}" ]; then
+      msg="claude: Cursor Fable id is unresolved"
+    elif ! command -v "$(conclave_env CURSOR_AGENT cursor-agent)" >/dev/null 2>&1; then
+      msg="claude: cursor-agent not found"
+    fi
+  elif ! command -v claude >/dev/null 2>&1; then
+    msg="claude: CLI not found"
+  fi
+  if [ -n "$msg" ]; then
+    if [ -n "$dest" ]; then
+      printf '%s\n' "$msg" >"$dest"
+    else
+      log_err "$msg"
+    fi
+    return 1
+  fi
+}
+
+grok_leg_available() {
+  # $1 is a fail-file path, or empty to log_err. Returns 1 when the leg cannot start.
+  local dest="${1:-}" msg=""
+  if grok_native_requested; then
+    if ! command -v grok >/dev/null 2>&1; then
+      msg="grok: CLI not found"
+    fi
+  elif [ -z "${CURSOR_GROK:-}" ]; then
+    msg="grok: CURSOR_GROK is empty; refusing to launch"
+  elif ! command -v "$(conclave_env CURSOR_AGENT cursor-agent)" >/dev/null 2>&1; then
+    msg="grok: cursor-agent not found"
+  fi
+  if [ -n "$msg" ]; then
+    if [ -n "$dest" ]; then
+      printf '%s\n' "$msg" >"$dest"
+    else
+      log_err "$msg"
+    fi
+    return 1
+  fi
+}
+
+cursor_write_text_result() {
+  # $1 stream, $2 model id, $3 family word, $4 voter, $5 text out, $6 proof out.
+  python3 - "$@" <<'PY'
+import json, re, sys
+from pathlib import Path
+stream, model, family, voter, text_out, proof_out = sys.argv[1:7]
+raw = Path(stream).read_text(encoding="utf-8")
+lines = raw.split("\n")
+if lines and lines[-1] == "":
+    lines.pop()
+try:
+    events = [json.loads(line) for line in lines if line]
+    last = events[-1]
+    if (last.get("type") != "result" or last.get("is_error") is not False
+            or not isinstance(last.get("result"), str) or not last["result"].strip()):
+        raise ValueError("last event is not a successful non-empty result")
+    init = next((e for e in events if e.get("type") == "system"), {})
+    display = str(init.get("model") or "unknown")
+    shown = re.sub(r"\s", "_", display)
+    ok = family.lower() in display.lower()
+    proof = (f"{voter}: ok via=cursor model={model} display={shown}" if ok else
+             f"{voter}: FAIL via=cursor ran={shown} (lineup said {model})")
+    Path(proof_out).write_text(proof + "\n", encoding="utf-8")
+    if not ok:
+        raise ValueError(f"Cursor init model has no {family} proof")
+    Path(text_out).write_text(last["result"].strip() + "\n", encoding="utf-8")
+except (ValueError, IndexError, json.JSONDecodeError, OSError) as exc:
+    sys.stderr.write(f"{voter}: {exc}\n")
+    raise SystemExit(1)
+PY
+}
+
 run_claude() {
-  if [ "$CLAUDE_SKU" = cursor-fable ]; then
+  if claude_leg_uses_cursor; then
     run_cursor_fable_packet
     return
   fi
@@ -2721,36 +2850,9 @@ run_codex() {
   mark_voter_ok codex
 }
 
-run_grok() {
-  local out="$DIR/voter-grok.md"
-  local err="$DIR/voter-grok.err"
-  local prompt_file="$PACKET/PROMPT.md"
-  local raw="$DIR/voter-grok.raw.md"
-  local ec
-
-  if [ -z "${GROK_NATIVE_MODEL:-}" ]; then
-    log_err "grok: GROK_NATIVE_MODEL is empty; refusing to launch"
-    return 1
-  fi
-
-  # Packet-first: absolute cwd + prompt-file; no tools.
-  ec=0
-  grok --cwd "$PACKET" --prompt-file "$prompt_file" --tools "" \
-    --always-approve --output-format plain --model "$GROK_NATIVE_MODEL" \
-    --reasoning-effort "$GROK_EFFORT" --no-subagents --disable-web-search \
-    --max-turns 8 \
-    >"$raw" 2>"$err" || ec=$?
-  if [ "$ec" -ne 0 ]; then
-    log_err "grok: invocation failed (exit $ec); see voter-grok.err"
-    rm -f "$out"
-    return 1
-  fi
-  if [ ! -s "$raw" ]; then
-    log_err "grok: empty output"
-    return 1
-  fi
-
-  if ! python3 - "$raw" "$out" <<'PY'
+grok_keep_schema() {
+  # $1 raw text, $2 schema out. Packet-first headings, same as the native leg.
+  python3 - "$1" "$2" <<'PY'
 import re, sys
 raw_path, out_path = sys.argv[1], sys.argv[2]
 text = open(raw_path, encoding="utf-8").read()
@@ -2768,7 +2870,80 @@ for h in ["## Findings", "## Approach", "## Would not do", "## Uncertainties"]:
         sys.exit(2)
 open(out_path, "w", encoding="utf-8").write(body)
 PY
-  then
+}
+
+run_grok() {
+  if grok_native_requested; then
+    run_grok_native
+    return
+  fi
+  run_grok_cursor
+}
+
+run_grok_cursor() {
+  # Packet-first and tool-less, same rules as the native packet leg.
+  local out="$DIR/voter-grok.md" err="$DIR/voter-grok.err"
+  local raw="$DIR/voter-grok.raw.md" stream="$DIR/voter-grok.stream.jsonl" ec=0
+  if [ -z "${CURSOR_GROK:-}" ] || [ ! -s "$PACKET/PROMPT.md" ]; then
+    log_err "grok: CURSOR_GROK is empty; refusing to launch"
+    return 1
+  fi
+  (
+    cd -- "$PACKET" || exit 97
+    "$(conclave_env CURSOR_AGENT cursor-agent)" -p --mode ask \
+      --model "$CURSOR_GROK" \
+      --output-format stream-json \
+      --trust --workspace "$PACKET" \
+      "$(cat "$PACKET/PROMPT.md")"
+  ) >"$stream" 2>"$err" || ec=$?
+  if [ "$ec" -ne 0 ]; then
+    log_err "grok: Cursor exit $ec; see voter-grok.err"
+    rm -f "$out"
+    return 1
+  fi
+  if ! cursor_write_text_result "$stream" "$CURSOR_GROK" grok grok "$raw" "$DIR/voter-grok.model.txt"; then
+    log_err "grok: Cursor output missing or model unproven; see voter-grok.stream.jsonl"
+    rm -f "$out"
+    return 1
+  fi
+  if ! grok_keep_schema "$raw" "$out"; then
+    log_err "grok: output missing required schema headings; see voter-grok.raw.md / voter-grok.md"
+    rm -f "$out"
+    return 1
+  fi
+  mark_voter_ok grok
+}
+
+run_grok_native() {
+  local out="$DIR/voter-grok.md"
+  local err="$DIR/voter-grok.err"
+  local prompt_file="$PACKET/PROMPT.md"
+  local raw="$DIR/voter-grok.raw.md"
+  local ec
+
+  if [ -z "${GROK_NATIVE_MODEL:-}" ]; then
+    log_err "grok: GROK_NATIVE_MODEL is empty; refusing to launch"
+    return 1
+  fi
+
+  # Packet-first: absolute cwd + prompt-file; no tools. Opt-in only.
+  ec=0
+  grok --cwd "$PACKET" --prompt-file "$prompt_file" --tools "" \
+    --always-approve --output-format plain --model "$GROK_NATIVE_MODEL" \
+    --reasoning-effort "$GROK_EFFORT" --no-subagents --disable-web-search \
+    --max-turns 8 \
+    >"$raw" 2>"$err" || ec=$?
+  if [ "$ec" -ne 0 ]; then
+    log_err "grok: invocation failed (exit $ec); see voter-grok.err"
+    rm -f "$out"
+    return 1
+  fi
+  if [ ! -s "$raw" ]; then
+    log_err "grok: empty output"
+    return 1
+  fi
+
+  if ! grok_keep_schema "$raw" "$out"; then
     log_err "grok: output missing required schema headings; see voter-grok.raw.md / voter-grok.md"
     rm -f "$out"
     return 1
@@ -3588,10 +3763,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
     printf '  downgrade: %s\n' "$BALLOT_DOWNGRADE_WHY"
   fi
   printf '  target=%s\n' "$REPO"
-  printf '  claude=%s effort=%s | codex=%s effort=%s | %s effort=%s | judge=jev\n' \
-    "$CLAUDE_MODEL_ALIAS" "$CLAUDE_EFFORT" \
+  printf '  claude=%s cli=%s effort=%s | codex=%s effort=%s | grok=%s cli=%s effort=%s | judge=jev\n' \
+    "$CLAUDE_MODEL_ALIAS" "$(claude_launch_cli)" "$CLAUDE_EFFORT" \
     "$CODEX_MODEL" "$CODEX_EFFORT" \
-    "$GROK_NATIVE_MODEL" "$GROK_EFFORT"
+    "$(grok_launch_model)" "$(grok_launch_cli)" "$GROK_EFFORT"
   if muse_shadow_on; then
     printf '  muse-shadow=on model=%s (non-voting, packet-first, tool-less)\n' \
       "$MUSE_WONDER_MODEL"
@@ -3638,10 +3813,10 @@ if [ -n "${BALLOT_EXCLUDED_WHY:-}" ]; then
 fi
 printf '  voters: %s\n' "$VOTERS"
 printf '  target=%s\n' "$REPO"
-printf '  claude=%s effort=%s | codex=%s effort=%s | %s effort=%s | judge=jev\n' \
-  "$CLAUDE_MODEL_ALIAS" "$CLAUDE_EFFORT" \
+printf '  claude=%s cli=%s effort=%s | codex=%s effort=%s | grok=%s cli=%s effort=%s | judge=jev\n' \
+  "$CLAUDE_MODEL_ALIAS" "$(claude_launch_cli)" "$CLAUDE_EFFORT" \
   "$CODEX_MODEL" "$CODEX_EFFORT" \
-  "$GROK_NATIVE_MODEL" "$GROK_EFFORT"
+  "$(grok_launch_model)" "$(grok_launch_cli)" "$GROK_EFFORT"
 if muse_shadow_on; then
   printf '  muse-shadow=on model=%s (non-voting, packet-first, tool-less)\n' \
     "$MUSE_WONDER_MODEL"
@@ -3666,13 +3841,7 @@ for v in "${VOTER_LIST[@]}"; do
   [ -n "$v" ] || continue
   case "$v" in
     claude)
-      if [ "$CLAUDE_SKU" = cursor-fable ]; then
-        if ! command -v "$(conclave_env CURSOR_AGENT cursor-agent)" >/dev/null 2>&1; then
-          log_err "claude: cursor-agent not found"
-          continue
-        fi
-      elif ! command -v claude >/dev/null 2>&1; then
-        log_err "claude: CLI not found (command -v claude failed)"
+      if ! claude_leg_available; then
         continue
       fi
       council_bg run_claude
@@ -3687,8 +3856,7 @@ for v in "${VOTER_LIST[@]}"; do
       PIDS="$PIDS $!"
       ;;
     grok)
-      if ! command -v grok >/dev/null 2>&1; then
-        log_err "grok: CLI not found (command -v grok failed)"
+      if ! grok_leg_available; then
         continue
       fi
       council_bg run_grok
@@ -3753,7 +3921,8 @@ HDR_HAS_C=0
 HDR_VC=""
 if voter_is_named grok; then
   HDR_HAS_C=1
-  HDR_VC="${GROK_NATIVE_MODEL:-unproven}"
+  HDR_VC="$(grok_launch_model)"
+  [ -n "$HDR_VC" ] || HDR_VC="unproven"
 fi
 HDR_HAS_OPUS=0
 HDR_VOPUS=""

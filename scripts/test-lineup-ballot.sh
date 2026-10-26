@@ -715,7 +715,13 @@ exit 0
 EOF
 cat >"$work/gate/bin/cursor-agent" <<'EOF'
 #!/bin/sh
-exit 0
+if [ "${1:-}" = models ]; then
+  printf '%s\n' claude-fable-9-9-thinking-xhigh grok-9.9-xhigh grok-9.9-high-fast
+  exit 0
+fi
+touch "$CURSOR_RAN"
+printf '%s\n' "$@" >"$CURSOR_ARGV"
+exit 1
 EOF
 cat >"$work/gate/bin/jev-op" <<'EOF'
 #!/bin/sh
@@ -806,6 +812,8 @@ run_gate() {
     SEAT_LOG="$work/gate/seat.log" \
     SEAT_JSON="$work/gate/ask.json" \
     CLAUDE_RAN="$work/gate/claude.ran" \
+    CURSOR_RAN="$work/gate/cursor.ran" \
+    CURSOR_ARGV="$work/gate/cursor.argv" \
     SEAT_USAGE_RUNS="$work/gate/runs.jsonl" \
     bash "$CONCLAVE" "$@"
 }
@@ -824,7 +832,9 @@ if [ "$gate_ec" -ne 0 ] || [ ! -s "$GATE_DIR/judgment.md" ]; then
   cat "$GATE_DIR/jev-judge.log" >&2 || true
 fi
 check "stubbed run exits 0" [ "$gate_ec" -eq 0 ]
-check "stubbed claude exited 1" [ -f "$work/gate/claude.ran" ]
+check "stubbed claude CLI was not launched" [ ! -f "$work/gate/claude.ran" ]
+check "stubbed fable leg called cursor-agent" [ -f "$work/gate/cursor.ran" ]
+check "cursor-agent argv names the fable id" grep -qx claude-fable-9-9-thinking-xhigh "$work/gate/cursor.argv"
 check "seat-usage ask was the route" grep -q -- '--route lineup' "$work/gate/seat.log"
 check "stubbed run writes judgment.md" [ -s "$GATE_DIR/judgment.md" ]
 check "errors.md names the missing voter" grep -q 'named voter missing: claude' "$GATE_DIR/errors.md"

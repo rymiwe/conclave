@@ -314,7 +314,14 @@ ask_resolve() {
 
   load_models
   case "${FLAG_CLAUDE:-fable}" in
-    fable|opus) CLAUDE_MODEL_ALIAS="${FLAG_CLAUDE:-fable}" ;;
+    opus)
+      CLAUDE_SKU=opus
+      CLAUDE_MODEL_ALIAS=opus
+      ;;
+    fable)
+      CLAUDE_SKU=fable
+      CLAUDE_MODEL_ALIAS="${CURSOR_FABLE:-}"
+      ;;
     *) die "ask mode --claude-model wants fable or opus" ;;
   esac
   CODEX_MODEL="$CODEX_REVIEW_MODEL"
@@ -360,7 +367,41 @@ ask_answer_ok() {
   : >"$ASK_OUT/answer-$1.ok"
 }
 
+ask_run_cursor_fable() {
+  # Print-only, same as the packet Fable leg. The workspace is the packet.
+  local out="$ASK_OUT/answer-claude.md" err="$ASK_OUT/answer-claude.err"
+  local stream="$ASK_OUT/answer-claude.stream.jsonl" ec=0
+  if [ -z "${CURSOR_FABLE:-}" ]; then
+    log_err "claude: Cursor Fable id is unresolved"
+    return 1
+  fi
+  (
+    cd -- "$PACKET" || exit 97
+    "$(conclave_env CURSOR_AGENT cursor-agent)" -p --mode ask \
+      --model "$CURSOR_FABLE" \
+      --output-format stream-json \
+      --trust --workspace "$PACKET" \
+      "$(cat "$PACKET/PROMPT.md")"
+  ) >"$stream" 2>"$err" || ec=$?
+  if [ "$ec" -ne 0 ]; then
+    log_err "claude: Cursor exit $ec; see answer-claude.err"
+    rm -f "$out"
+    return 1
+  fi
+  if ! cursor_write_text_result "$stream" "$CURSOR_FABLE" fable claude \
+    "$out" "$ASK_OUT/answer-claude.model.txt"; then
+    log_err "claude: Cursor Fable output missing or model unproven"
+    rm -f "$out"
+    return 1
+  fi
+  ask_answer_ok claude
+}
+
 ask_run_claude() {
+  if claude_leg_uses_cursor; then
+    ask_run_cursor_fable
+    return
+  fi
   local out="$ASK_OUT/answer-claude.md" err="$ASK_OUT/answer-claude.err" ec=0
   (
     cd -- "$PACKET" || exit 97
@@ -388,7 +429,41 @@ ask_run_codex() {
   ask_answer_ok codex
 }
 
+ask_run_grok_cursor() {
+  # Print-only. The answer is the cursor-agent result. No grok session file.
+  local out="$ASK_OUT/answer-grok.md" err="$ASK_OUT/answer-grok.err"
+  local stream="$ASK_OUT/answer-grok.stream.jsonl" ec=0
+  if [ -z "${CURSOR_GROK:-}" ]; then
+    log_err "grok: CURSOR_GROK is empty; refusing to launch"
+    return 1
+  fi
+  (
+    cd -- "$PACKET" || exit 97
+    "$(conclave_env CURSOR_AGENT cursor-agent)" -p --mode ask \
+      --model "$CURSOR_GROK" \
+      --output-format stream-json \
+      --trust --workspace "$PACKET" \
+      "$(cat "$PACKET/PROMPT.md")"
+  ) >"$stream" 2>"$err" || ec=$?
+  if [ "$ec" -ne 0 ]; then
+    log_err "grok: Cursor exit $ec; see answer-grok.err"
+    rm -f "$out"
+    return 1
+  fi
+  if ! cursor_write_text_result "$stream" "$CURSOR_GROK" grok grok \
+    "$out" "$ASK_OUT/answer-grok.model.txt"; then
+    log_err "grok: Cursor output missing or model unproven"
+    rm -f "$out"
+    return 1
+  fi
+  ask_answer_ok grok
+}
+
 ask_run_grok() {
+  if ! grok_native_requested; then
+    ask_run_grok_cursor
+    return
+  fi
   # Grok can exit 0 after cancelling its own turn. The answer counts only
   # when the session's last turn_ended is completed.
   local out="$ASK_OUT/answer-grok.md" err="$ASK_OUT/answer-grok.err" ec=0 sess outcome
@@ -421,7 +496,7 @@ ask_voter_label() {
   case "$1" in
     claude) printf '%s, effort %s (alias)' "$CLAUDE_MODEL_ALIAS" "$CLAUDE_EFFORT" ;;
     codex) printf '%s, effort %s' "$CODEX_MODEL" "$CODEX_EFFORT" ;;
-    grok) printf '%s, effort %s' "$GROK_NATIVE_MODEL" "$GROK_EFFORT" ;;
+    grok) printf '%s, effort %s' "$(grok_launch_model)" "$GROK_EFFORT" ;;
     muse) printf '%s, effort %s' "$MUSE_WONDER_MODEL" "$MUSE_EFFORT" ;;
   esac
 }
@@ -526,7 +601,7 @@ ask_record() {
     --ran-claude-effort "${CLAUDE_EFFORT:-}" \
     --ran-codex-model "${CODEX_MODEL:-}" \
     --ran-codex-effort "${CODEX_EFFORT:-}" \
-    --ran-grok-model "${GROK_NATIVE_MODEL:-}" \
+    --ran-grok-model "$(grok_launch_model)" \
     --ran-grok-effort "${GROK_EFFORT:-}" \
     --ran-muse-model "${MUSE_WONDER_MODEL:-}" \
     --ran-muse-effort "${MUSE_EFFORT:-}" \
@@ -575,7 +650,7 @@ EOF
     v="$(printf '%s' "$v" | tr -d '[:space:]')"
     case "$v" in
       claude)
-        command -v claude >/dev/null 2>&1 || { log_err "claude: CLI not found"; continue; }
+        claude_leg_available || continue
         council_bg ask_run_claude
         ;;
       codex)
@@ -583,7 +658,7 @@ EOF
         council_bg ask_run_codex
         ;;
       grok)
-        command -v grok >/dev/null 2>&1 || { log_err "grok: CLI not found"; continue; }
+        grok_leg_available || continue
         council_bg ask_run_grok
         ;;
       muse)

@@ -32,8 +32,42 @@ cat >"$work/home/.codex/models_cache.json" <<'EOF'
 EOF
 
 cat >"$work/bin/cursor-agent" <<'EOF'
-#!/bin/sh
-exit 0
+#!/usr/bin/env bash
+if [ "${1:-}" = models ]; then
+  printf '%s\n' claude-fable-9-9-thinking-xhigh grok-9.9-xhigh grok-9.9-high-fast
+  exit 0
+fi
+printf '%s\n' "$@" >"$FAKE_LOG/cursor-agent.argv"
+pwd >"$FAKE_LOG/cursor-agent.cwd"
+model=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = --model ]; then
+    model="$a"
+  fi
+  prev="$a"
+done
+printf '%s\n' "${!#}" >"$FAKE_LOG/cursor-agent.prompt"
+case "$model" in
+  *fable*)
+    cp "$FAKE_LOG/cursor-agent.argv" "$FAKE_LOG/cursor-fable.argv"
+    cp "$FAKE_LOG/cursor-agent.prompt" "$FAKE_LOG/cursor-fable.prompt"
+    display="Fable Thinking"
+    result="Claude answer: CLEAN"
+    ;;
+  *grok*)
+    cp "$FAKE_LOG/cursor-agent.argv" "$FAKE_LOG/cursor-grok.argv"
+    cp "$FAKE_LOG/cursor-agent.prompt" "$FAKE_LOG/cursor-grok.prompt"
+    display="Grok 4"
+    result="Grok answer: CLEAN"
+    ;;
+  *)
+    display="unknown"
+    result="ok"
+    ;;
+esac
+printf '%s\n' "{\"type\":\"system\",\"model\":\"$display\",\"session_id\":\"seat\"}"
+printf '%s\n' "{\"type\":\"result\",\"is_error\":false,\"result\":\"$result\"}"
 EOF
 
 # Each fake saves its argv (one arg per line) and its prompt under FAKE_LOG.
@@ -179,13 +213,19 @@ check "prompt carries the chair note" has "$OUT/PROMPT.md" "Skip the heading lin
 check "prompt inlines the input" has "$OUT/PROMPT.md" "One comment. It reads fine."
 check "prompt marks the input as data" has "$OUT/PROMPT.md" "=== INPUT 1: comments.md ==="
 check "codex got the same prompt" cmp -s "$OUT/PROMPT.md" "$work/log/codex.prompt"
-check "grok got the same prompt" cmp -s "$OUT/PROMPT.md" "$work/log/grok.prompt"
+check "grok got the same prompt" python3 -c '
+import pathlib,sys
+a=pathlib.Path(sys.argv[1]).read_text().rstrip("\n")
+b=pathlib.Path(sys.argv[2]).read_text().rstrip("\n")
+raise SystemExit(0 if a==b else 1)
+' "$OUT/PROMPT.md" "$work/log/cursor-grok.prompt"
 check "codex model from the resolver" line "$work/log/codex.argv" "gpt-test-astra"
 check "codex read-only sandbox" line "$work/log/codex.argv" "read-only"
 check "codex effort defaults to low" line "$work/log/codex.argv" 'model_reasoning_effort="low"'
-check "grok effort defaults to low" line "$work/log/grok.argv" "low"
-check "grok has no tools" line "$work/log/grok.argv" ""
-check "grok model from the resolver" line "$work/log/grok.argv" "grok-test-1"
+check "grok effort defaults to low" has "$OUT/answers.md" "## grok: grok-9.9-xhigh, effort low"
+check "grok is tool-less" line "$work/log/cursor-grok.argv" "ask"
+check "grok model from the resolver" line "$work/log/cursor-grok.argv" "grok-9.9-xhigh"
+check "default grok does not call the grok CLI" test ! -e "$work/log/grok.argv"
 check "answers side by side" has "$OUT/answers.md" "Astra answer: CLEAN"
 check "answers include grok" has "$OUT/answers.md" "Grok answer: CLEAN"
 check "two blinded legs" test "$(wc -l <"$OUT/blind/key.txt")" -eq 2
@@ -200,7 +240,7 @@ sys.exit(0 if rows[-1]["kind"]=="ask" and ran=={"codex":"low","grok":"low"} else
 
 # 2. Grok exits 0 but its turn was cancelled: no answer, exit 1.
 rm -rf "$work/log/"* "$work/sessions"
-run env FAKE_GROK_END=cancelled "$CONCLAVE" "$ID" --template tell-scan --input "$work/comments.md"
+run env FAKE_GROK_END=cancelled CONCLAVE_GROK_NATIVE=1 "$CONCLAVE" "$ID" --template tell-scan --input "$work/comments.md"
 check "cancelled grok turn exits 1" ec 1
 check "cancelled grok answer is not kept" test ! -e "$OUT/answer-grok.md"
 check "cancelled grok is named in errors.md" has "$OUT/errors.md" "last turn_ended is cancelled"
@@ -213,13 +253,19 @@ run "$CONCLAVE" "$ID" --ask "Is this one task or two?" --voters claude,codex --e
 QOUT="$DIR/ask-question"
 check "question run exits 0" ec 0
 check "question prompt" has "$QOUT/PROMPT.md" "Is this one task or two?"
-check "claude effort high" line "$work/log/claude.argv" "high"
-check "claude model is fable" line "$work/log/claude.argv" "fable"
-check "claude has no tools" line "$work/log/claude.argv" ""
-check "claude cwd is outside the repo" sh -c 'case "$(cat "$1")" in "$2"*) exit 1 ;; esac' _ "$work/log/claude.cwd" "$ROOT"
-check "claude got the prompt" cmp -s "$QOUT/PROMPT.md" "$work/log/claude.prompt"
+check "claude effort high" has "$QOUT/answers.md" "effort high (alias)"
+check "claude model is cursor fable" line "$work/log/cursor-fable.argv" "claude-fable-9-9-thinking-xhigh"
+check "claude is tool-less" line "$work/log/cursor-fable.argv" "ask"
+check "claude CLI was not launched" test ! -e "$work/log/claude.argv"
+check "claude cwd is outside the repo" sh -c 'case "$(cat "$1")" in "$2"*) exit 1 ;; esac' _ "$work/log/cursor-agent.cwd" "$ROOT"
+check "claude got the prompt" python3 -c '
+import pathlib,sys
+a=pathlib.Path(sys.argv[1]).read_text().rstrip("\n")
+b=pathlib.Path(sys.argv[2]).read_text().rstrip("\n")
+raise SystemExit(0 if a==b else 1)
+' "$QOUT/PROMPT.md" "$work/log/cursor-fable.prompt"
 check "codex effort high" line "$work/log/codex.argv" 'model_reasoning_effort="high"'
-check "grok not launched" test ! -e "$work/log/grok.argv"
+check "grok not launched" test ! -e "$work/log/grok.argv" -a ! -e "$work/log/cursor-grok.argv"
 check "Jev key not in any prompt" sh -c '! grep -rq secret-should-not-leak "$1"' _ "$work/log"
 
 # 4. Dry-run writes the prompt under preview/ only and launches nothing.
@@ -259,16 +305,17 @@ check "effort max is refused" has "$work/out" "--effort wants low, med, or high"
 rm -rf "$work/log/"* "$DIR"
 run "$CONCLAVE" "$ID" --ask "What is one task?"
 check "routed question exits 0" ec 0
-check "routed question launches claude" test -e "$work/log/claude.argv"
+check "routed question launches cursor fable" test -e "$work/log/cursor-fable.argv"
+check "routed question does not call claude" test ! -e "$work/log/claude.argv"
 check "routed question launches codex" test -e "$work/log/codex.argv"
-check "routed question skips grok" test ! -e "$work/log/grok.argv"
+check "routed question skips grok" test ! -e "$work/log/grok.argv" -a ! -e "$work/log/cursor-grok.argv"
 check "routed question skips muse" test ! -e "$work/log/muse.argv"
 
 # 7. Pace steps the lean. Ahead goes down. Burn goes up. The router effort is not reused.
 rm -rf "$work/log/"*
 SEAT_STUB_JSON="$work/route-ahead.json" LEAN_CANNED="$work/lean-medium.json" \
   run "$CONCLAVE" "$ID" --template tell-scan --input "$work/comments.md"
-check "ahead pool steps the lean down" line "$work/log/grok.argv" "low"
+check "ahead pool steps the lean down" has "$OUT/answers.md" "## grok: grok-9.9-xhigh, effort low"
 check "on-pace pool keeps the lean" line "$work/log/codex.argv" 'model_reasoning_effort="medium"'
 rm -rf "$work/log/"*
 SEAT_STUB_JSON="$work/route-ahead.json" LEAN_CANNED="$work/lean-medium.json" \

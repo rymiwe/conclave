@@ -282,19 +282,15 @@ audit_write_lineup() {
             ver="$(review_cli_version claude)"
             cli="claude ($ver)"
             pool="Claude"
-          elif [ "${CLAUDE_SKU:-fable}" = cursor-fable ]; then
+            pace="$(review_pace_cell claude)"
+          else
             model="${CURSOR_FABLE:-}"
             ver="$(review_cli_version "$(conclave_env CURSOR_AGENT cursor-agent)")"
             cli="cursor-agent ($ver)"
-            pool="Cursor"
-          else
-            model="${CLAUDE_REVIEW_MODEL:-fable}"
-            ver="$(review_cli_version claude)"
-            cli="claude ($ver)"
-            pool="Claude"
+            pool="Cursor Other Models"
+            pace="$(review_pace_cell cursor)"
           fi
           meth="brief"
-          pace="$(review_pace_cell claude)"
           ;;
         opus)
           model="opus"
@@ -313,12 +309,20 @@ audit_write_lineup() {
           pace="$(review_pace_cell chatgpt)"
           ;;
         grok)
-          model="${GROK_NATIVE_MODEL:-} (CLI default; the launch does not pass --model)"
-          ver="$(review_cli_version grok)"
-          cli="grok ($ver)"
-          meth="brief"
-          pool="Grok"
-          pace="$(review_pace_cell grok)"
+          if grok_native_requested; then
+            model="${GROK_NATIVE_MODEL:-} (native CLI; CONCLAVE_GROK_NATIVE=1)"
+            ver="$(review_cli_version grok)"
+            cli="grok ($ver)"
+            meth="brief"
+            pool="Grok"
+            pace="$(review_pace_cell grok)"
+          else
+            model="${CURSOR_GROK:-}"
+            cli="cursor-agent ($(review_cli_version "$(conclave_env CURSOR_AGENT cursor-agent)"))"
+            meth="brief"
+            pool="Cursor Other Models"
+            pace="$(review_pace_cell cursor)"
+          fi
           ;;
         muse)
           model="${MUSE_WONDER_MODEL:-}"
@@ -348,8 +352,16 @@ EOF
     printf '\n'
     printf '%s\n' 'Every leg is on the same brief; independence comes from separate models, not separate methods.'
     printf '\n'
-    printf 'Cursor Fable fallback (not selected): %s\n' "${CURSOR_FABLE:-unavailable}"
-    printf 'Cursor stuck-builder (xhigh, not a voter): %s\n' "${CURSOR_GROK:-unavailable}"
+    if claude_leg_uses_cursor; then
+      printf 'Cursor Fable: selected: %s\n' "${CURSOR_FABLE:-unavailable}"
+    else
+      printf 'Cursor Fable fallback (not selected): %s\n' "${CURSOR_FABLE:-unavailable}"
+    fi
+    if grok_native_requested; then
+      printf 'Grok voter: native grok CLI (CONCLAVE_GROK_NATIVE=1), model %s\n' "${GROK_NATIVE_MODEL:-unavailable}"
+    else
+      printf 'Grok voter: cursor-agent %s\n' "${CURSOR_GROK:-unavailable}"
+    fi
     printf 'Builder (high, fast, not a voter): %s\n' "${CURSOR_BUILDER:-unavailable}"
     printf 'Anthropic model id is proven from modelUsage after the run. The lineup cell is the launch alias.\n'
     if review_voters | grep -qx claude && review_voters | grep -qx opus; then
@@ -457,10 +469,8 @@ EOF
 audit_claude_model() {
   if [ "${CLAUDE_SKU:-fable}" = "opus" ]; then
     printf 'opus\n'
-  elif [ "${CLAUDE_SKU:-fable}" = cursor-fable ]; then
-    printf '%s\n' "${CURSOR_FABLE:-}"
   else
-    printf 'fable\n'
+    printf '%s\n' "${CURSOR_FABLE:-}"
   fi
 }
 
@@ -477,7 +487,7 @@ audit_run_claude_brief() {
     echo "$voter: cannot cd to worktree" >"$DIR/voter-$voter.fail"
     return 1
   }
-  if [ "$voter" = claude ] && [ "${CLAUDE_SKU:-}" = cursor-fable ]; then
+  if [ "$voter" = claude ] && claude_leg_uses_cursor; then
     review_run_cursor_fable "$wt"
     return
   fi
@@ -581,7 +591,47 @@ audit_grok_exec() {
   fi
 }
 
+audit_run_grok_cursor() {
+  # $1 worktree. The brief is the prompt. The final message is the report.
+  local wt="$1" ec=0 brief="$DIR/voter-grok.brief.md"
+  if [ ! -s "$brief" ]; then
+    echo "grok: audit brief missing" >"$DIR/voter-grok.fail"
+    return 1
+  fi
+  if [ -z "${CURSOR_GROK:-}" ]; then
+    echo 'grok: CURSOR_GROK is empty; refusing to launch' >"$DIR/voter-grok.fail"
+    return 1
+  fi
+  if [ "$(wc -c <"$brief")" -gt 100000 ]; then
+    echo 'grok: audit brief exceeds 100000 bytes' >"$DIR/voter-grok.fail"
+    return 1
+  fi
+  (
+    cd -- "$wt" || exit 1
+    "$(conclave_env CURSOR_AGENT cursor-agent)" -p --model "$CURSOR_GROK" \
+      --output-format stream-json -f --trust --workspace "$wt" "$(cat "$brief")"
+  ) >"$DIR/voter-grok.stream.jsonl" 2>"$DIR/voter-grok.err" || ec=$?
+  if [ "$ec" -ne 0 ]; then
+    echo "grok: Cursor exit $ec" >"$DIR/voter-grok.fail"
+    return 1
+  fi
+  if ! cursor_write_text_result "$DIR/voter-grok.stream.jsonl" "$CURSOR_GROK" grok grok \
+    "$DIR/voter-grok-report.md" "$DIR/voter-grok.model.txt"; then
+    echo 'grok: Cursor output missing or model unproven' >"$DIR/voter-grok.fail"
+    rm -f "$DIR/voter-grok-report.md"
+    return 1
+  fi
+}
+
 audit_run_grok() {
+  if grok_native_requested; then
+    audit_run_grok_native "$@"
+    return
+  fi
+  audit_run_grok_cursor "$1"
+}
+
+audit_run_grok_native() {
   local wt="$1" legtmp="$2" ec uuid mid
   local out="$DIR/voter-grok-report.md" err="$DIR/voter-grok.err"
   local brief="$DIR/voter-grok.brief.md"
@@ -636,13 +686,7 @@ audit_launch() {
     }
     case "$v" in
       claude)
-        if [ "${CLAUDE_SKU:-}" = cursor-fable ]; then
-          if ! command -v "$(conclave_env CURSOR_AGENT cursor-agent)" >/dev/null 2>&1; then
-            echo "claude: cursor-agent not found" >"$DIR/voter-claude.fail"
-            continue
-          fi
-        elif ! command -v claude >/dev/null 2>&1; then
-          echo "claude: CLI not found" >"$DIR/voter-claude.fail"
+        if ! claude_leg_available "$DIR/voter-claude.fail"; then
           continue
         fi
         model="$(audit_claude_model)"
@@ -662,8 +706,7 @@ audit_launch() {
         pids="$pids $!"
         ;;
       grok)
-        if ! command -v grok >/dev/null 2>&1; then
-          echo "grok: CLI not found" >"$DIR/voter-grok.fail"
+        if ! grok_leg_available "$DIR/voter-grok.fail"; then
           continue
         fi
         tmp="$(review_leg_tmp "$wt")"
