@@ -815,6 +815,31 @@ printf 'legs=%s\\n' "$(find "$DIR/blind" -maxdepth 1 -name 'leg-*.md' | wc -l | 
 
 
 
+def test_blind_no_voter_line(tmp: Path, env):
+    # Only a policy-skipped Argon is seated, so no voter must report. The empty
+    # here-doc line is not a voter and must not log an unknown-voter note.
+    d = tmp / "blind-none"
+    d.mkdir()
+    proc = bash(HEAD + f"""
+DIR={d}
+ERRORS_FILE={d}/errors.md
+: >"$ERRORS_FILE"
+KIND=review
+VOTERS=argon
+VOTERS_EXPLICIT=1
+REVIEW_FAIL=0
+note_argon_kind_skip
+review_count_reports
+printf 'expected=%s\\n' "$REVIEW_REPORTS_EXPECTED"
+if review_blind; then echo blind-ok; else echo blind-bad; fi
+""", env)
+    errors = (d / "errors.md").read_text(encoding="utf-8")
+    check("expected=0" in proc.stdout and "blind-bad" in proc.stdout,
+          f"no voter to report: blind has nothing to do ({proc.stdout} {proc.stderr[-300:]})")
+    check("no reports to blind" in errors and "unknown voter" not in errors,
+          f"an empty voter line is skipped, not an unknown voter ({errors!r})")
+
+
 def write_exe(path: Path, body: str):
     path.write_text(textwrap.dedent(body), encoding="utf-8")
     path.chmod(0o755)
@@ -1026,6 +1051,7 @@ def main():
             test_judge_key_hidden(tmp, env)
             test_skipped_argon_not_required(tmp, env)
             test_present_argon_blinded(tmp, env)
+            test_blind_no_voter_line(tmp, env)
             test_dry_run(tmp)
             test_open_stdin(tmp, env)
     finally:

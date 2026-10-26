@@ -144,7 +144,7 @@ Design, mixed, and audit take every leg the lineup returns. Design excludes nobo
 
 `seat-usage --route lineup --kind review` does not add an Opus coverage leg, and the script does not add one either. Opus runs when `--voters` names `opus`. `--claude-model opus`, or a brief `claude: opus` header, makes the claude seat Opus native. If that ballot also names `opus`, the extra name is dropped, so Opus runs once. Its agreement with Fable is one vote.
 
-A pull request's merge-gate reviewer is a separate call, `seat-usage --route review`. That route returns one reviewer whose vendor is not the builder's. It asks when no eligible seat remains.
+A pull request's merge-gate reviewer is a separate call, `seat-usage --route review --runner agy`. That route returns one reviewer whose vendor is not the builder's and whose model `agy` can run. It asks when no eligible seat remains.
 
 ### Argon
 
@@ -196,7 +196,7 @@ Each command moves `tmp/council/<id>/` to its next state.
 
 ### Merge gate
 
-`scripts/merge-gate.sh review <repo_dir> <base_ref> <head_ref> <pr_url> <out_dir> <model>` runs one tool-less `agy` reviewer on the PR description and diff. Pick the model with `seat-usage --route review --cached --json --builder-vendor <builder vendor>`. The answer ends with `one_way: yes` or `one_way: no`. A one-way step is one a `git revert` cannot undo: a migration that drops or rewrites data, sending notifications or messages, deleting data or files outside the repo, or an irreversible external call. On yes, the reviewer lists each step as `one_way_at: <file>:<line> <what>`. Only a line that starts with `one_way:` or `one_way_at:`, outside a code block, counts. Prose that mentions one_way does not.
+`scripts/merge-gate.sh review <repo_dir> <base_ref> <head_ref> <pr_url> <out_dir> <builder_vendor>` runs one tool-less `agy` reviewer on the PR description and diff. The gate picks the model itself with `seat-usage --route review --cached --json --builder-vendor <builder_vendor> --runner agy` and saves that answer as `gate-route.json`. When the route asks, fails, names no reviewer, or comes from a seat-usage without `--runner`, review prints one `merge-gate: refused:` line and exits 3 before `agy` runs. It first removes any earlier verdict in `<out_dir>`, so a refused review leaves nothing for merge. The answer ends with `one_way: yes` or `one_way: no`. A one-way step is one a `git revert` cannot undo: a migration that drops or rewrites data, sending notifications or messages, deleting data or files outside the repo, or an irreversible external call. On yes, the reviewer lists each step as `one_way_at: <file>:<line> <what>`. Only a line that starts with `one_way:` or `one_way_at:`, outside a code block, counts. Prose that mentions one_way does not.
 
 `scripts/merge-gate.sh merge <pr_url> <out_dir>` is the only way to merge. It refuses, exit 3, when the verdict is `one_way: yes`, when the `one_way` line is missing, conflicting, or malformed, when the PR has the `one-way` label, or when the labels cannot be read. The refusal names each reason and file:line. A one-way step needs Ryan's explicit yes in a separate PR. Otherwise it squash-merges, pinned to the reviewed head sha. Test: `scripts/test-merge-gate.sh`.
 

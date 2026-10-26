@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Merge gate: one tool-less reviewer on a PR diff, and the only merge path.
 #
-#   scripts/merge-gate.sh review <repo_dir> <base_ref> <head_ref> <pr_url> <out_dir> <model>
+#   scripts/merge-gate.sh review <repo_dir> <base_ref> <head_ref> <pr_url> <out_dir> <builder_vendor>
 #   scripts/merge-gate.sh merge  <pr_url> <out_dir>
 #
-# review runs one agy model as a tool-less voter on the PR description and the
-# diff, writes gate-prompt.md, gate.stream.jsonl, gate.err, gate.md (the
+# review asks `seat-usage --route review --cached --json --builder-vendor V
+# --runner agy` for the reviewer, so the router picks a model agy can run. When
+# the route asks, fails, or names none, it refuses (exit 3, one line) before
+# agy runs. The route output is gate-route.json. It then runs that agy model as
+# a tool-less voter on the PR description and the diff, writes gate-prompt.md, gate.stream.jsonl, gate.err, gate.md (the
 # reviewer's answer), gate-head.txt (the reviewed head sha), and
 # gate-verdict.json (the parsed one_way line) under <out_dir>.
 #
@@ -14,18 +17,33 @@
 # the labels cannot be read. Otherwise it runs gh pr merge --squash, pinned to
 # the reviewed head sha. See scripts/merge_gate.py.
 #
-# MERGE_GATE_GH (default /usr/local/bin/gh) and MERGE_GATE_AGY (default agy)
-# override the binaries; the tests stub both.
+# MERGE_GATE_GH (default /usr/local/bin/gh), MERGE_GATE_AGY (default agy) and
+# MERGE_GATE_SEAT_USAGE (default seat-usage) override the binaries; the tests
+# stub all three.
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GH="${MERGE_GATE_GH:-/usr/local/bin/gh}"
 AGY="${MERGE_GATE_AGY:-agy}"
+SEAT_USAGE="${MERGE_GATE_SEAT_USAGE:-seat-usage}"
 usage() { sed -n '4,5p' "${BASH_SOURCE[0]}" | sed 's/^# *//' >&2; exit 2; }
 
 review() {
   [ "$#" -eq 6 ] || usage
-  local repo=$1 base=$2 head=$3 pr=$4 out=$5 model=$6
+  local repo=$1 base=$2 head=$3 pr=$4 out=$5 vendor=$6 model why
   mkdir -p "$out" || exit 1
+  # A refusal must not leave an earlier verdict for merge to read.
+  rm -f "$out/gate.md" "$out/gate-verdict.json" "$out/gate-head.txt" "$out/gate-route.json"
+  if ! "$SEAT_USAGE" --route review --cached --json --builder-vendor "$vendor" --runner agy \
+      > "$out/gate-route.json" 2> "$out/gate-route.err"; then
+    why=$(grep -v '^\[seat-usage\]' "$out/gate-route.err" | head -n 1)
+    echo "merge-gate: refused: seat-usage --route review --runner agy failed: ${why:-no output}" >&2
+    exit 3
+  fi
+  if ! model=$(python3 "$ROOT/scripts/merge_gate.py" pick "$out/gate-route.json"); then
+    echo "merge-gate: refused: $model" >&2
+    exit 3
+  fi
+  echo "merge-gate: reviewer $model (seat-usage --route review --runner agy, builder vendor $vendor)"
   GATE_TMP=$(mktemp -d) || exit 1
   trap 'rm -rf "$GATE_TMP"' EXIT
   local P=$GATE_TMP
