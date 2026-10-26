@@ -26,7 +26,7 @@ copies and `PROMPT.md` under `preview/` only.
 | Phase | Who | What |
 |---|---|---|
 | 0 | `scripts/conclave.sh <id> --dry-run` | Lineup, target, diff shape. Writes only `tmp/council/<id>/preview/`. Local listings only: no voter prompt, no Jev call. |
-| 1 | `scripts/conclave.sh <id>` | One worktree per voter, read-only baseline. The default ballot is the lineup. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, excluding a named author or a caller-passed builder or --builder-vendor and nobody when none of those is set, and falls back to Fable and Astra when that route is missing, fails, or asks.<!-- ballot-rule:end --> Fable is on the reviewer brief. The other seated legs run native, in parallel. Opus native is a coverage leg on review kind; its agreement with Fable is one vote. Then model check, baseline compare, `scripts/blind.sh`, stop. |
+| 1 | `scripts/conclave.sh <id>` | One worktree per voter, read-only baseline. The default ballot is the lineup. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, excluding a named author or a caller-passed builder or --builder-vendor and nobody when none of those is set, and falls back to Fable and Astra when that route is missing, fails, or asks.<!-- ballot-rule:end --> Fable is on the reviewer brief. The other seated legs run their own methods, in parallel; Grok is on `cursor-agent` unless `CONCLAVE_GROK_NATIVE=1`. Opus native is a coverage leg on review kind; its agreement with Fable is one vote. Then model check, baseline compare, `scripts/blind.sh`, stop. |
 | 2 | Chair | Read only `blind/leg-*.md`. Write `findings.json`. Do not read `blind/key.txt` yet. |
 | 3 | `scripts/conclave.sh <id> --findings` | One Jev `choice` per finding, or no call when there are no findings. Writes `judgment.md` (fixed header, then the convergence table) and `decide.md` beside it. `convergence.md` is the same table without the header. |
 | 4 | Chair | Fill `decide.md`: replace every `TODO(chair)`. The what-breaks line says what breaks and for whom, with no code identifiers. Then draft comments. When the pull request has an automated risk rating, the summary states it. Above low, the summary names what drives it and suggests concrete changes that would bring it to low. Save a throwaway repro script as `repro/<finding-id>.<ext>` in the ballot directory. `scripts/check-comment-links.py` checks citations. `scripts/check-comment-labels.py` checks labels on a post payload, and fails the draft when a detected rating is missing from the summary. The script writes no comment prose and posts nothing. |
@@ -70,7 +70,7 @@ mean the claude and codex legs. Argon runs when the route or the list names it.
 A capped pool is not seated. A pool ahead of pace still votes.
 When seat-usage is missing, fails, or returns mode ask, review uses Fable and Astra
 and writes a warning. Other kinds use that same pair. The lineup says so.
-There is no Cursor fallback for Grok (brief, Drop). Opus native is a coverage
+Grok runs on `cursor-agent`; `CONCLAVE_GROK_NATIVE=1` runs the native CLI, with no fallback between the two. Opus native is a coverage
 leg on review kind; its agreement with Fable is one vote. `--claude-model opus`
 (or the brief `claude:` header) turns the Fable seat into Opus native and
 skips the coverage leg, so Opus native runs once. The lineup then says
@@ -431,6 +431,8 @@ The model proof is `"model"` on each `turn_context` in the session rollout.
 The script compares it to the resolved id.
 
 ### Grok
+
+This is the `CONCLAVE_GROK_NATIVE=1` path. The default is Grok on Cursor (below).
 
 ```
 TMPDIR=<leg tmp> grok --cwd <worktree> \
@@ -885,8 +887,8 @@ Test: `scripts/test-ask-mode.sh`.
 
 The default Anthropic leg on a diff is on this brief. The script writes
 `tmp/council/<id>/voter-claude.brief.md` before launch (dry run:
-`preview/voter-claude.brief.md`) and passes it on stdin. OpenAI and Grok
-on a diff stay native and do not get it. The Opus coverage leg is native and
+`preview/voter-claude.brief.md`) and passes it on stdin. OpenAI (native)
+and Grok (on `cursor-agent`, its own review prompt) on a diff do not get it. The Opus coverage leg is native and
 does not get it.
 
 The script's file, in order: the target line and how to see the diff
@@ -1649,7 +1651,7 @@ From the port brief:
 
 - The Cursor fallback for a Grok voter (Drop, first bullet). The lineup
   seats Grok unless the ballot excludes xAI, and not on a capped pool.
-  Grok runs on its own CLI.
+  Grok runs on `cursor-agent`, or on its own CLI with `CONCLAVE_GROK_NATIVE=1`.
 - Opus native when Fable is ahead of pace (Drop, second bullet). Superseded
   2026-10-01: Opus native is a coverage leg on review kind; its agreement
   with Fable is one vote. Cursor Fable only when the Claude subscription is session-limited, by

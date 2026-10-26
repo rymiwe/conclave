@@ -23,7 +23,7 @@ flowchart TB
     Chair["Chair, one per task, own worktree<br/>Pool: Cursor Models"]
     Script["scripts/conclave.sh<br/>Pool: none"]
     Router["seat-usage --route lineup<br/>Pool: none"]
-    Legs["Seated legs and their CLIs<br/>claude: Claude CLI, or cursor-agent for Cursor Fable<br/>Pool: Claude subscription, or Cursor Other Models<br/>codex: Codex CLI<br/>Pool: ChatGPT subscription<br/>grok: grok CLI<br/>Pool: Grok subscription<br/>muse: muse CLI<br/>Pool: Meta<br/>argon: agy<br/>Pool: Google AI Pro<br/>opus: Claude CLI, when --voters names it<br/>Pool: Claude subscription"]
+    Legs["Seated legs and their CLIs<br/>claude: cursor-agent for Fable, or Claude CLI when it is Opus native<br/>Pool: Cursor Other Models, or Claude subscription<br/>codex: Codex CLI<br/>Pool: ChatGPT subscription<br/>grok: cursor-agent, or grok CLI with CONCLAVE_GROK_NATIVE=1<br/>Pool: Cursor, or Grok subscription<br/>muse: muse CLI<br/>Pool: Meta<br/>argon: agy<br/>Pool: Google AI Pro<br/>opus: Claude CLI, when --voters names it<br/>Pool: Claude subscription"]
     Shadow["Muse shadow, muse CLI, does not vote<br/>design and mixed when CONCLAVE_MUSE_SHADOW=1<br/>Pool: Meta"]
     Builder["Builder, own worktree, never votes<br/>Pool: Cursor Models"]
   end

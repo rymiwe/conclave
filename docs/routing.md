@@ -15,9 +15,11 @@ outer loop never holds the repo and never reads a diff.
 | Bridge | Bot desktop app local execution | the executor machine | none |
 | Per-task chair (inner loop) | `cursor-agent`, newest Grok pinned, Fast variant at high (2026-10-02) | executor, one worktree per ticket | Cursor Models pool |
 | Chair fallback | Opus on the Claude subscription when both Grok pools are over pace or unusable. Native Grok Build chairs when that pool is the one to spend (Ryan, 2026-10-08). | executor | the pool the lineup names |
-| Voter A | Fable on the reviewer brief through `cursor-agent` and the resolver's `CURSOR_FABLE` id, including the lineup fallback and the no-lineup default. Why not native `/code-review`: `docs/review.md` Targets. `--claude-model opus` is the only native Claude leg and skips the coverage leg. `--claude-model cursor-fable` is the same Cursor leg. `--fable-overflow cursor` does not start a Claude subscription leg. | executor, own login | Cursor Other Models; Claude subscription only for Opus |
+| Voters | No standing voters (2026-10-21). `seat-usage --route lineup` seats each ballot (`--kind review` on review); `--voters` wins. The seat rows below say how each family runs when seated. | executor | the pool each seat names |
+| Fable seat | Fable on the reviewer brief through `cursor-agent` and the resolver's `CURSOR_FABLE` id, including the lineup fallback and the no-lineup default. Why not native `/code-review`: `docs/review.md` Targets. `--claude-model opus` is the only native Claude leg and skips the coverage leg. `--claude-model cursor-fable` is the same Cursor leg. `--fable-overflow cursor` does not start a Claude subscription leg. | executor, own login | Cursor Other Models; Claude subscription only for Opus |
 | Coverage | Opus native, review kind only, own worktree. Opus native is a coverage leg on review kind; its agreement with Fable is one vote. Design and mixed reject `opus` in `--voters`. | executor, own login | Claude subscription |
-| Voter B | Astra on the resolver's Codex (newest stable `N.N.N` at or above 0.159.3, else newest `-alpha` at or above 0.154; `-beta` and `-rc` rejected) | executor, own login | ChatGPT subscription |
+| Astra seat | Astra on the resolver's Codex (newest stable `N.N.N` at or above 0.159.3, else newest `-alpha` at or above 0.154; `-beta` and `-rc` rejected) | executor, own login | ChatGPT subscription |
+| Grok seat | newest Grok through `cursor-agent` and the resolver's `CURSOR_GROK` id. `CONCLAVE_GROK_NATIVE=1` uses the native `grok` CLI instead. | executor, own login | Cursor; Grok subscription only for the native opt-in |
 | Judge | Jev | executor | metered, cents |
 | Builder | newest Grok, effort high, Fast variant (2026-10-02); xhigh when stuck | executor, one worktree per ticket | Cursor Models pool. Fast is the same model at 2x the standard token price (cursor.com/docs/models/grok-4-7, read 2026-10-02); the dashboard draw is not yet measured. |
 | Builder fallback | Opus at low | executor | Claude subscription |
@@ -167,7 +169,7 @@ One script. `kind` decides what voters see and what they return.
 
 | kind | Voters see | Output | Jev |
 |---|---|---|---|
-| review (a diff) | own worktree each; Fable on the reviewer brief, Opus native as a coverage leg, OpenAI and Grok on their native methods. Opus native is a coverage leg on review kind; its agreement with Fable is one vote. | ranked findings drafted as PR comments | post / hold / drop per finding |
+| review (a diff) | own worktree each; Fable on the reviewer brief, Opus native as a coverage leg, OpenAI on its native method, Grok on `cursor-agent` (native only with `CONCLAVE_GROK_NATIVE=1`). Opus native is a coverage leg on review kind; its agreement with Fable is one vote. | ranked findings drafted as PR comments | post / hold / drop per finding |
 | design, planning | packet only, no tools, out-of-repo cwd | Plan F and Plan A: lean, tradeoffs, risks, accretiveness, cost to try | implement / with changes / no automatic decision, plus confidence |
 | mixed | packet plus diff snapshot | both | both |
 | audit (no diff: a page, a doc, or a proposal) | one snapshot repo; own worktree each; every leg on the same brief | content and claims: findings. proposal: one verdict per change | findings: post or second look. proposal: adopt, adopt with changes, or reject. The decision is always human review |
