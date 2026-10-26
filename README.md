@@ -194,6 +194,12 @@ flowchart LR
 
 Each command moves `tmp/council/<id>/` to its next state.
 
+### Merge gate
+
+`scripts/merge-gate.sh review <repo_dir> <base_ref> <head_ref> <pr_url> <out_dir> <model>` runs one tool-less `agy` reviewer on the PR description and diff. Pick the model with `seat-usage --route review --cached --json --builder-vendor <builder vendor>`. The answer ends with `one_way: yes` or `one_way: no`. A one-way step is one a `git revert` cannot undo: a migration that drops or rewrites data, sending notifications or messages, deleting data or files outside the repo, or an irreversible external call. On yes, the reviewer lists each step as `one_way_at: <file>:<line> <what>`.
+
+`scripts/merge-gate.sh merge <pr_url> <out_dir>` is the only way to merge. It refuses, exit 3, when the verdict is `one_way: yes`, when the `one_way` line is missing, conflicting, or malformed, when the PR has the `one-way` label, or when the labels cannot be read. The refusal names each reason and file:line. A one-way step needs Ryan's explicit yes in a separate PR. Otherwise it squash-merges, pinned to the reviewed head sha. Test: `scripts/test-merge-gate.sh`.
+
 ## Read next
 
 - [`docs/routing.md`](docs/routing.md) — roles, pools, and the routing still being built.
