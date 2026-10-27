@@ -1542,21 +1542,27 @@ review_check_excluded_vendors() {
   # $1 is seat-usage stdout, $2 its stderr file. Returns 3 after one refusal
   # line when a vendor ambiguous trailers named was not excluded. seat-usage
   # exits 2 on a vendor it does not know. One too old for --exclude-vendor
-  # ignores the flag, so its lineup must report each vendor as skipped.
+  # ignores the flag, so its lineup must report each vendor as skipped. No
+  # lineup excluded nobody, and the fixed fallback could seat a named vendor.
   [ -n "${REVIEW_EXCLUDED_VENDORS:-}" ] || return 0
-  local unknown missing
+  local unknown missing first
   unknown="$(sed -n 's/^unknown vendor \([^;]*\);.*/\1/p' "$2" | head -n 1)"
   if [ -n "$unknown" ]; then
     echo "conclave: refused: seat-usage does not know vendor '$unknown' named by ambiguous PR trailers; stopping the review" >&2
     return 3
   fi
-  [ -n "$1" ] || return 0
+  if [ -z "$1" ]; then
+    first="$(head -n 1 "$2")"
+    echo "conclave: refused: seat-usage gave no lineup while ambiguous PR trailers named ${REVIEW_EXCLUDED_VENDORS// /, }${first:+ ($first)}; stopping the review" >&2
+    return 3
+  fi
   # shellcheck disable=SC2086
   missing="$(python3 - "$1" $REVIEW_EXCLUDED_VENDORS <<'PY'
 import json, sys
 try:
     doc = json.loads(sys.argv[1])
 except ValueError:
+    print(sys.argv[2])
     sys.exit(0)
 row = doc[0] if isinstance(doc, list) and doc else doc
 skipped = row.get("skipped") if isinstance(row, dict) else None
@@ -1645,7 +1651,7 @@ lineup_parse_voters() {
 
 load_lineup_ballot() {
   # Stops the run (exit 3) only when ambiguous trailers named a vendor
-  # seat-usage did not exclude. The control plane already ran the lineup.
+  # seat-usage did not show as excluded. The control plane already ran the lineup.
   # A brief author: header naming a known family passes --author, and on
   # review also --builder-vendor for that family. With no header, review
   # passes --builder-vendor only when a PR commit trailer names one model.

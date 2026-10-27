@@ -669,6 +669,15 @@ check "old seat-usage error names the vendor and the flag" \
   grep -qx "conclave: refused: seat-usage did not report excluding vendor 'xai' named by ambiguous PR trailers (needs seat-usage with --exclude-vendor); stopping the review" "$work/ambiguous.err"
 rc="$(ambiguous_route "anthropic xai" "$work/excluded.json" 0 "")"
 check "seat-usage that reports the exclusion keeps the review" [ "$rc" -eq 0 ]
+# A seat-usage that fails or prints no JSON excluded nobody. The fixed
+# fallback would seat a named vendor, so the review stops.
+rc="$(ambiguous_route "anthropic xai" "$work/all.json" 1 "boom")"
+check "failed seat-usage stops an ambiguous review" [ "$rc" -eq 3 ]
+check "failed seat-usage error names the vendors and its stderr" \
+  grep -qx "conclave: refused: seat-usage gave no lineup while ambiguous PR trailers named anthropic, xai (boom); stopping the review" "$work/ambiguous.err"
+rc="$(ambiguous_route "anthropic xai" "$work/bad.json" 0 "")"
+check "non-json seat-usage stops an ambiguous review" [ "$rc" -eq 3 ]
+check "non-json seat-usage error names a vendor" grep -q "did not report excluding vendor 'anthropic'" "$work/ambiguous.err"
 old_rc=0
 (
   review_pr_load_facts() { return 0; }
