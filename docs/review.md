@@ -1529,6 +1529,12 @@ no usual name is the extension itself. The fence is longer than any backtick
 run in the script, so the script cannot close it. A finding with no file gets
 no block. A reply does not get the block.
 
+A repro that is a symlink, sits under a symlinked `repro/` directory, or
+resolves outside the ballot directory is not inlined. Posting prints one note
+for it (`repro for f1 not inlined: path is a symlink or resolves outside the
+run directory`) and sends the comment without the block. A hard link, or a
+file swapped for a link after the check, is not caught.
+
 GitHub's review-comment limit is 65536 characters. A script that does not fit
 in the comment is cut inside the fence, and a note after the fence says how
 many bytes were kept and names `repro/<filename>`. The comment prose is not
@@ -1569,6 +1575,16 @@ inside a code fence, a repro block, or the moved-outside-the-diff block does
 not count. The same gate runs in `scripts/check-comment-labels.py` and in
 `scripts/post-review.py` before any POST. A moved-outside-the-diff block
 appended to the summary is not an opening label.
+
+Before it prints the preview or sends anything, `scripts/post-review.py` runs
+[gitleaks](https://github.com/gitleaks/gitleaks) `dir` with the default rules
+over the review body, every inline and file-level comment, and every reply.
+A finding stops the run with a nonzero exit and names only the rule IDs. The
+matched text is never printed, and neither is the review. With `--post`, a
+missing or failing gitleaks refuses the post. The preview reports that the
+scan did not run and that `--post` will refuse. `GITLEAKS_CONFIG` and a
+`gitleaks:allow` comment in the text are ignored. Install gitleaks from its
+GitHub release and check the archive against the release's checksums file.
 
 Show every draft in full in chat, as it would go out, in the message that
 asks whether to post. A file path is not a preview.

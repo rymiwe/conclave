@@ -77,12 +77,17 @@ Steps, in order. Any failure stops before the POST.
    when the finding is in body_findings. A new inline or file-level comment
    or a reply longer than 65536 characters is refused, and so is a comment
    whose prose leaves no room for its repro.
+   A repro that is a symlink, under a symlinked repro directory, or outside
+   the ballot directory is not inlined, and one note says so.
 6. The request goes to tmp/council/<id>/post-<pr>.request.json. It also
    holds the plan (one row per finding: finding, ballot, post_as, path,
    line, label), plan_verdict, file_comments, and replies. None of those
    is sent to GitHub. The dry run prints one plan line per finding and the
    verdict line.
-7. Without --post the run stops here and prints the exact review. With --post, POST pulls/<pr>/reviews, write
+7. gitleaks scans every outgoing body. A finding stops the run and names only
+   the rule IDs. With --post, a missing or failing gitleaks refuses the post;
+   the preview reports it.
+8. Without --post the run stops here and prints the exact review. With --post, POST pulls/<pr>/reviews, write
    tmp/council/<id>/post-<pr>.pending.json with the review id and the review
    request that was posted, then read the review's comments back. The pending
    file is written before that read, so a failed read-back cannot erase the
@@ -111,8 +116,10 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
@@ -164,6 +171,44 @@ def refuse_absent_repro(text: str, ballot: str, filename: str, where: str) -> No
         f"the text leaves no room for even a truncated block under "
         f"GitHub's {comment_draft.GITHUB_COMMENT_LIMIT}-character limit"
     )
+
+
+def secret_scan(texts: list[str]) -> list[str]:
+    """Rule IDs gitleaks finds in the outgoing text, never the matched text.
+
+    Raises RuntimeError when gitleaks is missing or does not finish cleanly.
+    The default rules apply: GITLEAKS_CONFIG is dropped, the temp directory
+    holds no .gitleaksignore, and a gitleaks:allow comment in the text is
+    ignored, because comment text comes from the ballot, not from Ryan.
+    """
+    binary = shutil.which("gitleaks")
+    if binary is None:
+        raise RuntimeError("gitleaks is not on PATH")
+    env = {k: v for k, v in os.environ.items() if k not in ("GITLEAKS_CONFIG", "GITLEAKS_CONFIG_TOML")}
+    with tempfile.TemporaryDirectory(prefix="post-review-scan-") as tmp:
+        source = Path(tmp) / "outgoing.txt"
+        source.write_text("\n\n".join(texts), encoding="utf-8")
+        report = Path(tmp) / "report.json"
+        try:
+            proc = subprocess.run(
+                [binary, "dir", "--no-banner", "--redact", "--ignore-gitleaks-allow", "--log-level", "error",
+                 "--exit-code", "99", "--report-format", "json", "--report-path", str(report), str(source)],
+                cwd=tmp, env=env, capture_output=True, text=True, timeout=120,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(f"gitleaks did not run ({type(exc).__name__})") from None
+        if proc.returncode not in (0, 99):
+            raise RuntimeError(f"gitleaks exited {proc.returncode}")
+        try:
+            rows = json.loads(report.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise RuntimeError("gitleaks wrote no readable report") from None
+    if not isinstance(rows, list):
+        raise RuntimeError("gitleaks report is not a list")
+    rules = sorted({str(row.get("RuleID")) for row in rows if isinstance(row, dict)})
+    if (proc.returncode == 99) != bool(rules):
+        raise RuntimeError("gitleaks exit code and report disagree")
+    return rules
 
 
 def load_label_check():
@@ -525,13 +570,24 @@ def main() -> int:
                     cited[ballot][str(item.get("id"))] = finding_anchor.cited_needle(item.get("cited_code"))
         return cited[ballot].get(fid)
 
+    repros: dict[tuple[str, str], Path | None] = {}
+
+    def repro_for(ballot: str, fid: str) -> Path | None:
+        """The finding's repro file, or None. An unsafe one is noted once and not inlined."""
+        if (ballot, fid) not in repros:
+            try:
+                repros[(ballot, fid)] = comment_draft.find_repro(council / ballot, fid)
+            except comment_draft.ReproError as exc:
+                die(str(exc))
+            except comment_draft.UnsafeRepro as exc:
+                print(f"post-review: note: {ballot}: {exc}", file=sys.stderr)
+                repros[(ballot, fid)] = None
+        return repros[(ballot, fid)]
+
     def attach_finding_repro(
         text: str, ballot: str, fid: str, *, limit: int = comment_draft.GITHUB_COMMENT_LIMIT
     ) -> str:
-        try:
-            path = comment_draft.find_repro(council / ballot, fid)
-        except comment_draft.ReproError as exc:
-            die(str(exc))
+        path = repro_for(ballot, fid)
         if path is None:
             return text
         try:
@@ -622,10 +678,7 @@ def main() -> int:
             c["body"] = new_body
         plan.append({"finding": fid, "ballot": ballot, "post_as": post_as, "path": c["path"],
                      "line": None if post_as == "file" else c["line"], "label": label})
-        try:
-            repro_path = comment_draft.find_repro(council / ballot, fid)
-        except comment_draft.ReproError as exc:
-            die(str(exc))
+        repro_path = repro_for(ballot, fid)
         if post_as == "review body":
             # A finding in the review body carries no label and is not counted for the verdict.
             moved_body = comment_draft.strip_opening_label(str(c["body"]))
@@ -677,10 +730,7 @@ def main() -> int:
 
     repro_findings: list[tuple[str, str, Path]] = []
     for ballot, fid in body_findings:
-        try:
-            path = comment_draft.find_repro(council / ballot, fid)
-        except comment_draft.ReproError as exc:
-            die(str(exc))
+        path = repro_for(ballot, fid)
         if path is not None:
             repro_findings.append((ballot, fid, path))
             # Mark a hand-written body-finding block now, so it is counted as
@@ -707,10 +757,7 @@ def main() -> int:
             return f"[`{c['path']}:{c['line']}`]({url})"
 
         def script_floor(c: dict) -> int:
-            try:
-                path = comment_draft.find_repro(council / c["_ballot"], c["_fid"])
-            except comment_draft.ReproError as exc:
-                die(str(exc))
+            path = repro_for(c["_ballot"], c["_fid"])
             if path is None:
                 return 0
             return reserve_repro(path, c["_ballot"])
@@ -733,10 +780,7 @@ def main() -> int:
             piece = attach_finding_repro(
                 str(c["body"]), c["_ballot"], c["_fid"], limit=max(room, 0)
             ).strip()
-            try:
-                repro_path = comment_draft.find_repro(council / c["_ballot"], c["_fid"])
-            except comment_draft.ReproError as exc:
-                die(str(exc))
+            repro_path = repro_for(c["_ballot"], c["_fid"])
             if repro_path is not None:
                 refuse_absent_repro(piece, c["_ballot"], repro_path.name, "review body")
             if len(prefix) + len(piece) + later > comment_draft.GITHUB_COMMENT_LIMIT:
@@ -922,6 +966,18 @@ def main() -> int:
         if problems:
             die("; ".join(problems) + "; nothing was posted. Restore the published comment(s) in the payload "
                 f"exactly as posted, or check {pending_path}")
+    outgoing = [body, *(c["body"] for c in inline), *(c["body"] for c in file_comments),
+                *(r["body"] for r in replies)]
+    try:
+        leaks = secret_scan(outgoing)
+    except RuntimeError as exc:
+        if posting:
+            die(f"secret scan: {exc}; refusing to post")
+        print(f"secret scan: not run ({exc}); --post will refuse")
+    else:
+        if leaks:
+            die(f"secret scan: gitleaks found {', '.join(leaks)}; nothing posted and the review is not printed")
+        print("secret scan: clean (gitleaks)")
     if not posting:
         print("review that --post would send:")
         print(json.dumps({

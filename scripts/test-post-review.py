@@ -1782,6 +1782,98 @@ def test_resume_keeps_published_comments(root: Path) -> None:
         raise SystemExit(f'FAIL {len(failed)} resume check(s)')
 
 
+REPRO_NOTE = 'not inlined: path is a symlink or resolves outside the run directory'
+
+
+def test_repro_symlink_not_inlined(root: Path) -> None:
+    """A repro that is a symlink, or sits under a symlinked repro directory, is not inlined."""
+    outside = root / 'outside'
+    outside.mkdir()
+    (outside / 'f1.rb').write_text("puts 'OUTSIDE-ONLY-31337'\n", encoding='utf-8')
+
+    f = Fixture(root / 'repro-plain')
+    (f.council / 'demo-1' / 'repro').mkdir()
+    (f.council / 'demo-1' / 'repro' / 'f1.rb').write_text("puts 'inside'\n", encoding='utf-8')
+    proc = f.post('--dry-run')
+    body = request_of(f)['comments'][0]['body'] if proc.returncode == 0 else ''
+    check("puts 'inside'" in body and REPRO_NOTE not in proc.stderr,
+          f'a plain repro file still inlines ({proc.returncode} {proc.stderr.strip()})')
+
+    for name, link in (('repro-file-link', 'file'), ('repro-dir-link', 'dir')):
+        f = Fixture(root / name)
+        repro = f.council / 'demo-1' / 'repro'
+        if link == 'file':
+            repro.mkdir()
+            (repro / 'f1.rb').symlink_to(outside / 'f1.rb')
+        else:
+            repro.symlink_to(outside, target_is_directory=True)
+        proc = f.post('--dry-run')
+        req = request_of(f) if proc.returncode == 0 else {}
+        sent = json.dumps(req) + proc.stdout
+        check(proc.returncode == 0 and 'OUTSIDE-ONLY-31337' not in sent,
+              f'a symlinked repro {link} is not inlined ({proc.returncode} {proc.stderr.strip()})')
+        check(proc.stderr.count(f'demo-1: repro for f1 {REPRO_NOTE}') == 1,
+              f'a symlinked repro {link} gets one note ({proc.stderr.strip()})')
+
+
+def fake_aws_key() -> str:
+    """Built at run time, so no key-shaped literal lives in the repo."""
+    import secrets
+    alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+    return 'AK' + 'IA' + ''.join(secrets.choice(alphabet) for _ in range(16))
+
+
+def path_without_gitleaks() -> str:
+    keep = [d for d in os.environ['PATH'].split(os.pathsep) if d and not (Path(d) / 'gitleaks').exists()]
+    return os.pathsep.join(keep)
+
+
+def test_secret_scan_clean(root: Path) -> None:
+    """gitleaks scans every outgoing body before --post and in the preview."""
+    check(shutil.which('gitleaks') is not None, 'gitleaks is on PATH (a post-review dependency, see docs/review.md)')
+    f = Fixture(root / 'scan-clean')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0 and 'secret scan: clean' in proc.stdout,
+          f'a clean review passes the scan in the preview ({proc.returncode} {proc.stderr.strip()})')
+    proc = f.post()
+    check(proc.returncode == 0 and f.posts() == 1 and 'secret scan: clean' in proc.stdout,
+          f'a clean review passes the scan and posts ({proc.returncode} {proc.stderr.strip()})')
+
+
+def test_secret_scan_key(root: Path) -> None:
+    key = fake_aws_key()
+    for flag in ('--post', 'preview'):
+        f = Fixture(root / f'scan-key-{flag.strip("-")}')
+        payload = f.payload()
+        payload['comments'][0]['body'] += f' The fixture logs {key} at boot.'
+        f.set_payload(payload)
+        proc = f.post() if flag == '--post' else f.post(bare=True)
+        out = proc.stdout + proc.stderr
+        check(proc.returncode != 0 and f.posts() == 0 and 'aws-access-token' in proc.stderr,
+              f'a fake key in a comment is refused ({flag}, {proc.returncode} posts={f.posts()})')
+        check(key not in out and key[4:] not in out, f'the refusal never prints the key ({flag})')
+
+
+def test_secret_scan_missing(root: Path) -> None:
+    f = Fixture(root / 'scan-missing')
+    missing = {'PATH': f"{f.root / 'bin'}{os.pathsep}{path_without_gitleaks()}"}
+    proc = f.post(env=missing)
+    check(proc.returncode != 0 and f.posts() == 0 and 'gitleaks' in proc.stderr,
+          f'--post without gitleaks on PATH is refused ({proc.returncode} posts={f.posts()} {proc.stderr.strip()})')
+    proc = f.post(bare=True, env=missing)
+    check(proc.returncode == 0 and f.posts() == 0 and 'secret scan: not run' in proc.stdout
+          and '--post will refuse' in proc.stdout,
+          f'the preview reports a missing gitleaks ({proc.returncode} {proc.stdout[-300:]})')
+
+    f = Fixture(root / 'scan-error')
+    broken = f.root / 'bin' / 'gitleaks'
+    broken.write_text('#!/bin/sh\nexit 2\n', encoding='utf-8')
+    broken.chmod(0o755)
+    proc = f.post()
+    check(proc.returncode != 0 and f.posts() == 0 and 'gitleaks' in proc.stderr,
+          f'--post refuses when gitleaks errors ({proc.returncode} posts={f.posts()} {proc.stderr.strip()})')
+
+
 def main() -> None:
     only = sys.argv[1:]
     if only:
@@ -1817,6 +1909,10 @@ def main() -> None:
         test_own_pr_comment_event(root)
         test_default_is_preview(root)
         test_resume_keeps_published_comments(root)
+        test_repro_symlink_not_inlined(root)
+        test_secret_scan_key(root)
+        test_secret_scan_clean(root)
+        test_secret_scan_missing(root)
     print('all post-review checks passed')
 
 

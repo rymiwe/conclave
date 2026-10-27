@@ -4,7 +4,7 @@ The chair writes one brief. The kind decides what each voter sees. A judge retur
 
 `scripts/conclave.sh` can update this clone from GitHub before each run. This is off by default; set `CONCLAVE_AUTO_UPDATE=1` to turn it on.
 
-Requires bash 4.4 or newer (`mapfile -d`, `local -n`, associative arrays; macOS's bash 3.2 won't work), `jq`, and Python 3.9 or newer (standard library only).
+Requires bash 4.4 or newer (`mapfile -d`, `local -n`, associative arrays; macOS's bash 3.2 won't work), `jq`, and Python 3.9 or newer (standard library only). `scripts/post-review.py` also needs [gitleaks](https://github.com/gitleaks/gitleaks) on `PATH`: it scans every outgoing comment and refuses `--post` without it (tested with 8.30.1).
 
 ## Architecture
 

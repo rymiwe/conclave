@@ -212,6 +212,24 @@ def main() -> None:
         else:
             raise SystemExit("FAIL two repro files were accepted")
 
+        outside = directory / "outside"
+        outside.mkdir()
+        (outside / "f7.rb").write_text("puts 'outside'\n", encoding="utf-8")
+        (repro / "f7.rb").symlink_to(outside / "f7.rb")
+        linked_dir = directory / "linked-ballot"
+        linked_dir.mkdir()
+        (linked_dir / "repro").symlink_to(outside, target_is_directory=True)
+        for where, run_dir in (("a symlinked repro file", ballot), ("a symlinked repro directory", linked_dir)):
+            try:
+                found = comment_draft.find_repro(run_dir, "f7")
+            except comment_draft.UnsafeRepro as exc:
+                check(str(exc) == "repro for f7 not inlined: path is a symlink or resolves outside the run directory",
+                      f"{where} is refused with the note")
+            except AttributeError:
+                raise SystemExit(f"FAIL {where} was returned for inlining (no UnsafeRepro)")
+            else:
+                raise SystemExit(f"FAIL {where} was returned for inlining: {found}")
+
         reply = comment_draft.draft_comment(
             "**Requested:** please fix\n**Question:** why\n",
             kind="reply",

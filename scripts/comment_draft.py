@@ -97,6 +97,15 @@ class ReproError(ValueError):
     """The repro directory does not match repro/<finding-id>.<ext>."""
 
 
+class UnsafeRepro(ValueError):
+    """The repro is a symlink, sits under one, or resolves outside the ballot directory.
+
+    The caller drops the inline and keeps the message as its note. Not a
+    ReproError, so a caller that stops on a malformed repro directory does
+    not stop here.
+    """
+
+
 def _links():
     path = Path(__file__).resolve().parent / "check-comment-links.py"
     spec = importlib.util.spec_from_file_location("check_comment_links", path)
@@ -418,7 +427,10 @@ def find_repro(ballot_dir: Path, finding_id: str) -> Path | None:
     """The one file repro/<finding-id>.<ext>, or None when the directory is absent.
 
     Two files for one finding is an error. The id is f<digits>, so f1 never
-    matches f10.
+    matches f10. A match that is a symlink, under a symlinked repro
+    directory, or whose real path is outside ballot_dir raises UnsafeRepro,
+    so a link to a file outside the run is never read into a comment. A hard
+    link, and a file swapped for a link after this check, are not caught.
     """
     if not FINDING_ID.fullmatch(finding_id):
         raise ReproError(f"bad finding id {finding_id!r}")
@@ -439,7 +451,13 @@ def find_repro(ballot_dir: Path, finding_id: str) -> Path | None:
     if len(matches) > 1:
         names = ", ".join(sorted(path.name for path in matches))
         raise ReproError(f"more than one repro for {finding_id}: {names}")
-    return matches[0]
+    found = matches[0]
+    if (directory.is_symlink() or found.is_symlink()
+            or not found.resolve().is_relative_to(ballot_dir.resolve())):
+        raise UnsafeRepro(
+            f"repro for {finding_id} not inlined: path is a symlink or resolves outside the run directory"
+        )
+    return found
 
 
 def _outside_fences(text: str, start: int, end: int) -> bool:
