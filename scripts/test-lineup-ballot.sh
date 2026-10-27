@@ -682,6 +682,29 @@ route_pr 'doc = {
   "commits": [{"messageHeadline": "One", "messageBody": "Co-Authored-By: Grok <noreply@x.ai>\n"}],
 }' "$work/ask.json" 2>/dev/null
 check "ask without ambiguous trailers keeps the fixed default" source_is "ballot: fallback (seat-usage asked; fixed default)"
+# End to end: a review run on a PR whose trailers are ambiguous, where
+# seat-usage asks (null lineup), exits 3 before any voter brief is written.
+write_pr_json 'doc = {
+  "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss", "type": "User"},
+  "commits": [{"messageHeadline": "One",
+               "messageBody": "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nCo-Authored-By: Grok <noreply@x.ai>\n"}],
+}'
+ask_id="askrefuse$$"
+ask_dir="$ROOT/tmp/council/$ask_id"
+mkdir -p "$ask_dir"
+printf '%s\n' 'kind: review' 'difficulty: low' '' '# Goal' 'Check the change.' >"$ask_dir/brief.md"
+use_router "$work/excluded-ask.json" 0
+: >"$SEAT_ARGV"
+ask_ec=0
+dry "$ask_id" --repo "$work/target" --pr 42 >/dev/null 2>"$work/ask-e2e.err" || ask_ec=$?
+check "ambiguous ask review run exits 3" [ "$ask_ec" -eq 3 ]
+check "ambiguous ask review run prints the ask refusal" \
+  grep -qx "conclave: refused: seat-usage seated no lineup outside the vendors ambiguous PR trailers named (anthropic, xai): need 2 review seat(s) outside Anthropic, xAI; 1 eligible: ask Ryan; stopping the review" "$work/ask-e2e.err"
+check "ambiguous ask review run excluded both vendors" \
+  grep -q -- '--exclude-vendor anthropic --exclude-vendor xai' "$SEAT_ARGV"
+check "ambiguous ask review run seats no fallback" bash -c '! grep -q "review route unavailable" "$1"' _ "$work/ask-e2e.err"
+check "ambiguous ask review run writes no voter brief" bash -c '! ls "$1"/voter-* >/dev/null 2>&1' _ "$ask_dir"
+rm -rf "$ask_dir"
 # A seat-usage that fails or prints no JSON excluded nobody. The fixed
 # fallback would seat a named vendor, so the review stops.
 rc="$(ambiguous_route "anthropic xai" "$work/all.json" 1 "boom")"
