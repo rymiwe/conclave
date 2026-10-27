@@ -795,6 +795,24 @@ for bad in voter-no-vendor voter-list-vendor voter-non-object voters-missing vot
     grep -qx "conclave: refused: seat-usage printed a malformed lineup (need lineup.voters as a list of objects with a string vendor), so the exclusion of anthropic, xai named by ambiguous PR trailers is unverified; stopping the review" "$work/ambiguous.err"
   check "$bad lineup error is one line" [ "$(wc -l <"$work/ambiguous.err")" -eq 1 ]
 done
+# A blank vendor is malformed. A padded or capitalized one still names the
+# vendor, so it cannot slip past an exact match.
+malformed_lineup voter-blank-vendor '{"voters":[{"family":"fable","seat":"cursor","vendor":""},{"family":"astra","seat":"chatgpt","vendor":"openai"}]}'
+malformed_lineup voter-space-vendor '{"voters":[{"family":"fable","seat":"cursor","vendor":" "},{"family":"astra","seat":"chatgpt","vendor":"openai"}]}'
+for bad in voter-blank-vendor voter-space-vendor; do
+  rc="$(ambiguous_route "anthropic xai" "$work/$bad.json" 0 "")"
+  check "$bad lineup stops an ambiguous review" [ "$rc" -eq 3 ]
+  check "$bad lineup error is one refusal line" \
+    grep -qx "conclave: refused: seat-usage printed a malformed lineup (need lineup.voters as a list of objects with a string vendor), so the exclusion of anthropic, xai named by ambiguous PR trailers is unverified; stopping the review" "$work/ambiguous.err"
+done
+malformed_lineup voter-padded-vendor '{"voters":[{"family":"fable","seat":"cursor","vendor":"anthropic "},{"family":"astra","seat":"chatgpt","vendor":"openai"}]}'
+malformed_lineup voter-cased-vendor '{"voters":[{"family":"fable","seat":"cursor","vendor":"Anthropic"},{"family":"astra","seat":"chatgpt","vendor":"openai"}]}'
+for bad in voter-padded-vendor voter-cased-vendor; do
+  rc="$(ambiguous_route "anthropic xai" "$work/$bad.json" 0 "")"
+  check "$bad seated stops an ambiguous review" [ "$rc" -eq 3 ]
+  check "$bad seated error names the voter" \
+    grep -qx "conclave: refused: seat-usage seated fable on cursor, but ambiguous PR trailers named its vendor anthropic; stopping the review" "$work/ambiguous.err"
+done
 novendor_rc=0
 (
   review_pr_load_facts() { return 0; }

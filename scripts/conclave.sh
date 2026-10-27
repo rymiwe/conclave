@@ -1581,7 +1581,8 @@ if not isinstance(skipped, list) or not all(
 lineup = row.get("lineup") if isinstance(row, dict) else None
 voters = [] if lineup is None else lineup.get("voters") if isinstance(lineup, dict) else None
 if not isinstance(voters, list) or not all(
-        isinstance(v, dict) and isinstance(v.get("vendor"), str) for v in voters):
+        isinstance(v, dict) and isinstance(v.get("vendor"), str) and v["vendor"].strip()
+        for v in voters):
     sys.exit(5)
 done = {(i["vendor"], i["code"]) for i in skipped}
 for vendor in named:
@@ -1589,8 +1590,9 @@ for vendor in named:
         print("missing\t" + vendor)
         sys.exit(0)
 for v in voters:
-    if v["vendor"] in named:
-        print("\t".join(["seated", v["vendor"], str(v.get("family")), str(v.get("seat"))]))
+    vendor = v["vendor"].strip().lower()
+    if vendor in named:
+        print("\t".join(["seated", vendor, str(v.get("family")), str(v.get("seat"))]))
         sys.exit(0)
 PY
 )" || rc=$?
