@@ -373,7 +373,16 @@ def plan(brief: bytes, diff: bytes, max_bytes: int, out_dir: Path) -> dict:
             else:
                 groups, missing = b_groups, by["source"] + gen
                 other = "The changed source files did not fit in a packet of their own and were not sent."
-            data, cut = build_packet(brief, groups + [missing], max_bytes, other, "")
+            try:
+                data, cut = build_packet(brief, groups + [missing], max_bytes, other, "")
+            except PacketOverCap:
+                # The longer cut note can push the fitting half over the cap. Send
+                # that half under the short note and name the unsent side in the
+                # warning and .partial instead of the packet's coverage list.
+                for sec in missing:
+                    sec.included, sec.truncated, sec.shown = False, False, b""
+                data, cut = build_packet(brief, groups, max_bytes, other, "")
+                cut = sorted(cut + missing, key=lambda s: s.index)
             packets.append((data, [s for g in groups for s in g] + missing, cut, ""))
             result["mode"] = "cut"
             result["cut"] = cut

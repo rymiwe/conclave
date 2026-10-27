@@ -695,6 +695,32 @@ echo rc=$?
     check("spec/fixtures/blob.json" in partial, f"one side fits: .partial names the cut side ({partial[:120]!r})")
 
 
+def test_split_rebuild_over_cap_keeps_fitting_half(work: Path):
+    """Gate A6 repro: the source half fits beside its split note but not beside the
+    longer cut note of the rebuild, so the rebuild raises; the fitting half is sent."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import argon_packet
+    head_len = len(one_line_diff("app/bundle.js", 0)) - 2
+    diff = (one_line_diff("app/bundle.js", 143_700 - head_len - 2)
+            + one_line_diff("spec/fixtures/blob.json", 400_000))
+    out = work / "plan"
+    try:
+        res = argon_packet.plan(b"B" * 5999 + b"\n", diff, 150_000, out)
+    except argon_packet.PacketOverCap as exc:
+        check(False, f"rebuild over cap: plan sends the source half that fits ({exc})")
+        return
+    shown = [[f["path"] for f in p["files"]] for p in res["packets"]]
+    texts = [(out / p["path"]).read_text(encoding="utf-8") for p in res["packets"]]
+    check(shown == [["app/bundle.js"]] and len(list(out.glob("packet-*.md"))) == 1
+          and all(p["bytes"] <= 150_000 for p in res["packets"]),
+          f"rebuild over cap: the source packet is written alone under the cap ({res['mode']} {shown})")
+    check([c["path"] for c in res["cut"]] == ["spec/fixtures/blob.json"]
+          and "spec/fixtures/blob.json" in res["warning"],
+          f"rebuild over cap: the unsent spec half is cut and in the warning ({res['cut']!r})")
+    check("packet 2" not in texts[0] and "were not sent" in texts[0],
+          "rebuild over cap: the packet does not point Argon at a packet 2 that does not exist")
+
+
 def test_max_bytes_not_positive_int(work: Path):
     """Any value that is not an integer >= 1 uses the default."""
     got = {}
@@ -714,7 +740,7 @@ TESTS = [test_small, test_split_clean, test_split_with_generated, test_large, te
          test_stale_skip_this_run_fails, test_diff_config_pinned, test_packet_never_over_cap,
          test_packet_cannot_fit_fails, test_count_line_leaves_room_for_a_file, test_no_file_fits_fails,
          test_cut_then_skip_leaves_no_partial, test_max_bytes_not_positive_int,
-         test_split_one_side_cannot_fit]
+         test_split_one_side_cannot_fit, test_split_rebuild_over_cap_keeps_fitting_half]
 
 
 def main():
