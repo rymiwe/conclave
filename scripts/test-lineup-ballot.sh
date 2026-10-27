@@ -506,6 +506,7 @@ PY
 reset_pr_route() {
   REVIEW_PR_FACT_NUM=""
   REVIEW_PR_FACT_VENDOR=""
+  REVIEW_PR_FACT_VENDORS=""
   REVIEW_PR_FACT_HUMAN=""
   REVIEW_PR_FACT_SKIP=""
   HEADER_AUTHOR=""
@@ -595,7 +596,9 @@ route_pr 'doc = {
   ],
 }'
 check "disagreeing trailers omit author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
-check "disagreeing trailers omit builder vendor" bash -c '! grep -q -- "--builder-vendor" "$1"' _ "$SEAT_ARGV"
+# Ambiguous trailers fail closed: every vendor they name is excluded.
+check "disagreeing trailers exclude every named vendor" grep -qx -- '--route lineup --json --kind review --builder-vendor anthropic --exclude-seat grok --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+check "disagreeing trailers resolve to the first vendor" [ "$(review_resolved_builder_vendor)" = anthropic ]
 
 route_pr 'doc = {
   "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss", "type": "User"},
@@ -603,7 +606,39 @@ route_pr 'doc = {
                "messageBody": "Co-Authored-By: Opus and Grok <noreply@example.com>\n"}],
 }'
 check "one trailer naming two vendors omits author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
-check "one trailer naming two vendors omits builder vendor" bash -c '! grep -q -- "--builder-vendor" "$1"' _ "$SEAT_ARGV"
+check "one trailer naming two vendors excludes both" grep -qx -- '--route lineup --json --kind review --builder-vendor anthropic --exclude-seat grok --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+
+# Claude plus a co-author outside the known families is ambiguous. No
+# anthropic voter, and one line says why.
+write_pr_json 'doc = {
+  "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss", "type": "User"},
+  "commits": [{"messageHeadline": "Seat",
+               "messageBody": "Co-authored-by: Claude <noreply@anthropic.com>\nCo-authored-by: Jane Doe <jane@example.com>\n"}],
+}'
+reset_pr_route
+use_router "$work/all.json" 0
+apply review 2>"$work/amb.err"
+check "claude plus unknown co-author excludes anthropic" grep -qx -- '--route lineup --json --kind review --builder-vendor anthropic --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+check "claude plus unknown co-author omits author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
+check "claude plus unknown co-author builder vendor is anthropic" [ "$(review_resolved_builder_vendor)" = anthropic ]
+check "ambiguous trailers print one line saying why" [ "$(grep -c 'trailers are ambiguous' "$work/amb.err")" -eq 1 ]
+check "ambiguous line names the vendor" grep -q 'excluding every vendor they name (anthropic)' "$work/amb.err"
+
+# An ambiguous trailer naming a vendor with no seat stops the review (fail
+# closed), the way merge-gate refuses with exit 3.
+unmapped_rc=0
+(
+  review_pr_load_facts() { return 0; }
+  KIND=review
+  HEADER_AUTHOR=""
+  REVIEW_PR_FACT_VENDOR=ambiguous
+  REVIEW_PR_FACT_VENDORS="anthropic mistral"
+  unmapped_args=()
+  review_append_author_args unmapped_args
+  exit 0
+) 2>"$work/unmapped.err" || unmapped_rc=$?
+check "unmapped ambiguous vendor stops the review" [ "$unmapped_rc" -eq 3 ]
+check "unmapped ambiguous vendor error names the vendor" grep -q "no seat for vendor 'mistral'" "$work/unmapped.err"
 
 write_pr_json 'doc = {
   "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss", "type": "User"},
