@@ -44,7 +44,11 @@ GITHUB_COMMENT_LIMIT = 65536
 # and one with a markdown table.
 SUMMARY_OPENER_MAX_CHARS = 600
 SUMMARY_OPENER_MAX_LINES = 6
-_TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+# A separator row has at least one pipe, so a bare `---` rule is not a table.
+# The lookahead requires it. One column is `| --- |`, `| --- ` or `--- |`.
+_TABLE_SEP = re.compile(
+    r"^\s*(?=[^|]*\|)\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$"
+)
 _DETAILS_BLOCK = re.compile(r"<details>.*?</details>", re.S)
 
 # Info string GitHub highlights, keyed by the filename extension.
@@ -70,6 +74,9 @@ _LANG = {
 
 # Question is no longer drafted. It still counts, so an old draft is labeled
 # and a reply that still carries it is stripped.
+# The labels a new inline or file-level comment may open with when it posts.
+# post-review.py and check-comment-labels.py both read this tuple, so they agree.
+POST_LABELS = ("**Requested:**", "**Advisory:**", "**Informational:**")
 LABEL_RE = re.compile(r"\*\*(?:Requested|Advisory|Informational|Question):\*\*[ \t]*")
 
 # A summary bullet is a line that, after optional indentation, has a list

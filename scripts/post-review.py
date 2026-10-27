@@ -126,7 +126,7 @@ FINDING = re.compile(r"(?:([A-Za-z0-9_][A-Za-z0-9._-]*):)?(f\d+)")
 EVENTS = ("COMMENT", "REQUEST_CHANGES")
 HUMAN_VERDICTS = ("APPROVE", "REQUEST_CHANGES", "COMMENT")
 # The labels a new inline or file-level comment may open with.
-POST_LABELS = ("**Requested:**", "**Advisory:**", "**Informational:**")
+POST_LABELS = comment_draft.POST_LABELS
 REQUESTED = "**Requested:**"
 APPROVE_MIN_VOTERS = 2
 
@@ -452,6 +452,14 @@ def main() -> int:
          if (d / "anchors.json").is_file() or finding_anchor.stack_numbers(d, args.pr) != [args.pr]),
         None,
     )
+    for d in (council / default_ballot, home):
+        unplaced = finding_anchor.stack_without_target(d, args.pr)
+        if unplaced:
+            print(
+                f"post-review: warning: {unplaced}; lines are checked against #{args.pr} only "
+                "and a line outside its diff posts as a file-level comment",
+                file=sys.stderr,
+            )
     stack_cache: list[dict] = []
 
     def stack_patches() -> list[dict]:

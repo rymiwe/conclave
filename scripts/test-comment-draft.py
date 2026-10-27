@@ -318,6 +318,17 @@ def main() -> None:
             proc = subprocess.run([sys.executable, str(checker), str(target)], capture_output=True, text=True)
         check(proc.returncode != 0 and "council" in proc.stdout, "the same words outside a fence still fail")
 
+    tables = {
+        "one column": "Note.\n\n| Note |\n| --- |\n| counts deleted items |\n",
+        "one column, aligned": "| Note |\n|:---:|\n| x |\n",
+        "one column, no outer pipes": "Note |\n--- |\nx |\n",
+        "two columns": "| a | b |\n| --- | --- |\n| 1 | 2 |\n",
+        "two columns, no outer pipes": "a | b\n--- | ---\n1 | 2\n",
+    }
+    for name, text in tables.items():
+        check(comment_draft.summary_has_table(text), f"a {name} table separator is caught")
+    for name, text in {"a bare rule": "Note.\n\n---\n\nMore.\n", "a dash list": "- --- x\n"}.items():
+        check(not comment_draft.summary_has_table(text), f"{name} is not a table")
     print("ok comment draft")
 
 

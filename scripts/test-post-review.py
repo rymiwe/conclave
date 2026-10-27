@@ -1046,6 +1046,13 @@ def test_summary_opener(root: Path) -> None:
     check(proc.returncode != 0 and 'summary opener contains a markdown table' in proc.stderr and f.posts() == 0,
           f'a summary opener with a table is refused ({proc.returncode} {proc.stderr.strip()})')
 
+    f = Fixture(root / 'opener-table-one-col')
+    inline_only(f, [one_inline('**Requested:** size counts deleted items.')],
+                body='Notes.\n\n| Note |\n| --- |\n| counts deleted items |\n')
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and 'summary opener contains a markdown table' in proc.stderr and f.posts() == 0,
+          f'a summary opener with a one-column table is refused ({proc.returncode} {proc.stderr.strip()})')
+
     f = Fixture(root / 'opener-ok')
     inline_only(f, [one_inline('**Requested:** size counts deleted items.')], body='One note on the widget change.')
     proc = f.post('--dry-run')
@@ -1060,6 +1067,20 @@ def test_severity_on_comments(root: Path) -> None:
         check(proc.returncode == 0, f'severity {severity} dry-runs ({proc.returncode} {proc.stderr.strip()})')
         body = request_of(f)['comments'][0]['body']
         check(body.startswith(label + ' '), f'severity {severity} is prepended as {label} ({body})')
+
+    for extra in ({}, {'severity': 'nit'}):
+        f = Fixture(root / f'question-{len(extra)}')
+        inline_only(f, [one_inline('**Question:** should the label follow the locale?', **extra)])
+        proc = f.post('--dry-run')
+        check(proc.returncode != 0 and 'opens with **Question:**' in proc.stderr and f.posts() == 0
+              and not (f.council / 'demo-1/post-7.request.json').exists(),
+              f'a new inline comment that opens with **Question:** is refused {extra} '
+              f'({proc.returncode} {proc.stderr.strip()})')
+        lint = subprocess.run(
+            ['python3', str(SCRIPTS / 'check-comment-labels.py'), str(f.council / 'demo-1/post-7.json')],
+            text=True, capture_output=True)
+        check(lint.returncode != 0 and 'opens with **Question:**' in lint.stdout,
+              f'the lint and post-review agree on **Question:** {extra} ({lint.returncode} {lint.stdout.strip()})')
 
     f = Fixture(root / 'already-labeled')
     inline_only(f, [one_inline('**Requested:** size counts deleted items.')])
@@ -1129,7 +1150,8 @@ def test_file_level_and_reanchor(root: Path) -> None:
     check(again.returncode != 0 and 'already in' in again.stderr and f.posts() == before and len(file_rows_again) == 1,
           f'a rerun does not post the file-level comment again ({again.returncode} {again.stderr.strip()} posts={f.posts()})')
 
-    def stack_run(name: str, comments: list, findings: list) -> tuple[subprocess.CompletedProcess, list]:
+    def stack_run(name: str, comments: list, findings: list,
+                  listed: tuple = (1, 2, 3), extra: tuple = ()) -> tuple[subprocess.CompletedProcess, list]:
         council = root / name / 'council'
         ballot = council / 'reanchor'
         ballot.mkdir(parents=True)
@@ -1142,7 +1164,7 @@ def test_file_level_and_reanchor(root: Path) -> None:
         ):
             (patches / f'{number}.json').write_text(json.dumps(rows))
         (ballot / 'stack.json').write_text(json.dumps({
-            'status': 'stack', 'prs': [{'number': 1}, {'number': 2}, {'number': 3}],
+            'status': 'stack', 'prs': [{'number': n} for n in listed],
         }))
         (ballot / 'findings.json').write_text(json.dumps({'findings': findings}))
         (ballot / 'post-1.json').write_text(json.dumps({
@@ -1160,7 +1182,7 @@ def test_file_level_and_reanchor(root: Path) -> None:
         env.pop('COUNCIL_GH', None)
         env.pop('CONCLAVE_GH', None)
         proc = subprocess.run(
-            ['python3', str(SCRIPTS / 'post-review.py'), 'reanchor', '1', '--council-dir', str(council)],
+            ['python3', str(SCRIPTS / 'post-review.py'), 'reanchor', '1', '--council-dir', str(council), *extra],
             env=env, text=True, capture_output=True,
         )
         calls = [json.loads(line) for line in log.read_text().splitlines()] if log.is_file() else []
@@ -1187,6 +1209,23 @@ def test_file_level_and_reanchor(root: Path) -> None:
     check(proc.returncode != 0 and 'flag for the chair' in proc.stderr
           and not any('-X' in call for call in calls) and not request.exists(),
           f'a line that cannot be matched is flagged and nothing is posted ({proc.returncode} {proc.stderr.strip()})')
+
+    # stack.json that lists the later PRs but not this one used to get this PR
+    # appended as the tip, so #3 became "earlier" and the line posted on #1.
+    proc, calls = stack_run('unlisted', [{
+        'finding': 'f1', 'path': 'app/svc.rb', 'line': 126,
+        'body': '**Requested:** the total is first added on a later pull request.',
+    }], [{
+        'id': 'f1', 'file': 'app/svc.rb', 'line': 126, 'cited_code': 'def stale_total',
+    }], listed=(2, 3), extra=('--dry-run',))
+    request = root / 'unlisted' / 'council' / 'reanchor' / 'post-1.request.json'
+    req = json.loads(request.read_text()) if request.exists() else {}
+    plan = req.get('plan') or [{}]
+    check(proc.returncode == 0 and 'stack.json lists #2, #3 but not #1' in proc.stderr
+          and plan[0].get('post_as') == 'file' and req.get('comments') == []
+          and not any('-X' in call for call in calls),
+          f'a target stack.json does not list falls back to a file-level comment, with a warning, and posts nothing '
+          f'({proc.returncode} {proc.stderr.strip()} {plan})')
 
 
 def test_verdict(root: Path) -> None:

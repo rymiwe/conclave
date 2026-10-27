@@ -73,9 +73,19 @@ def main() -> None:
         {"finding": "f1", "path": "a.rb", "line": 1, "body": "**Requested:** size counts deleted items."}
     ]}
     check(labels.problems(labeled_inline) == [], "labeled new inline comment is ok")
-    for token in ("**Advisory:**", "**Informational:**", "**Question:**"):
+    for token in ("**Advisory:**", "**Informational:**"):
         payload = {**other, "comments": [{"body": f"{token} noted."}]}
         check(labels.problems(payload) == [], f"{token} counts as a label on a new inline comment")
+    # **Question:** used to count here. post-review.py refuses it, and the verdict
+    # is computed from the three post labels, so the lint now refuses it too.
+    for extra in ({}, {"severity": "nit"}):
+        payload = {**other, "comments": [{"body": "**Question:** noted.", **extra}]}
+        found = labels.problems(payload)
+        check(len(found) == 1 and "opens with **Question:**" in found[0] and "not drafted" in found[0],
+              f"**Question:** on a new inline comment is flagged {extra} ({found})")
+    cli_q = run_cli({**other, "comments": [{"body": "**Question:** noted."}]})
+    check(cli_q.returncode != 0 and "opens with **Question:**" in cli_q.stdout,
+          f"cli flags a new inline comment that opens with **Question:** ({cli_q.stdout!r})")
 
     plain_reply = {**other, "comments": [{"in_reply_to": 9, "body": "The next build picks this up."}]}
     check(labels.problems(plain_reply) == [], "unlabeled reply is ok")

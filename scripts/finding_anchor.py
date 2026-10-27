@@ -71,6 +71,27 @@ def right_lines(patch: str) -> dict[int, str]:
     return lines
 
 
+def added_lines(patch: str) -> list[tuple[int, str]]:
+    """(new-file line, text) for each added line in the patch, in order.
+
+    Context lines are left out: a context line was already in the file, so it
+    says nothing about which PR first introduced the code.
+    """
+    rows: list[tuple[int, str]] = []
+    new = None
+    for raw in split_lines(patch):
+        match = HUNK.match(raw)
+        if match:
+            new = int(match.group(1))
+            continue
+        if new is None or raw.startswith("\\") or raw.startswith("-"):
+            continue
+        if raw.startswith("+"):
+            rows.append((new, raw[1:]))
+        new += 1
+    return rows
+
+
 def _severity_key(severity: object) -> str:
     if not isinstance(severity, str):
         return ""
@@ -130,11 +151,9 @@ def _patch(by_pr: dict[int, dict], number: int, path: str | None) -> str | None:
     return patch if isinstance(patch, str) else ""
 
 
-def _line_with_needle(patch: str, needle: str) -> int | None:
-    for line, text in sorted(right_lines(patch).items()):
-        if needle in text:
-            return line
-    return None
+def _lines_added_as(patch: str, needle: str) -> list[int]:
+    """Lines this patch adds whose whole text, stripped, equals the needle."""
+    return [line for line, text in added_lines(patch) if text.strip() == needle]
 
 
 def resolve(finding: object, stack_patches: object, target_pr: int) -> dict:
@@ -176,7 +195,7 @@ def resolve(finding: object, stack_patches: object, target_pr: int) -> dict:
             return result(
                 "inline", target_pr, line, "line is in this PR's diff", weak=True
             )
-        if needle in target_lines[line]:
+        if target_lines[line].strip() == needle:
             return result(
                 "inline",
                 target_pr,
@@ -184,24 +203,43 @@ def resolve(finding: object, stack_patches: object, target_pr: int) -> dict:
                 "line is in this PR's diff and the cited code matches",
             )
 
-    # (b) The earliest PR in stack order whose diff contains the cited line.
+    # (b) The earliest PR in stack order that adds the cited line. Only an
+    # added line counts, and only when its whole text equals the cited line.
+    # A context line was already there, and a substring is another line.
     # Only a later PR is a re-anchor. An earlier PR's line is not this PR's line.
     if path and needle:
         for number in order:
             patch = _patch(by_pr, number, path)
             if patch is None:
                 continue
-            found = _line_with_needle(patch, needle)
-            if found is None:
-                continue
-            if later(number):
+            if not patch:
                 return result(
-                    "inline",
-                    number,
-                    found,
-                    f"re-anchored: first introduced in #{number}",
+                    "flag",
+                    None,
+                    None,
+                    f"#{number} changes {path} but GitHub gave no diff text, "
+                    "so the PR that adds the cited code cannot be told",
                 )
-            break
+            found = _lines_added_as(patch, needle)
+            if not found:
+                continue
+            if not later(number):
+                break
+            if len(found) > 1:
+                where = ", ".join(str(n) for n in found)
+                return result(
+                    "flag",
+                    None,
+                    None,
+                    f"#{number} adds the cited line {len(found)} times (lines {where}); "
+                    "the chair picks the line",
+                )
+            return result(
+                "inline",
+                number,
+                found[0],
+                f"re-anchored: first introduced in #{number}",
+            )
 
     # (c) This PR changes the file, and (b) found no later PR that first adds the code.
     if target_patch is not None:
@@ -307,17 +345,17 @@ def repo_and_pr(ballot: Path) -> tuple[str | None, int | None]:
     return None, None
 
 
-def stack_numbers(ballot: Path, target: int) -> list[int]:
-    """Stack PRs bottom to top. Alone, or status other than stack, is the target."""
+def stack_listing(ballot: Path) -> list[int] | None:
+    """PR numbers stack.json lists, bottom to top. None unless its status is stack."""
     path = ballot / "stack.json"
     if not path.is_file():
-        return [target]
+        return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return [target]
+        return None
     if not isinstance(data, dict) or data.get("status") != "stack":
-        return [target]
+        return None
     numbers: list[int] = []
     for pr in data.get("prs") or []:
         if not isinstance(pr, dict):
@@ -325,9 +363,29 @@ def stack_numbers(ballot: Path, target: int) -> list[int]:
         number = _pr_number(pr.get("number"))
         if number is not None:
             numbers.append(number)
-    if target not in numbers:
-        numbers.append(target)
-    return numbers or [target]
+    return numbers
+
+
+def stack_numbers(ballot: Path, target: int) -> list[int]:
+    """Stack PRs bottom to top, or the target alone.
+
+    The target alone when there is no stack, and also when stack.json does not
+    list the target. The target is never appended: its place in the stack is
+    unknown, and guessing the tip makes every listed PR an earlier one.
+    """
+    listed = stack_listing(ballot)
+    if not listed or target not in listed:
+        return [target]
+    return listed
+
+
+def stack_without_target(ballot: Path, target: int) -> str | None:
+    """Why stack.json cannot place the target, or None when it can."""
+    listed = stack_listing(ballot)
+    if not listed or target in listed:
+        return None
+    names = ", ".join(f"#{number}" for number in listed)
+    return f"stack.json lists {names} but not #{target}"
 
 
 class GhError(Exception):
@@ -395,6 +453,14 @@ def anchor_ballot(ballot: Path) -> dict[str, dict]:
     anchors: dict[str, dict] = {}
     if repo is None or target is None:
         reason = "no pr line in judgment.md"
+        for finding in findings:
+            fid = str(finding.get("id"))
+            anchors[fid] = _unverified(finding, target, reason)
+            _print_anchor(fid, anchors[fid])
+        return anchors
+    missing = stack_without_target(ballot, target)
+    if missing:
+        reason = f"{missing}, so no PR's line can be re-anchored against it"
         for finding in findings:
             fid = str(finding.get("id"))
             anchors[fid] = _unverified(finding, target, reason)

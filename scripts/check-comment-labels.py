@@ -9,7 +9,10 @@ A comment without it is a new inline comment. The review summary is payload
 "body". It must not open with a label. A reply must not carry one.
 
 **Requested:**, **Advisory:**, **Informational:**, and the legacy **Question:**
-all count as a label. A label inside a fenced script does not.
+all count as a label on a summary, a reply, and a bullet. A label inside a
+fenced script does not. A new inline comment may open only with the first
+three. One that opens with **Question:** is flagged, the same as post-review.py
+refuses it: the verdict is computed from Requested, Advisory, and Informational.
 
 A summary opens with a label when, after blank lines, the first non-empty
 line starts with one of those labels. Leading spaces and tabs on that line
@@ -93,7 +96,17 @@ def problems(
             if comment_draft.has_label(body):
                 found.append(f"comment {index}: labeled reply")
             continue
-        if comment_draft.opens_with_label(body):
+        span = comment_draft.opening_label_span(body)
+        if span is not None:
+            opener = body[span[0]:span[1]].strip()
+            # post-review refuses a new comment that opens with **Question:**, and
+            # the lint agrees. The post labels are the three the verdict is
+            # computed from, and Question maps to none of them.
+            if opener not in comment_draft.POST_LABELS:
+                found.append(
+                    f"comment {index}: opens with {opener}, which is not drafted; "
+                    "use **Requested:**, **Advisory:**, or **Informational:**"
+                )
             continue
         if finding_anchor.label_for(comment.get("severity")):
             continue
