@@ -540,10 +540,17 @@ def main() -> int:
             errors.append(f"comment {i} ({key}): {c['path']}:{c['line']} reads {text!r}, expected {c['expect']!r}")
         where = f"comment {i} ({key}) {c['path']}:{c['line']}"
         needle = c.get("expect") or (cited_code(ballot, fid) if stack_dir is not None else None)
+
+        def holds(line_text: str | None) -> bool:
+            """expect is a substring check. Cited code is a whole line, as the resolver reads it."""
+            if not needle or line_text is None:
+                return False
+            return needle in line_text if c.get("expect") else line_text.strip() == needle
+
         # In a stack the line number may be the stack tip's. A line in this
         # PR's diff is trusted only when it holds the cited text, or when
         # there is no cited text to check.
-        if in_diff is not None and (needle is None or needle in in_diff):
+        if in_diff is not None and (needle is None or holds(in_diff)):
             post_as = "inline"
         else:
             if stack_dir is not None:
@@ -551,7 +558,7 @@ def main() -> int:
                     lines = blob_lines(c["path"], soft=True)
                     if lines is not None and 1 <= c["line"] <= len(lines):
                         text = lines[c["line"] - 1]
-                if not (needle and text is not None and needle in text):
+                if not holds(text):
                     anchor = finding_anchor.resolve(
                         {"file": c["path"], "line": c["line"], "cited_code": needle},
                         stack_patches(), args.pr,

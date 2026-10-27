@@ -1264,6 +1264,20 @@ def test_file_level_and_reanchor(root: Path) -> None:
           f'cited code that no PR adds falls back to a file-level comment, not inline on unrelated code '
           f'({proc.returncode} {proc.stderr.strip()} {plan})')
 
+    # #1 has `def a` on line 2. Cited `def` is a prefix of it and #3 adds the
+    # whole line `def` at line 2, so a substring check would pin it to #1.
+    prefix = (PR1_SVC, '@@ -1,2 +1,4 @@\n class Svc\n+  def\n+  end\n end\n')
+    proc, calls = stack_run('same-line-prefix', clash, [{**cited[0], 'cited_code': 'def'}], svc=prefix,
+                            extra=('--dry-run',))
+    check(proc.returncode != 0 and 're-anchor to #3 app/svc.rb:2' in proc.stderr,
+          f'cited code that is only a prefix of the line on #1 is re-anchored to #3, not posted on #1 '
+          f'({proc.returncode} {proc.stderr.strip()})')
+
+    explicit = [{**clash[0], 'expect': 'def'}]
+    proc, calls = stack_run('same-line-expect', explicit, [{**cited[0], 'cited_code': 'def stale_total'}],
+                            svc=prefix, extra=('--dry-run',))
+    check(proc.returncode == 0, f'an explicit expect still matches as a substring ({proc.returncode} {proc.stderr.strip()})')
+
 
 def test_verdict(root: Path) -> None:
     f = Fixture(root / 'requested')
