@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 
@@ -66,6 +67,9 @@ if '-X' in args:
         sys.exit('unexpected POST ' + base)
     else:
         req = json.loads(sys.stdin.read())
+        if not (req.get('body') or '').strip() and not req.get('comments'):
+            sys.stderr.write('HTTP 422 Unprocessable Entity: review has no body and no comments\\n')
+            sys.exit(1)
         (state / 'posted-request.json').write_text(json.dumps(req))
         print(json.dumps({'id': 900, 'state': 'COMMENTED',
                           'html_url': 'https://github.com/example/widgets/pull/7#pullrequestreview-900'}))
@@ -131,9 +135,11 @@ class Fixture:
                     'GH_STATE': str(self.state), 'GH_FILES': str(self.council / 'files-7.json')}
         self.env.pop('COUNCIL_GH', None)
 
-    def post(self, *extra: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    def post(self, *extra: str, env: dict | None = None, bare: bool = False) -> subprocess.CompletedProcess:
+        """A real post, unless --dry-run is given. bare: no --post, the way the script runs by default."""
+        flags = list(extra) if bare or '--dry-run' in extra else ['--post', *extra]
         return subprocess.run(['python3', str(SCRIPTS / 'post-review.py'), 'demo-1', '7',
-                               '--council-dir', str(self.council), *extra],
+                               '--council-dir', str(self.council), *flags],
                               env={**self.env, **(env or {})}, text=True, capture_output=True)
 
     def index(self, *extra: str) -> subprocess.CompletedProcess:
@@ -1282,6 +1288,149 @@ def test_file_level_and_reanchor(root: Path) -> None:
     check(proc.returncode == 0, f'an explicit expect still matches as a substring ({proc.returncode} {proc.stderr.strip()})')
 
 
+SELF_NOTE_FOLDS = ' (posted as a comment because this is your own PR)'
+
+
+def soft_checks() -> tuple[list[str], object]:
+    failed: list[str] = []
+
+    def soft(cond: bool, label: str) -> None:
+        print(('ok ' if cond else 'FAIL ') + label)
+        if not cond:
+            failed.append(label)
+
+    return failed, soft
+
+
+def test_empty_review(root: Path) -> None:
+    """A review with no summary and only file-level findings is an empty review, which GitHub rejects."""
+    failed, soft = soft_checks()
+    file_only = {'finding': 'f1', 'path': 'app/widget.rb', 'line': 40,
+                 'body': '**Advisory:** this line is not in the diff.'}
+
+    f = Fixture(root / 'empty-file-only')
+    inline_only(f, [file_only], body='')
+    proc = f.post('--dry-run')
+    soft(proc.returncode != 0 and 'empty review' in proc.stderr and 'file-level' in proc.stderr
+         and not (f.council / 'demo-1/post-7.request.json').exists(),
+         f'no summary and only file-level findings is refused at validation with a clear error '
+         f'({proc.returncode} {proc.stderr.strip()})')
+    real = f.post('--human-verdict', 'COMMENT')
+    soft(real.returncode != 0 and 'empty review' in real.stderr and f.posts() == 0,
+         f'a real post of the same payload never reaches the reviews endpoint ({real.returncode} {real.stderr.strip()} posts={f.posts()})')
+
+    f = Fixture(root / 'empty-with-summary')
+    inline_only(f, [file_only], body='One note.')
+    proc = f.post('--dry-run')
+    soft(proc.returncode == 0, f'the same finding with a summary passes ({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'empty-with-inline')
+    inline_only(f, [file_only, {**one_inline('**Advisory:** size counts deleted items.'), 'finding': 'f2'}], body='')
+    proc = f.post('--dry-run')
+    soft(proc.returncode == 0, f'an inline comment carries an empty summary ({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'empty-own-pr')
+    inline_only(f, [{**file_only, 'body': '**Requested:** this line is not in the diff.'}], body='')
+    proc = f.post('--dry-run', env={'GH_PR_AUTHOR': 'me'})
+    req = request_of(f) if proc.returncode == 0 else {}
+    soft(proc.returncode == 0 and req.get('body', '').startswith('Verdict: request changes'),
+         f'on your own PR the verdict line is the body, so a file-level-only review is not empty '
+         f'({proc.returncode} {proc.stderr.strip()} {req.get("body")!r})')
+    if failed:
+        raise SystemExit(f'FAIL {len(failed)} empty-review check(s)')
+
+
+def test_stale_cited_code(root: Path) -> None:
+    """A single-PR finding whose cited code is no longer on its line at the head does not post inline."""
+    failed, soft = soft_checks()
+
+    def moved(line: int, cited: str = 'items.count') -> Fixture:
+        f = Fixture(root / f'moved-{line}-{abs(hash(cited)) % 1000}')
+        inline_only(f, [{'finding': 'f1', 'path': 'app/widget.rb', 'line': line,
+                         'body': '**Advisory:** size counts deleted items.'}])
+        doc = json.loads((f.council / 'demo-1/findings.json').read_text())
+        doc['findings'][0]['cited_code'] = cited
+        (f.council / 'demo-1/findings.json').write_text(json.dumps(doc))
+        return f
+
+    f = moved(4)
+    proc = f.post('--dry-run')
+    req = request_of(f) if proc.returncode == 0 else {}
+    plan = req.get('plan') or [{}]
+    soft(proc.returncode == 0 and plan[0].get('post_as') == 'file' and req.get('comments') == []
+         and 'does not hold the cited code' in proc.stderr,
+         f'cited code that moved off line 4 is not posted inline there; it is file-level, with a warning '
+         f'({proc.returncode} {proc.stderr.strip()} {plan})')
+
+    f = moved(3)
+    proc = f.post('--dry-run')
+    req = request_of(f) if proc.returncode == 0 else {}
+    soft(proc.returncode == 0 and (req.get('plan') or [{}])[0].get('post_as') == 'inline',
+         f'cited code that is still on its line posts inline ({proc.returncode} {proc.stderr.strip()})')
+
+    f = moved(3, cited='items.size')
+    proc = f.post('--dry-run')
+    req = request_of(f) if proc.returncode == 0 else {}
+    soft(proc.returncode == 0 and (req.get('plan') or [{}])[0].get('post_as') == 'file' and req.get('comments') == [],
+         f'cited code that is gone from the line is file-level, not inline ({proc.returncode} {proc.stderr.strip()})')
+    if failed:
+        raise SystemExit(f'FAIL {len(failed)} stale-cited-code check(s)')
+
+
+def test_own_pr_comment_event(root: Path) -> None:
+    failed, soft = soft_checks()
+    f = Fixture(root / 'own-event-comment')
+    payload = inline_only(f, [one_inline('**Requested:** size counts deleted items.')])
+    payload['event'] = 'COMMENT'
+    f.set_payload(payload)
+    proc = f.post('--dry-run', env={'GH_PR_AUTHOR': 'me'})
+    req = request_of(f) if proc.returncode == 0 else {}
+    body = req.get('body', '')
+    print(f'info own PR, payload event COMMENT, Requested finding: event={req.get("event")!r} '
+          f'first line={body.splitlines()[0] if body else ""!r} body={body!r}')
+    soft(proc.returncode == 0 and req.get('event') == 'COMMENT'
+         and body == 'Verdict: request changes' + SELF_NOTE_FOLDS + '\n\nOne note on the widget change.'
+         and req['comments'][0]['body'].startswith('**Requested:**'),
+         f'own PR, payload event COMMENT with a Requested finding: posts as COMMENT with the verdict line '
+         f'({proc.returncode} {proc.stderr.strip()})')
+    f = Fixture(root / 'other-event-comment')
+    payload = inline_only(f, [one_inline('**Requested:** size counts deleted items.')])
+    payload['event'] = 'COMMENT'
+    f.set_payload(payload)
+    proc = f.post('--dry-run', env={'GH_PR_AUTHOR': 'someone-else'})
+    soft(proc.returncode != 0 and 'conflicts with 1 Requested' in proc.stderr,
+         f"someone else's PR, payload event COMMENT with a Requested finding is still refused "
+         f'({proc.returncode} {proc.stderr.strip()})')
+    if failed:
+        raise SystemExit(f'FAIL {len(failed)} own-PR COMMENT check(s)')
+
+
+def test_default_is_preview(root: Path) -> None:
+    failed, soft = soft_checks()
+    f = Fixture(root / 'default-preview')
+    inline_only(f, [one_inline('**Requested:** size counts deleted items.')])
+    proc = f.post(bare=True)
+    soft(proc.returncode == 0 and f.posts() == 0 and ['api', 'user'] not in f.calls()
+         and not (f.council / 'demo-1/posted.json').exists() and not (f.council / 'demo-1/post-7.pending.json').exists(),
+         f'no flags: nothing is posted and no receipt is written ({proc.returncode} {proc.stderr.strip()} posts={f.posts()})')
+    req = request_of(f) if (f.council / 'demo-1/post-7.request.json').exists() else {}
+    preview = proc.stdout.split('review that --post would send:', 1)[-1]
+    try:
+        shown = json.loads(preview[preview.index('{'):preview.rindex('}') + 1])
+    except ValueError:
+        shown = None
+    soft(shown is not None and shown.get('request') == {k: req.get(k) for k in ('commit_id', 'event', 'body', 'comments')}
+         and 'preview' in proc.stdout,
+         f'no flags: stdout prints the exact review it would send ({proc.returncode} {proc.stdout[-400:]!r})')
+    both = f.post('--dry-run', '--post', bare=True)
+    soft(both.returncode != 0 and f.posts() == 0, f'--dry-run with --post is refused ({both.returncode} {both.stderr.strip()})')
+    real = f.post()
+    soft(real.returncode == 0 and f.posts() >= 1 and (f.state / 'posted-request.json').is_file(),
+         f'--post posts the review ({real.returncode} {real.stderr.strip()} posts={f.posts()})')
+    if failed:
+        raise SystemExit(f'FAIL {len(failed)} default-preview check(s)')
+
+
 SELF_NOTE = ' (posted as a comment because this is your own PR)'
 
 
@@ -1547,6 +1696,12 @@ def test_verdict(root: Path) -> None:
 
 
 def main() -> None:
+    only = sys.argv[1:]
+    if only:
+        with tempfile.TemporaryDirectory(prefix='post-review-tests-') as raw:
+            for name in only:
+                globals()[name](Path(raw))
+        return
     with tempfile.TemporaryDirectory(prefix='post-review-tests-') as raw:
         root = Path(raw)
         test_right_lines()
@@ -1570,6 +1725,10 @@ def main() -> None:
         test_file_level_and_reanchor(root)
         test_verdict(root)
         test_self_authored(root)
+        test_empty_review(root)
+        test_stale_cited_code(root)
+        test_own_pr_comment_event(root)
+        test_default_is_preview(root)
     print('all post-review checks passed')
 
 

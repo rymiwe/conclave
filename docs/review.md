@@ -1671,7 +1671,11 @@ script calls the posting helper. When the human says post:
    when the ballot has no `blind/key.txt`. `pr_author` and `reviewer` are no
    longer needed: every new comment needs a label on any pull request. The
    format is in the header of `scripts/post-review.py`.
-2. Run `scripts/post-review.py <id> <pr> --dry-run`. It checks the PR head
+2. Run `scripts/post-review.py <id> <pr>`. With no flag it is a preview: it
+   posts nothing, writes no receipt, writes the request file, and prints the
+   exact review it would send (`request`, `file_comments`, and `replies`).
+   `--dry-run` is the same thing spelled out, and it cannot be combined with
+   `--post`. It checks the PR head
    against `commit_id` and checks each line against this PR's
    `pulls/<pr>/files` hunks, never the stack tip.
    - A right-side line in a hunk is an inline comment.
@@ -1747,7 +1751,19 @@ script calls the posting helper. When the human says post:
    accepted there. With a Requested finding the line still names the
    would-be verdict. With none Requested it adds no line. The dry run prints the same plan in the
    verdict line. A PR you did not author is unchanged.
-3. Read the plan, then run the same command without `--dry-run`. It posts
+
+   A finding whose line is in this PR's diff posts inline only when that line
+   at the head holds the finding's cited text (`expect`, else the ballot's
+   `cited_code`, compared as a whole line). A line that moved or changed is
+   posted as a file-level comment instead, with a warning that names what the
+   line reads. A finding with no cited text posts inline on its line, as
+   before.
+
+   A review with an empty summary and no inline comment is refused with
+   `empty review: ...`, because GitHub rejects a review with no body and no
+   comments, and file-level comments go out after the review. On your own PR
+   the verdict line is the body, so it is not empty.
+3. Read the preview, then run the same command with `--post`. It posts
    one review (`side: RIGHT`, `commit_id`, line), writes
    `post-<pr>.pending.json` with the review id, then reads the comments back.
    The pending file is written before that read. A failed read-back still

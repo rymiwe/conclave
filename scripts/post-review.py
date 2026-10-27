@@ -2,9 +2,9 @@
 """Post one GitHub review from a payload file and record what went out.
 
 Posting needs the human's go. No Conclave kind posts on its own, and no
-script calls this one. Run it by hand, with --dry-run first.
+script calls this one. Run it by hand. Without --post it only previews.
 
-  scripts/post-review.py <id> <pr> [--payload FILE] [--repo OWNER/NAME] [--dry-run]
+  scripts/post-review.py <id> <pr> [--payload FILE] [--repo OWNER/NAME] [--post]
                          [--human-verdict APPROVE|REQUEST_CHANGES|COMMENT]
 
 <id> is a ballot or stack directory under tmp/council/. The payload defaults
@@ -82,7 +82,7 @@ Steps, in order. Any failure stops before the POST.
    line, label), plan_verdict, file_comments, and replies. None of those
    is sent to GitHub. The dry run prints one plan line per finding and the
    verdict line.
-7. --dry-run stops here. Otherwise POST pulls/<pr>/reviews, write
+7. Without --post the run stops here and prints the exact review. With --post, POST pulls/<pr>/reviews, write
    tmp/council/<id>/post-<pr>.pending.json with the review id and the review
    request that was posted, then read the review's comments back. The pending
    file is written before that read, so a failed read-back cannot erase the
@@ -356,11 +356,16 @@ def main() -> int:
     ap.add_argument("--repo")
     ap.add_argument("--council-dir", default=str(ROOT / "tmp" / "council"),
                     help="where ballot directories live (tests only)")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="every check and the request file, but no POST")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--post", action="store_true",
+                      help="send the review. Without it nothing is sent: every check runs, the request file "
+                           "is written, and the exact review is printed")
+    mode.add_argument("--dry-run", action="store_true",
+                      help="the default, spelled out: every check and the request file, but no POST")
     ap.add_argument("--human-verdict", choices=HUMAN_VERDICTS,
                     help="the human's event when findings exist and none is Requested")
     args = ap.parse_args()
+    posting = args.post
 
     if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]*", args.id):
         die(f"unsafe id {args.id!r}")
@@ -545,7 +550,7 @@ def main() -> int:
         if c.get("expect") and (text is None or c["expect"] not in text):
             errors.append(f"comment {i} ({key}): {c['path']}:{c['line']} reads {text!r}, expected {c['expect']!r}")
         where = f"comment {i} ({key}) {c['path']}:{c['line']}"
-        needle = c.get("expect") or (cited_code(ballot, fid) if stack_dir is not None else None)
+        needle = c.get("expect") or cited_code(ballot, fid)
 
         def holds(line_text: str | None) -> bool:
             """expect is a substring check. Cited code is a whole line, as the resolver reads it."""
@@ -553,9 +558,9 @@ def main() -> int:
                 return False
             return needle in line_text if c.get("expect") else line_text.strip() == needle
 
-        # In a stack the line number may be the stack tip's. A line in this
-        # PR's diff is trusted only when it holds the cited text, or when
-        # there is no cited text to check.
+        # The line number may be the stack tip's, or from before the line
+        # moved. A line in this PR's diff at the head is trusted only when it
+        # holds the cited text, or when there is no cited text to check.
         if in_diff is not None and (needle is None or holds(in_diff)):
             post_as = "inline"
         else:
@@ -578,6 +583,10 @@ def main() -> int:
                     if anchor["post_as"] == "flag":
                         errors.append(f"{where}: flag for the chair; not pinned to #{args.pr} ({anchor['reason']})")
                         continue
+            if in_diff is not None and not c.get("expect"):
+                print(f"post-review: warning: {where}: the line reads {in_diff.strip()!r}, which does not hold "
+                      f"the cited code {needle!r}; posting it as a file-level comment, not inline",
+                      file=sys.stderr)
             # A file in this PR's diff takes a file-level comment. A file in
             # no diff cannot, so that comment joins the review body.
             post_as = "file" if c["path"] in files else "review body"
@@ -806,7 +815,7 @@ def main() -> int:
         elif human:
             event = human
             plan_verdict += f"; the human chose {human}"
-        elif not args.dry_run:
+        elif posting:
             errors.append(f"{plan_verdict}. A real post needs --human-verdict "
                           f"{'|'.join(HUMAN_VERDICTS)}")
     if event in ("REQUEST_CHANGES", "APPROVE") and own_pr():
@@ -818,6 +827,11 @@ def main() -> int:
         if len(body) > comment_draft.GITHUB_COMMENT_LIMIT:
             errors.append(f"review body is {len(body)} characters with the verdict line; "
                           f"GitHub's limit is {comment_draft.GITHUB_COMMENT_LIMIT}")
+    if not body.strip() and not inline and not resume:
+        why = (f"all {len(file_comments)} finding(s) are file-level comments, which the reviews endpoint "
+               "does not take" if file_comments else "there is no inline comment")
+        errors.append(f"empty review: the summary is empty and {why}, and GitHub rejects a review with no "
+                      "body and no comments; write a one-line summary opener")
     if errors:
         for e in errors:
             print(f"  {e}", file=sys.stderr)
@@ -873,8 +887,14 @@ def main() -> int:
             done = files_sent.get(fc["key"])
             if done is not None and (done.get("path") != fc["path"] or done.get("body") != fc["body"]):
                 die(f"file-level comment {fc['key']} on {fc['path']} was already posted with different text")
-    if args.dry_run:
-        print("dry run: nothing posted")
+    if not posting:
+        print("review that --post would send:")
+        print(json.dumps({
+            "request": request,
+            "file_comments": [{"path": c["path"], "body": c["body"]} for c in file_comments],
+            "replies": replies,
+        }, indent=2))
+        print("preview only: nothing posted; run again with --post to send this review")
         return 0
 
     if resume:
