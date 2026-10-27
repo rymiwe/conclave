@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The default ballot is seat-usage --route lineup. CONCLAVE_SEAT_USAGE is the
-# stub. A missing binary, a failed run, or mode ask keeps the fixed default.
+# stub. A missing binary, a failed run, or mode ask keeps the fixed default,
+# except on a review whose PR trailers are ambiguous, which stops (exit 3).
 # No live router and no live model call.
 set -eu
 
@@ -37,6 +38,9 @@ cat >"$work/bin/seat-usage" <<'EOF'
 touch "$SEAT_CALLED"
 if [ -n "${SEAT_ARGV:-}" ]; then
   printf '%s\n' "$*" >>"$SEAT_ARGV"
+fi
+if [ -n "${SEAT_STUB_ERR:-}" ]; then
+  printf '%s\n' "$SEAT_STUB_ERR" >&2
 fi
 if [ "${SEAT_STUB_RC:-0}" != 0 ]; then
   exit "$SEAT_STUB_RC"
@@ -100,6 +104,10 @@ write_lineup "$work/one.json" muse
 printf '%s\n' '[{"role":"lineup","mode":"ask","reason":"Fable reading unknown","lineup":null}]' >"$work/ask.json"
 printf '%s\n' 'not json' >"$work/bad.json"
 printf '%s\n' '[{"role":"lineup","mode":"default","reason":"stub","lineup":{"voters":[{"family":"astra","seat":"chatgpt"},{"family":"grok","seat":"grok"},{"family":"muse","seat":"muse"}]},"excluded":{"vendor":"anthropic","name":"Anthropic","family":"opus","why":"Opus built the diff"}}]' >"$work/anthropic-built.json"
+# What seat-usage with --exclude-vendor prints for anthropic plus xai trailers.
+printf '%s\n' '[{"role":"lineup","mode":"default","reason":"stub","lineup":{"voters":[{"family":"astra","seat":"chatgpt"},{"family":"muse","seat":"muse"}]},"skipped":[{"family":"fable","seat":"claude","vendor":"anthropic","code":"builder_vendor"},{"family":"grok","seat":"grok","vendor":"xai","code":"excluded_vendor"}]}]' >"$work/excluded.json"
+# What a seat-usage too old for --exclude-vendor prints: grok still seated.
+printf '%s\n' '[{"role":"lineup","mode":"default","reason":"stub","lineup":{"voters":[{"family":"astra","seat":"chatgpt"},{"family":"grok","seat":"grok"}]},"skipped":[{"family":"fable","seat":"claude","vendor":"anthropic","code":"builder_vendor"}]}]' >"$work/old.json"
 
 COUNCIL_SOURCE_ONLY=1
 # shellcheck disable=SC1091
@@ -518,11 +526,11 @@ reset_pr_route() {
   : >"$GH_ARGV"
 }
 
-# $1 is python that assigns doc.
+# $1 is python that assigns doc. $2 is the router stub json.
 route_pr() {
   write_pr_json "$1"
   reset_pr_route
-  use_router "$work/all.json" 0
+  use_router "${2:-$work/all.json}" 0
   apply review
 }
 
@@ -594,19 +602,24 @@ route_pr 'doc = {
     {"messageHeadline": "One", "messageBody": "Co-Authored-By: Grok <noreply@x.ai>\n"},
     {"messageHeadline": "Two", "messageBody": "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"},
   ],
-}'
+}' "$work/excluded.json"
 check "disagreeing trailers omit author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
-# Ambiguous trailers fail closed: every vendor they name is excluded.
-check "disagreeing trailers exclude every named vendor" grep -qx -- '--route lineup --json --kind review --builder-vendor anthropic --exclude-seat grok --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+# Ambiguous trailers fail closed: every vendor they name is excluded on every pool.
+check "disagreeing trailers exclude every named vendor" grep -qx -- '--route lineup --json --kind review --builder-vendor anthropic --exclude-vendor anthropic --exclude-vendor xai --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+check "disagreeing trailers pass no seat exclusion" bash -c '! grep -q -- "--exclude-seat" "$1"' _ "$SEAT_ARGV"
+check "disagreeing trailers keep the router ballot" [ "$VOTERS" = "codex,muse" ]
 check "disagreeing trailers resolve to the first vendor" [ "$(review_resolved_builder_vendor)" = anthropic ]
+: >"$SEAT_ARGV"
+review_route_json >/dev/null
+check "disagreeing trailers re-route excludes every named vendor" grep -qx -- '--route lineup --json --kind review --builder-vendor anthropic --exclude-vendor anthropic --exclude-vendor xai --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
 
 route_pr 'doc = {
   "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss", "type": "User"},
   "commits": [{"messageHeadline": "Seat",
                "messageBody": "Co-Authored-By: Opus and Grok <noreply@example.com>\n"}],
-}'
+}' "$work/excluded.json"
 check "one trailer naming two vendors omits author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
-check "one trailer naming two vendors excludes both" grep -qx -- '--route lineup --json --kind review --builder-vendor anthropic --exclude-seat grok --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+check "one trailer naming two vendors excludes both" grep -qx -- '--route lineup --json --kind review --builder-vendor anthropic --exclude-vendor anthropic --exclude-vendor xai --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
 
 # Claude plus a co-author outside the known families is ambiguous. No
 # anthropic voter, and one line says why.
@@ -616,29 +629,122 @@ write_pr_json 'doc = {
                "messageBody": "Co-authored-by: Claude <noreply@anthropic.com>\nCo-authored-by: Jane Doe <jane@example.com>\n"}],
 }'
 reset_pr_route
-use_router "$work/all.json" 0
+use_router "$work/excluded.json" 0
 apply review 2>"$work/amb.err"
-check "claude plus unknown co-author excludes anthropic" grep -qx -- '--route lineup --json --kind review --builder-vendor anthropic --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
+check "claude plus unknown co-author excludes anthropic" grep -qx -- '--route lineup --json --kind review --builder-vendor anthropic --exclude-vendor anthropic --ballot '"$ID"' --repo '"$work/target" "$SEAT_ARGV"
 check "claude plus unknown co-author omits author" bash -c '! grep -q -- "--author" "$1"' _ "$SEAT_ARGV"
 check "claude plus unknown co-author builder vendor is anthropic" [ "$(review_resolved_builder_vendor)" = anthropic ]
 check "ambiguous trailers print one line saying why" [ "$(grep -c 'trailers are ambiguous' "$work/amb.err")" -eq 1 ]
 check "ambiguous line names the vendor" grep -q 'excluding every vendor they name (anthropic)' "$work/amb.err"
 
-# An ambiguous trailer naming a vendor with no seat stops the review (fail
-# closed), the way merge-gate refuses with exit 3.
-unmapped_rc=0
+# A vendor seat-usage does not know stops the review (fail closed), the way
+# merge-gate refuses with exit 3. seat-usage exits 2 and names it.
+ambiguous_route() { # $1 vendors, $2 stub json, $3 stub rc, $4 stub stderr; prints the exit code
+  local rc=0
+  (
+    review_pr_load_facts() { return 0; }
+    reset_pr_route
+    REVIEW_PR_FACT_VENDOR=ambiguous
+    REVIEW_PR_FACT_VENDORS="$1"
+    use_router "$2" "$3"
+    SEAT_STUB_ERR="$4"
+    export SEAT_STUB_ERR
+    apply review
+    exit 0
+  ) >/dev/null 2>"$work/ambiguous.err" || rc=$?
+  printf '%s\n' "$rc"
+}
+rc="$(ambiguous_route "anthropic mistral" "$work/all.json" 2 \
+  "unknown vendor mistral; vendors: anthropic, google, meta, openai, xai (grok is an alias for xai)")"
+check "unknown ambiguous vendor stops the review" [ "$rc" -eq 3 ]
+check "unknown ambiguous vendor is passed to seat-usage" grep -q -- '--exclude-vendor mistral' "$SEAT_ARGV"
+check "unknown ambiguous vendor error names the vendor" \
+  grep -qx "conclave: refused: seat-usage does not know vendor 'mistral' named by ambiguous PR trailers; stopping the review" "$work/ambiguous.err"
+check "unknown ambiguous vendor error is one line" [ "$(grep -c 'conclave: refused' "$work/ambiguous.err")" -eq 1 ]
+
+# A seat-usage too old for --exclude-vendor ignores it and still exits 0.
+# Its lineup does not report the exclusion, so the review stops.
+rc="$(ambiguous_route "anthropic xai" "$work/old.json" 0 "")"
+check "old seat-usage stops the review" [ "$rc" -eq 3 ]
+check "old seat-usage error names the vendor and the flag" \
+  grep -qx "conclave: refused: seat-usage did not report excluding vendor 'xai' named by ambiguous PR trailers (needs seat-usage with --exclude-vendor); stopping the review" "$work/ambiguous.err"
+rc="$(ambiguous_route "anthropic xai" "$work/excluded.json" 0 "")"
+check "seat-usage that reports the exclusion keeps the review" [ "$rc" -eq 0 ]
+# Ask mode would keep the fixed Fable and Astra default, which seats a named
+# vendor, so the review stops even when the exclusions are reported.
+printf '%s\n' '[{"role":"lineup","mode":"ask","reason":"need 2 review seat(s) outside Anthropic, xAI; 1 eligible: ask Ryan","lineup":null,"skipped":[{"family":"fable","vendor":"anthropic","code":"builder_vendor"},{"family":"grok","vendor":"xai","code":"excluded_vendor"}]}]' >"$work/excluded-ask.json"
+rc="$(ambiguous_route "anthropic xai" "$work/excluded-ask.json" 0 "")"
+check "ask after exclusion stops an ambiguous review" [ "$rc" -eq 3 ]
+check "ask after exclusion error says why" \
+  grep -qx "conclave: refused: seat-usage seated no lineup outside the vendors ambiguous PR trailers named (anthropic, xai): need 2 review seat(s) outside Anthropic, xAI; 1 eligible: ask Ryan; stopping the review" "$work/ambiguous.err"
+route_pr 'doc = {
+  "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss"},
+  "commits": [{"messageHeadline": "One", "messageBody": "Co-Authored-By: Grok <noreply@x.ai>\n"}],
+}' "$work/ask.json" 2>/dev/null
+check "ask without ambiguous trailers keeps the fixed default" source_is "ballot: fallback (seat-usage asked; fixed default)"
+# A seat-usage that fails or prints no JSON excluded nobody. The fixed
+# fallback would seat a named vendor, so the review stops.
+rc="$(ambiguous_route "anthropic xai" "$work/all.json" 1 "boom")"
+check "failed seat-usage stops an ambiguous review" [ "$rc" -eq 3 ]
+check "failed seat-usage error names the vendors and its stderr" \
+  grep -qx "conclave: refused: seat-usage gave no lineup while ambiguous PR trailers named anthropic, xai (boom); stopping the review" "$work/ambiguous.err"
+rc="$(ambiguous_route "anthropic xai" "$work/bad.json" 0 "")"
+check "non-json seat-usage stops an ambiguous review" [ "$rc" -eq 3 ]
+check "non-json seat-usage error names a vendor" grep -q "did not report excluding vendor 'anthropic'" "$work/ambiguous.err"
+# A malformed skipped list cannot show the exclusions, so the review stops
+# even when the lineup and the well-formed entries look right.
+malformed_skip() { # $1 name, $2 skipped JSON
+  printf '%s\n' '[{"role":"lineup","mode":"default","reason":"stub","lineup":{"voters":[{"family":"astra","seat":"chatgpt"},{"family":"muse","seat":"muse"}]},"skipped":'"$2"'}]' >"$work/$1.json"
+}
+malformed_skip skip-list-vendor '[{"vendor":[],"code":"excluded_vendor"},{"vendor":"anthropic","code":"builder_vendor"},{"vendor":"xai","code":"excluded_vendor"}]'
+malformed_skip skip-int '1'
+malformed_skip skip-non-object '["grok",{"vendor":"anthropic","code":"builder_vendor"},{"vendor":"xai","code":"excluded_vendor"}]'
+for bad in skip-list-vendor skip-int skip-non-object; do
+  rc="$(ambiguous_route "anthropic xai" "$work/$bad.json" 0 "")"
+  check "$bad skipped stops an ambiguous review" [ "$rc" -eq 3 ]
+  check "$bad skipped error is one refusal line" \
+    grep -qx "conclave: refused: seat-usage printed a malformed skipped list (need a list of objects with string vendor and code), so the exclusion of anthropic, xai named by ambiguous PR trailers is unverified; stopping the review" "$work/ambiguous.err"
+  check "$bad skipped error is one line" [ "$(wc -l <"$work/ambiguous.err")" -eq 1 ]
+done
+reroute_bad_rc=0
 (
   review_pr_load_facts() { return 0; }
-  KIND=review
-  HEADER_AUTHOR=""
+  reset_pr_route
   REVIEW_PR_FACT_VENDOR=ambiguous
-  REVIEW_PR_FACT_VENDORS="anthropic mistral"
-  unmapped_args=()
-  review_append_author_args unmapped_args
-  exit 0
-) 2>"$work/unmapped.err" || unmapped_rc=$?
-check "unmapped ambiguous vendor stops the review" [ "$unmapped_rc" -eq 3 ]
-check "unmapped ambiguous vendor error names the vendor" grep -q "no seat for vendor 'mistral'" "$work/unmapped.err"
+  REVIEW_PR_FACT_VENDORS="anthropic xai"
+  use_router "$work/skip-list-vendor.json" 0
+  review_route_json >/dev/null
+) 2>"$work/reroute.err" || reroute_bad_rc=$?
+check "malformed skipped re-route returns no lineup" [ "$reroute_bad_rc" -ne 0 ]
+check "malformed skipped re-route says why" grep -q "malformed skipped list" "$work/reroute.err"
+# A missing seat-usage excluded nobody either. Only an ambiguous review stops;
+# "missing review router" above keeps the fixed default.
+missing_rc=0
+(
+  review_pr_load_facts() { return 0; }
+  reset_pr_route
+  REVIEW_PR_FACT_VENDOR=ambiguous
+  REVIEW_PR_FACT_VENDORS="anthropic xai"
+  CONCLAVE_SEAT_USAGE="$work/missing-seat-usage"
+  export CONCLAVE_SEAT_USAGE
+  apply review
+) >/dev/null 2>"$work/ambiguous.err" || missing_rc=$?
+check "missing seat-usage stops an ambiguous review" [ "$missing_rc" -eq 3 ]
+check "missing seat-usage error names the vendors" \
+  grep -qx "conclave: refused: seat-usage is missing ($work/missing-seat-usage) while ambiguous PR trailers named anthropic, xai; stopping the review" "$work/ambiguous.err"
+check "missing seat-usage error is one line" [ "$(grep -c 'conclave: refused' "$work/ambiguous.err")" -eq 1 ]
+old_rc=0
+(
+  review_pr_load_facts() { return 0; }
+  reset_pr_route
+  REVIEW_PR_FACT_VENDOR=ambiguous
+  REVIEW_PR_FACT_VENDORS="anthropic xai"
+  use_router "$work/old.json" 0
+  review_route_json >/dev/null
+) 2>"$work/reroute.err" || old_rc=$?
+check "old seat-usage re-route returns no lineup" [ "$old_rc" -ne 0 ]
+check "old seat-usage re-route says why" grep -q "did not report excluding vendor 'xai'" "$work/reroute.err"
+check "no hardcoded vendor seat map" bash -c '! grep -q "review_vendor_seat" "$1"' _ "$CONCLAVE"
 
 write_pr_json 'doc = {
   "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss", "type": "User"},

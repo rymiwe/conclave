@@ -3061,7 +3061,14 @@ review_route_json() {
     [ -n "$seat" ] || continue
     args+=(--exclude-seat "$seat")
   done
-  raw="$("$bin" "${args[@]}" 2>/dev/null)" || return 1
+  local err
+  err="$(mktemp)"
+  raw="$("$bin" "${args[@]}" 2>"$err")" || raw=""
+  if ! review_check_excluded_vendors "$raw" "$err"; then
+    rm -f "$err"
+    return 1
+  fi
+  rm -f "$err"
   [ -n "$raw" ] || return 1
   printf '%s\n' "$raw"
 }

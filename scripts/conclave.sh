@@ -1474,7 +1474,7 @@ review_resolved_builder_vendor() {
   # A brief author: of a known family still maps to its vendor.
   # Otherwise a PR commit trailer that names one model vendor. Ambiguous
   # trailers return the first vendor they name; review_append_author_args
-  # excludes the others by seat, so no named family reviews the PR.
+  # passes every one as --exclude-vendor, so no named family reviews the PR.
   if [ -n "${HEADER_AUTHOR:-}" ]; then
     review_author_vendor "$HEADER_AUTHOR" || true
     return 0
@@ -1484,17 +1484,6 @@ review_resolved_builder_vendor() {
   case "$REVIEW_PR_FACT_VENDOR" in
     anthropic|openai|xai|meta|google) printf '%s\n' "$REVIEW_PR_FACT_VENDOR" ;;
     ambiguous) printf '%s\n' "${REVIEW_PR_FACT_VENDORS%% *}" ;;
-  esac
-}
-
-review_vendor_seat() {
-  # seat-usage seat for a vendor, for --exclude-seat.
-  case "$1" in
-    anthropic) printf 'claude\n' ;;
-    openai) printf 'chatgpt\n' ;;
-    xai) printf 'grok\n' ;;
-    google) printf 'google\n' ;;
-    meta) printf 'muse\n' ;;
   esac
 }
 
@@ -1522,6 +1511,7 @@ review_append_author_args() {
   # subshell's assignments do not survive, so a later reseat would ask gh again.
   local -n _dest="$1"
   local author vendor
+  REVIEW_EXCLUDED_VENDORS=""
   if [ "${KIND:-}" = review ] && [ -z "${HEADER_AUTHOR:-}" ]; then
     review_pr_load_facts || true
   fi
@@ -1534,23 +1524,73 @@ review_append_author_args() {
   if [ -n "$vendor" ]; then
     _dest+=(--builder-vendor "$vendor")
   fi
-  # --builder-vendor takes one vendor. Ambiguous trailers can name several, so
-  # the rest are excluded by seat.
+  # --builder-vendor takes one vendor. Ambiguous trailers can name several.
+  # --exclude-vendor drops each one's families on every pool that serves them.
+  # review_check_excluded_vendors stops the review when that did not happen.
   if [ -z "${HEADER_AUTHOR:-}" ] && [ "$REVIEW_PR_FACT_VENDOR" = ambiguous ]; then
-    local extra seat
-    for extra in ${REVIEW_PR_FACT_VENDORS#* }; do
-      [ "$extra" = "$vendor" ] && continue
-      seat="$(review_vendor_seat "$extra")"
-      if [ -z "$seat" ]; then
-        # No seat means it cannot be excluded. Stop rather than fail open.
-        echo "conclave: refused: no seat for vendor '$extra' named by ambiguous PR trailers; stopping the review" >&2
-        exit 3
-      fi
-      _dest+=(--exclude-seat "$seat")
+    local named
+    for named in $REVIEW_PR_FACT_VENDORS; do
+      _dest+=(--exclude-vendor "$named")
     done
+    REVIEW_EXCLUDED_VENDORS="$REVIEW_PR_FACT_VENDORS"
   fi
   # This call is done. A later re-seat may ask gh if this one failed.
   REVIEW_PR_FACT_SKIP=""
+}
+
+review_check_excluded_vendors() {
+  # $1 is seat-usage stdout, $2 its stderr file. Returns 3 after one refusal
+  # line when a vendor ambiguous trailers named was not excluded. seat-usage
+  # exits 2 on a vendor it does not know. One too old for --exclude-vendor
+  # ignores the flag, so its lineup must report each vendor as skipped. No
+  # lineup excluded nobody, and the fixed fallback could seat a named vendor.
+  [ -n "${REVIEW_EXCLUDED_VENDORS:-}" ] || return 0
+  local unknown missing first why rc=0
+  unknown="$(sed -n 's/^unknown vendor \([^;]*\);.*/\1/p' "$2" | head -n 1)"
+  if [ -n "$unknown" ]; then
+    echo "conclave: refused: seat-usage does not know vendor '$unknown' named by ambiguous PR trailers; stopping the review" >&2
+    return 3
+  fi
+  if [ -z "$1" ]; then
+    first="$(head -n 1 "$2")"
+    echo "conclave: refused: seat-usage gave no lineup while ambiguous PR trailers named ${REVIEW_EXCLUDED_VENDORS// /, }${first:+ ($first)}; stopping the review" >&2
+    return 3
+  fi
+  # Any failure of this check is a refusal: an unchecked substitution would
+  # leave missing empty and accept the lineup unverified.
+  # shellcheck disable=SC2086
+  missing="$(python3 - "$1" $REVIEW_EXCLUDED_VENDORS 2>/dev/null <<'PY'
+import json, sys
+try:
+    doc = json.loads(sys.argv[1])
+except ValueError:
+    print(sys.argv[2])
+    sys.exit(0)
+row = doc[0] if isinstance(doc, list) and doc else doc
+skipped = row.get("skipped") if isinstance(row, dict) else None
+if skipped is None:
+    skipped = []
+if not isinstance(skipped, list) or not all(
+        isinstance(i, dict) and isinstance(i.get("vendor"), str) and isinstance(i.get("code"), str)
+        for i in skipped):
+    sys.exit(4)
+done = {(i["vendor"], i["code"]) for i in skipped}
+for vendor in sys.argv[2:]:
+    if (vendor, "excluded_vendor") not in done and (vendor, "builder_vendor") not in done:
+        print(vendor)
+        break
+PY
+)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    why="the exclusion check exited $rc"
+    [ "$rc" -eq 4 ] && why="seat-usage printed a malformed skipped list (need a list of objects with string vendor and code)"
+    echo "conclave: refused: $why, so the exclusion of ${REVIEW_EXCLUDED_VENDORS// /, } named by ambiguous PR trailers is unverified; stopping the review" >&2
+    return 3
+  fi
+  if [ -n "$missing" ]; then
+    echo "conclave: refused: seat-usage did not report excluding vendor '$missing' named by ambiguous PR trailers (needs seat-usage with --exclude-vendor); stopping the review" >&2
+    return 3
+  fi
 }
 
 review_map_voter() {
@@ -1624,7 +1664,9 @@ lineup_parse_voters() {
 }
 
 load_lineup_ballot() {
-  # Never stops the run. The control plane already ran the lineup.
+  # Stops the run (exit 3) only when ambiguous trailers named a vendor and
+  # seat-usage is missing, did not show it excluded, or seated no lineup
+  # without it. The control plane already ran the lineup.
   # A brief author: header naming a known family passes --author, and on
   # review also --builder-vendor for that family. With no header, review
   # passes --builder-vendor only when a PR commit trailer names one model.
@@ -1638,13 +1680,6 @@ load_lineup_ballot() {
   # nobody. A pace-picked builder is not excluded. Audit has no default author.
   local bin raw parsed status legs args tail name why line rest
   bin="$(conclave_env SEAT_USAGE "$HOME/.local/bin/seat-usage")"
-  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
-    BALLOT_SOURCE=fallback
-    BALLOT_SOURCE_NOTE="seat-usage missing"
-    ballot_use_fixed_default
-    note_review_route_fallback
-    return 0
-  fi
   args=(--route lineup --json --kind "$KIND")
   if [ "$KIND" = "review" ]; then
     if [ -z "${REPO:-}" ] && [ -n "${FLAG_REPO:-}" ]; then
@@ -1660,7 +1695,27 @@ load_lineup_ballot() {
       args+=(--repo "$REPO")
     fi
   fi
-  raw="$("$bin" "${args[@]}" 2>/dev/null)" || raw=""
+  # After the author args, which set REVIEW_EXCLUDED_VENDORS: the fixed
+  # fallback could seat a vendor ambiguous trailers named.
+  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+    if [ -n "${REVIEW_EXCLUDED_VENDORS:-}" ]; then
+      echo "conclave: refused: seat-usage is missing (${bin:-unset}) while ambiguous PR trailers named ${REVIEW_EXCLUDED_VENDORS// /, }; stopping the review" >&2
+      exit 3
+    fi
+    BALLOT_SOURCE=fallback
+    BALLOT_SOURCE_NOTE="seat-usage missing"
+    ballot_use_fixed_default
+    note_review_route_fallback
+    return 0
+  fi
+  local err
+  err="$(mktemp)"
+  raw="$("$bin" "${args[@]}" 2>"$err")" || raw=""
+  if ! review_check_excluded_vendors "$raw" "$err"; then
+    rm -f "$err"
+    exit 3
+  fi
+  rm -f "$err"
   if [ -z "$raw" ]; then
     BALLOT_SOURCE=fallback
     BALLOT_SOURCE_NOTE="seat-usage failed"
@@ -1724,6 +1779,7 @@ load_lineup_ballot() {
       fi
       ;;
     ask)
+      review_refuse_fixed_default "$raw"
       BALLOT_SOURCE=fallback
       BALLOT_SOURCE_NOTE="seat-usage asked"
       ballot_use_fixed_default
@@ -1731,10 +1787,29 @@ load_lineup_ballot() {
       return 0
       ;;
   esac
+  review_refuse_fixed_default "$raw"
   BALLOT_SOURCE=fallback
   BALLOT_SOURCE_NOTE="seat-usage failed"
   ballot_use_fixed_default
   note_review_route_fallback
+}
+
+review_refuse_fixed_default() {
+  # $1 is seat-usage stdout. The fixed default is Fable and Astra, which can
+  # be a vendor ambiguous trailers named. Exit 3 instead of seating it.
+  [ -n "${REVIEW_EXCLUDED_VENDORS:-}" ] || return 0
+  local why
+  why="$(python3 -c '
+import json, sys
+try:
+    doc = json.loads(sys.argv[1])
+except ValueError:
+    sys.exit(0)
+row = doc[0] if isinstance(doc, list) and doc else doc
+print(row.get("reason") or "" if isinstance(row, dict) else "")
+' "$1" 2>/dev/null)" || why=""
+  echo "conclave: refused: seat-usage seated no lineup outside the vendors ambiguous PR trailers named (${REVIEW_EXCLUDED_VENDORS// /, })${why:+: $why}; stopping the review" >&2
+  exit 3
 }
 
 review_add_opus_leg() {
