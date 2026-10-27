@@ -821,6 +821,34 @@ def test_post_plan_ready(tmp: Path) -> None:
         c.close()
 
 
+def test_nul_declaration(tmp: Path) -> None:
+    """A NUL byte in a declared argv is one blocking malformed-declaration item, not a crash."""
+    checks, reason = preflight.parse_declaration(json.dumps({'version': 1, 'checks': [
+        {'name': 'x', 'command': ['true', '\u0000'], 'needs': 'n'}]}))
+    check(checks is None and 'NUL' in reason, f'nul: parse_declaration rejects a NUL in an argument ({reason!r})')
+    bin_dir = tmp / 'nul-bin'
+    bin_dir.mkdir()
+    env = base_env(bin_dir, CONCLAVE_WAVE_PRECHECK='0')
+    repo = make_repo(tmp / 'nul-decl')
+    declare(repo, json.dumps({'version': 1, 'checks': [
+        {'name': 'nul arg', 'command': ['true', '\u0000'], 'needs': 'n'}]}))
+    dest = tmp / 'nul-decl-out'
+    got = preflight_cli(env, repo, dest, '--base', 'main')
+    needs = (dest / 'needs-human.md').read_text() if (dest / 'needs-human.md').is_file() else ''
+    check(got.returncode == preflight.BLOCKED and needs.count('bad .conclave/preflight.json') == 1
+          and 'NUL' in needs and '\n2. ' not in needs and 'Traceback' not in got.stderr,
+          f'nul: a committed NUL argv is one blocking item, exit 3, no crash ({got.returncode} {needs!r} {got.stderr[-200:]!r})')
+
+
+def test_nul_run_command(tmp: Path) -> None:
+    """Any Popen argument error (here an embedded NUL) is a reason class, not an exception."""
+    try:
+        got = preflight.run_command(['true', 'a\0b'], tmp, 5)
+    except ValueError as exc:
+        got = f'raised ValueError: {exc}'
+    check(got == 'could not run', f'nul: run_command reports a Popen ValueError as could not run ({got!r})')
+
+
 def main() -> None:
     (ROOT / 'tmp').mkdir(exist_ok=True)
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Status)
@@ -835,6 +863,8 @@ def main() -> None:
             test_declaration_source(tmp)
             test_stacked_pr_declaration(tmp)
             test_command_rules(tmp, port)
+            test_nul_declaration(tmp)
+            test_nul_run_command(tmp)
             test_stage_hook(tmp)
             test_seats_and_targets(tmp)
             test_conclave(tmp)

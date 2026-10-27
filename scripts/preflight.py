@@ -380,6 +380,8 @@ def parse_declaration(text: str) -> tuple[list[dict] | None, str]:
         if command is not None and (not isinstance(command, list) or not command
                                     or not all(isinstance(a, str) and a for a in command)):
             return None, f'{where}: command must be a non-empty list of strings'
+        if command is not None and any('\0' in a for a in command):
+            return None, f'{where}: command arguments must not contain a NUL character'
         if command is not None:
             if '/' in command[0] and not command[0].startswith('/'):
                 return None, f'{where}: command must be a tool on PATH or an absolute path, not a path in the checkout'
@@ -435,7 +437,7 @@ def run_command(argv: list[str], cwd: str | Path, timeout: float) -> str:
         return 'not found'
     except PermissionError:
         return 'not executable'
-    except OSError:
+    except (OSError, ValueError):
         return 'could not run'
     try:
         rc = proc.wait(timeout=timeout)
