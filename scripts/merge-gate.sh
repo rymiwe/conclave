@@ -7,9 +7,15 @@
 # review asks `seat-usage --route review --cached --json --builder-vendor V`
 # for the reviewer and its launch argv (saved as gate-route.json). Before
 # that, it reads the PR commits and checks V against Co-authored-by trailers.
-# One named vendor must match V (grok counts as xai). Several named vendors,
-# or a commits read that fails, refuse (exit 3, one line) before seat-usage
-# runs. No model trailer, or one outside the known families, keeps V and prints one note. When the route asks,
+# One named vendor must match V (grok counts as xai; Claude and an
+# @anthropic.com mailbox count as anthropic). Several named vendors, a known
+# vendor beside a co-author outside the known families, or a commits read that
+# fails, refuse (exit 3, one line) before seat-usage runs. No model trailer,
+# or only co-authors outside the known families, keeps V and prints one note.
+# gate-route.json then records vendor_source (trailer when a trailer matched
+# V, caller when V is the caller's value), and the review summary line says
+# the same. The PR author controls the trailers, so a match is a consistency
+# check on V and not proof of who built the PR. When the route asks,
 # fails, names none, returns no argv list (a seat-usage older than that
 # contract), or records a builder vendor and reviewer vendor that are missing
 # or the same, it refuses (exit 3, one line) before any reviewer runs.
@@ -52,7 +58,7 @@ newest() { # $1 = regex with one capture group for the version; reads IDs on std
 review() {
   [ "$#" -eq 6 ] || usage
   local repo=$1 base=$2 head=$3 pr=$4 out=$5 vendor=$6 picked model why name bin
-  local commits derived status listed
+  local commits derived status listed source=caller
   mkdir -p "$out" || exit 1
   # A refusal must not leave an earlier verdict for merge to read.
   rm -f "$out/gate.md" "$out/gate-verdict.json" "$out/gate-head.txt" "$out/gate-route.json"
@@ -67,12 +73,12 @@ review() {
   listed=${listed%%$'\n'*}
   case "$status" in
     ambiguous)
-      refuse "the PR commit trailers name several vendors ($listed), so no single builder vendor can be verified" ;;
+      refuse "the PR commit trailers name several vendors or an unrecognised co-author ($listed), so no single builder vendor can be verified" ;;
     unknown)
       echo "merge-gate: note: co-author $listed names no known model family; builder vendor $vendor is the caller's" ;;
     "")
       echo "merge-gate: note: no model trailer on the PR commits; builder vendor $vendor is the caller's" ;;
-    "$vendor") ;;
+    "$vendor") source=trailer ;;
     *)
       refuse "builder vendor $vendor does not match the PR commit trailers ($status)" ;;
   esac
@@ -80,6 +86,14 @@ review() {
       > "$out/gate-route.json" 2> "$out/gate-route.err"; then
     why=$(grep -v '^\[seat-usage\]' "$out/gate-route.err" | head -n 1)
     refuse "seat-usage --route review failed: ${why:-no output}"
+  fi
+  # Record where the builder vendor came from, beside the vendors seat-usage recorded.
+  # A route that is not JSON is left as is for pick to refuse.
+  if jq --arg s "$source" 'if type == "array" then map(if type == "object" then . + {vendor_source: $s} else . end) elif type == "object" then . + {vendor_source: $s} else . end' \
+      "$out/gate-route.json" > "$out/gate-route.tmp" 2>/dev/null; then
+    mv "$out/gate-route.tmp" "$out/gate-route.json" || refuse "could not record vendor_source in gate-route.json"
+  else
+    rm -f "$out/gate-route.tmp"
   fi
   picked=$(python3 "$ROOT/scripts/merge_gate.py" pick "$out/gate-route.json") || refuse "$picked"
   local -a runner
@@ -115,7 +129,7 @@ review() {
     fi
     [ -n "$model" ] || refuse "cursor-agent models lists no $alias id"
   fi
-  echo "merge-gate: reviewer $model on $name (seat-usage --route review, builder vendor $vendor)"
+  echo "merge-gate: reviewer $model on $name (seat-usage --route review, builder vendor $vendor, vendor_source=$source)"
   GATE_TMP=$(mktemp -d) || exit 1
   trap 'rm -rf "$GATE_TMP"' EXIT
   local P=$GATE_TMP W=$GATE_TMP/ws

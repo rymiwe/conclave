@@ -1385,8 +1385,8 @@ review_pr_load_facts() {
   # Sets REVIEW_PR_FACT_VENDOR (a vendor, "ambiguous", or empty) and
   # REVIEW_PR_FACT_HUMAN (yes or no). Returns 1 when there is no PR or gh fails.
   # A Co-authored-by trailer names a model when its display name contains a
-  # known family. The mailbox does not. Co-authored-by: Cursor
-  # <cursoragent@cursor.com> has no family in the display name, so it does not.
+  # known family (Claude counts) or its mailbox is at anthropic.com.
+  # Co-authored-by: Cursor <cursoragent@cursor.com> names no model.
   # scripts/trailer_vendor.py owns that table.
   # gh pr view --json author has is_bot. This gh omits type; a present type
   # must be User. is_bot false with type absent or User is a human author.

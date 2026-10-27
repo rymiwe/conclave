@@ -139,7 +139,9 @@ has "pass: agy runs the router's model" "$agy_log" "--model gemini-4-argon-high 
 has "pass: agy runs sandboxed" "$agy_log" "--sandbox"
 has "pass: review names the reviewer and runner" "$review_out" "merge-gate: reviewer gemini-4-argon-high on agy"
 hasnt "pass: log does not say --runner agy" "$review_out" "--runner agy"
-has "pass: route output kept" "$(cat "$T/pass/out/gate-route.json")" '"runner": ["agy","--model","gemini-4-argon-high"]'
+# seat-usage's answer is kept apart from the one field review adds.
+[ "$(jq -cS 'map(del(.vendor_source))' "$T/pass/out/gate-route.json")" = "$(jq -cS . <<<"$ROUTE_ARGON")" ] \
+  && ok "pass: route output kept" || bad "pass: route output changed beyond vendor_source"
 has "pass: route records the builder vendor" "$(cat "$T/pass/out/gate-route.json")" '"builder_vendor": "xai"'
 has "pass: no trailer notes the caller" "$review_out" "merge-gate: note: no model trailer on the PR commits; builder vendor xai is the caller's"
 hasnt "pass: merge prints no vendor reason" "$merge_out" "recorded reviewer vendor"
@@ -394,7 +396,7 @@ hasnt "match: no note" "$review_out" "merge-gate: note:"
 hasnt "match: merge prints no vendor reason" "$merge_out" "recorded reviewer vendor"
 
 FAKE_COMMITS="$SEVERAL_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" run several "$ANSWER"
-refused "several" "merge-gate: refused: the PR commit trailers name several vendors (anthropic, xai), so no single builder vendor can be verified"
+refused "several" "merge-gate: refused: the PR commit trailers name several vendors or an unrecognised co-author (anthropic, xai), so no single builder vendor can be verified"
 [ -z "$su_log" ] && ok "several: seat-usage not called" || bad "several: seat-usage ran: $su_log"
 hasnt "several: no note" "$review_out" "merge-gate: note:"
 
@@ -416,13 +418,47 @@ hasnt "grok alias: seat-usage did not get grok" "$su_log" "--builder-vendor grok
 hasnt "grok alias: no note" "$review_out" "merge-gate: note:"
 has "grok alias: gh pr merge" "$gh_log" "pr merge"
 
-CLAUDE_COMMITS='{"commits":[{"messageHeadline":"c","messageBody":"Co-authored-by: Claude <noreply@anthropic.com>\n"}]}'
-FAKE_COMMITS="$CLAUDE_COMMITS" BUILDER=anthropic \
+UNKNOWN_COMMITS='{"commits":[{"messageHeadline":"c","messageBody":"Co-authored-by: Jane Doe <jane@example.com>\n"}]}'
+FAKE_COMMITS="$UNKNOWN_COMMITS" BUILDER=anthropic \
   FAKE_ROUTE="$(BUILDER=anthropic route argon google gemini-4-argon-high '["agy","--model","gemini-4-argon-high"]')" \
   run unknowntrailer "$ANSWER"
 [ "$review_rc" = 0 ] && ok "unknown trailer: review rc 0" || bad "unknown trailer: review rc $review_rc"
-has "unknown trailer: note names the co-author" "$review_out" "merge-gate: note: co-author claude names no known model family; builder vendor anthropic is the caller's"
+has "unknown trailer: note names the co-author" "$review_out" "merge-gate: note: co-author jane doe names no known model family; builder vendor anthropic is the caller's"
 hasnt "unknown trailer: not the no-trailer note" "$review_out" "no model trailer"
+has "unknown trailer: summary says vendor_source=caller" "$review_out" "vendor_source=caller"
+has "unknown trailer: route records vendor_source caller" "$(cat "$T/unknowntrailer/out/gate-route.json")" '"vendor_source": "caller"'
+
+# Amend 2: Claude and the anthropic.com domain are the anthropic vendor.
+CLAUDE_COMMITS='{"commits":[{"messageHeadline":"c","messageBody":"Co-authored-by: Claude <noreply@anthropic.com>\n"}]}'
+FAKE_COMMITS="$CLAUDE_COMMITS" BUILDER=anthropic \
+  FAKE_ROUTE="$(BUILDER=anthropic route argon google gemini-4-argon-high '["agy","--model","gemini-4-argon-high"]')" \
+  run claudetrailer "$ANSWER"
+[ "$review_rc" = 0 ] && ok "claude trailer: review rc 0" || bad "claude trailer: review rc $review_rc"
+hasnt "claude trailer: no note" "$review_out" "merge-gate: note:"
+has "claude trailer: summary says vendor_source=trailer" "$review_out" "vendor_source=trailer"
+has "claude trailer: route records vendor_source trailer" "$(cat "$T/claudetrailer/out/gate-route.json")" '"vendor_source": "trailer"'
+FAKE_COMMITS="$CLAUDE_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" run claudemismatch "$ANSWER"
+refused "claude mismatch" "merge-gate: refused: builder vendor xai does not match the PR commit trailers (anthropic)"
+[ -z "$su_log" ] && ok "claude mismatch: seat-usage not called" || bad "claude mismatch: seat-usage ran: $su_log"
+
+# Amend 3: a co-author outside the known families beside a known family is ambiguous.
+MIXED_COMMITS='{"commits":[{"messageHeadline":"a","messageBody":"Co-authored-by: Opus 4 <a@b>\n"},{"messageHeadline":"b","messageBody":"Co-authored-by: Jane Doe <jane@example.com>\n"}]}'
+FAKE_COMMITS="$MIXED_COMMITS" BUILDER=anthropic \
+  FAKE_ROUTE="$(BUILDER=anthropic route argon google gemini-4-argon-high '["agy","--model","gemini-4-argon-high"]')" \
+  run mixed "$ANSWER"
+refused "mixed" "merge-gate: refused: the PR commit trailers name several vendors or an unrecognised co-author (anthropic, unrecognised co-author jane doe), so no single builder vendor can be verified"
+[ -z "$su_log" ] && ok "mixed: seat-usage not called" || bad "mixed: seat-usage ran: $su_log"
+[ -z "$run_log" ] && ok "mixed: no reviewer" || bad "mixed: reviewer launched"
+
+# Amend 4: no trailer passes the caller's value through and records where it came from.
+has "no trailer: summary says vendor_source=caller" "$(cat "$T/notrailer/review.out")" "vendor_source=caller"
+has "no trailer: route records vendor_source caller" "$(cat "$T/notrailer/out/gate-route.json")" '"vendor_source": "caller"'
+has "match: summary says vendor_source=trailer" "$(cat "$T/match/review.out")" "vendor_source=trailer"
+has "match: route records vendor_source trailer" "$(cat "$T/match/out/gate-route.json")" '"vendor_source": "trailer"'
+
+# Amend 1: the trailers are the PR author's to write, and the docs say so.
+has "README documents the trailer risk" "$(cat "$ROOT/README.md")" "The PR author controls the trailers"
+has "merge-gate.sh documents the trailer risk" "$(cat "$ROOT/scripts/merge-gate.sh")" "The PR author controls the trailers"
 
 FAKE_COMMITS_FAIL=1 FAKE_ROUTE="$ROUTE_ARGON" run commitsfail "$ANSWER"
 refused "commits read failed" "merge-gate: refused: could not read the PR commits for $PR: HTTP 401"
@@ -514,7 +550,18 @@ check("opus 4", vendor_from_commits(doc("Co-authored-by: Opus 4 <a@b>\n")), "ant
 check("opus4 is not a family", vendor_from_commits(doc("Co-authored-by: opus4 <a@b>\n")), "")
 check("myopus is not a family", vendor_from_commits(doc("Co-authored-by: myopus <a@b>\n")), "")
 check("case", vendor_from_commits(doc("Co-Authored-By: FABLE <a@b>\n")), "anthropic")
-check("unknown claude", __import__("trailer_vendor").unmatched_names(doc("Co-authored-by: Claude <a@b>\n")), ["claude"])
+check("unknown jane", __import__("trailer_vendor").unmatched_names(doc("Co-authored-by: Jane Doe <a@b>\n")), ["jane doe"])
+check("claude", vendor_from_commits(doc("Co-authored-by: Claude <noreply@anthropic.com>\n")), "anthropic")
+check("claude code", vendor_from_commits(doc("Co-authored-by: Claude Code <a@b>\n")), "anthropic")
+check("anthropic.com domain", vendor_from_commits(doc("Co-authored-by: Jane Doe <jane@anthropic.com>\n")), "anthropic")
+check("lookalike domain", vendor_from_commits(doc("Co-authored-by: Jane Doe <jane@notanthropic.com>\n")), "")
+check("domain suffix trick", vendor_from_commits(doc("Co-authored-by: Jane Doe <jane@anthropic.com.evil.test>\n")), "")
+check("claudette is not a family", vendor_from_commits(doc("Co-authored-by: Claudette <a@b>\n")), "")
+check("known plus unknown is ambiguous", vendor_from_commits(doc(
+    "Co-authored-by: Opus 4 <a@b>\n", "Co-authored-by: Jane Doe <j@example.com>\n")), "ambiguous")
+check("known plus cursor is not ambiguous", vendor_from_commits(doc(
+    "Co-authored-by: Opus 4 <a@b>\n", "Co-authored-by: Cursor Agent <cursoragent@cursor.com>\n")), "anthropic")
+check("unknown alone is not a vendor", vendor_from_commits(doc("Co-authored-by: Jane Doe <j@example.com>\n")), "")
 check("unknown skips cursor", __import__("trailer_vendor").unmatched_names(doc("Co-authored-by: Cursor <a@b>\n")), [])
 check("normalize grok", normalize_vendor("Grok"), "xai")
 check("normalize xai", normalize_vendor("XAI"), "xai")

@@ -3,10 +3,15 @@
 
 vendor_from_commits takes the document from `gh pr view --json commits`
 (author may be present and is ignored) and returns one vendor, "ambiguous",
-or "". The from-commits command prints "unknown" and the names when a trailer
-names someone but no known family (Claude Code's default "Claude", say). A
-display name of Cursor or Cursor Agent names no model. grok and xai are the
-same vendor.
+or "". A trailer names a model through its display name (a known family, or
+Claude) or through an @anthropic.com mailbox. A display name of Cursor or
+Cursor Agent names no model. Several vendors, or a known vendor beside a
+co-author who names no known family, are "ambiguous". The from-commits
+command prints "unknown" and the names when the only trailers name someone
+but no known family. grok and xai are the same vendor.
+
+The PR author controls the trailers. They are a consistency check on the
+builder vendor the caller passes, not proof of who wrote the code.
 """
 from __future__ import annotations
 
@@ -19,6 +24,7 @@ import sys
 FAMILIES = (
     ("wonder-full", "meta"),
     ("fable", "anthropic"),
+    ("claude", "anthropic"),
     ("opus", "anthropic"),
     ("astra", "openai"),
     ("grok", "xai"),
@@ -26,6 +32,10 @@ FAMILIES = (
     ("argon", "google"),
     ("wonder", "meta"),
 )
+
+# A mailbox at exactly this domain names the vendor. A lookalike such as
+# notanthropic.com or anthropic.com.evil.test does not.
+DOMAINS = (("anthropic.com", "anthropic"),)
 
 TRAILER = re.compile(r"(?im)^[ \t]*co-authored-by:[ \t]*(.+)$")
 CURSOR_NAMES = ("cursor", "cursor agent")
@@ -41,49 +51,56 @@ def normalize_vendor(value: object) -> str:
     return text
 
 
-def trailers(doc: dict):
-    """Yield the lowercase display name of each Co-authored-by trailer."""
+def _entries(doc: dict):
+    """Yield (lowercase display name, lowercase mailbox) per Co-authored-by trailer."""
     for commit in doc.get("commits") or []:
         if not isinstance(commit, dict):
             continue
         text = (commit.get("messageHeadline") or "") + "\n" + (commit.get("messageBody") or "")
         for match in TRAILER.finditer(text):
-            yield match.group(1).strip().split("<", 1)[0].strip().lower()
+            line = match.group(1).strip().lower()
+            name, _, rest = line.partition("<")
+            yield name.strip(), rest.split(">", 1)[0].strip()
+
+
+def _vendors_of(name: str, mailbox: str) -> set[str]:
+    """Vendors one trailer names, empty when it names none."""
+    out = {vendor for fam, vendor in FAMILIES
+           if re.search(r"(?<![a-z0-9])" + re.escape(fam) + r"(?![a-z0-9])", name)}
+    for domain, vendor in DOMAINS:
+        if mailbox.endswith("@" + domain):
+            out.add(vendor)
+    return out
 
 
 def unmatched_names(doc: dict) -> list[str]:
-    """Co-author display names that are not Cursor and name no known family."""
+    """Co-author display names that are not Cursor and name no known vendor."""
     out: set[str] = set()
-    for name in trailers(doc):
+    for name, mailbox in _entries(doc):
         if name in CURSOR_NAMES or not name:
             continue
-        if not any(re.search(r"(?<![a-z0-9])" + re.escape(fam) + r"(?![a-z0-9])", name)
-                   for fam, _ in FAMILIES):
+        if not _vendors_of(name, mailbox):
             out.add(name)
     return sorted(out)
 
 
 def vendors_named(doc: dict) -> set[str]:
     vendors: set[str] = set()
-    for commit in doc.get("commits") or []:
-        if not isinstance(commit, dict):
+    for name, mailbox in _entries(doc):
+        if name in CURSOR_NAMES:
             continue
-        text = (commit.get("messageHeadline") or "") + "\n" + (commit.get("messageBody") or "")
-        for match in TRAILER.finditer(text):
-            line = match.group(1).strip()
-            name = line.split("<", 1)[0].strip().lower()
-            if name in CURSOR_NAMES:
-                continue
-            for fam, vendor in FAMILIES:
-                if re.search(r"(?<![a-z0-9])" + re.escape(fam) + r"(?![a-z0-9])", name):
-                    vendors.add(vendor)
+        vendors |= _vendors_of(name, mailbox)
     return vendors
 
 
 def vendor_from_commits(doc: dict) -> str:
-    """One vendor, "ambiguous" when several are named, or "" when none are."""
+    """One vendor, "ambiguous", or "" when none is named.
+
+    A known vendor beside a co-author who names no known family is ambiguous:
+    the trailers do not say who built the PR.
+    """
     vendors = vendors_named(doc)
-    if len(vendors) == 1:
+    if len(vendors) == 1 and not unmatched_names(doc):
         return next(iter(vendors))
     if vendors:
         return "ambiguous"
@@ -96,8 +113,8 @@ def _emit(doc: dict) -> str:
         names = unmatched_names(doc)
         # A trailer that names someone, but no family the council knows.
         return "unknown\n" + ", ".join(names) + "\n" if names else ""
-    listed = ", ".join(sorted(vendors_named(doc)))
-    return status + "\n" + listed + "\n"
+    listed = sorted(vendors_named(doc)) + ["unrecognised co-author " + n for n in unmatched_names(doc)]
+    return status + "\n" + ", ".join(listed) + "\n"
 
 
 def main(argv: list[str]) -> int:
