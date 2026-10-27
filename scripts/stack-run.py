@@ -1103,6 +1103,8 @@ class Runner:
 
         PRs first, then the stack walk, then the whole-stack refs, seats and
         the repo's declared checks. Every check runs so the list is complete.
+        A stack the walk rejects is a blocking item; the checks that need the
+        stack's PRs are skipped.
         """
         numbers = [self.args.pr]
         if self.args.prs:
@@ -1115,8 +1117,15 @@ class Runner:
             items += preflight.check_pr(self.repo, number)
         prs: list[dict] = []
         if not any(i['severity'] == 'blocking' for i in items):
-            prs = self.stack()
-            if not self.args.no_whole_stack:
+            try:
+                prs = self.stack()
+            except RuntimeError as exc:
+                # A branched stack, a bad --prs list or order, or a stack id clash. It goes on
+                # the list like any other blocker, so needs-human.md is rewritten and exit is 3.
+                items.append(preflight.item(
+                    'blocking', f'the stack walk rejected the stack: {str(exc).rstrip(".")}',
+                    'pass --prs as distinct PR numbers bottom up, each PR based on the one below, then rerun'))
+            if prs and not self.args.no_whole_stack:
                 # The same refs whole_stack_wave passes: origin/<bottom base> and the top head oid.
                 try:
                     base, head = self.stack_refs(prs)

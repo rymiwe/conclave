@@ -516,8 +516,12 @@ def test_linear_stack(tmp: Path, mod) -> None:
         f = Fixture(tmp, 'branched-' + str(len(list(tmp.iterdir()))))
         f.env['BRANCHED'] = '1'
         got = f.invoke('--pr','1',*flags)
-        check(got.returncode == 1 and '#3' in got.stderr and '#2' in got.stderr
-              and 'linear --prs' in got.stderr and not f.calls(), f'item 2 rejects siblings {flags}')
+        # A real launch reports the rejection through preflight (exit 3, stdout list);
+        # a dry run and --reconcile-only skip preflight and keep the old error (exit 1, stderr).
+        launch = '--dry-run' not in flags and '--reconcile-only' not in flags
+        out = got.stdout if launch else got.stderr
+        check(got.returncode == (3 if launch else 1) and '#3' in out and '#2' in out
+              and 'linear --prs' in out and not f.calls(), f'item 2 rejects siblings {flags}')
     f = Fixture(tmp, 'linear-explicit')
     check(f.invoke('--prs','1,2,3','--dry-run').returncode == 0, 'item 2 accepts linear explicit order')
 
@@ -575,7 +579,7 @@ def test_posted_resume(tmp: Path, mod) -> None:
     check(f.invoke(*PER_PR).returncode == 0 and len(f.record()['prs'][0]['POSTED?']) == 1,
           'item 8 repeated hit union keeps order without duplicates')
     previous = f.record()
-    check(f.invoke('--prs','1,3',*PER_PR).returncode == 1 and
+    check(f.invoke('--prs','1,3',*PER_PR).returncode == 3 and
           f.record()['prs'] == previous['prs'] and f.record()['POSTED?'] == previous['POSTED?'],
           'item 8 invalid stack on resume preserves earlier POSTED history')
 
@@ -1824,6 +1828,27 @@ def test_preflight_stack(tmp: Path, mod) -> None:
     text = needs(f).read_text() if needs(f).is_file() else ''
     check(got.returncode == 3 and not f.calls() and 'ref origin/main does not resolve' in text,
           f'preflight stack-run: an unresolvable whole-stack base exits 3 before any chair ({got.returncode} {text!r})')
+
+    # (1) A stack walk that rejects the stack is a blocking item: needs-human.md is
+    # rewritten (a stale list does not survive), exit 3, preflight_failed fires.
+    for label, env, args, want in (
+            ('branched stack', {'BRANCHED': '1'}, ('--pr', '1'), 'stack breaks at #3'),
+            ('bad --prs order', {}, ('--prs', '2,1,3'), 'stack breaks at #1')):
+        f = Fixture(tmp, 'preflight-walk-' + label.replace(' ', '-').replace('--', ''))
+        f.env.update(env)
+        log = arm_hook(f)
+        needs(f).parent.mkdir(parents=True, exist_ok=True)
+        needs(f).write_text('# Needs from human\n\n## Blocking\n\n1. STALE item from an earlier run. Do: nothing\n')
+        got = f.invoke(*args)
+        text = needs(f).read_text() if needs(f).is_file() else ''
+        events = hook_calls(log)
+        check(got.returncode == 3 and not any(c[0] in ('council', 'cursor') for c in f.calls()),
+              f'preflight stack-run: a {label} exits 3 before any chair or ballot ({got.returncode} {got.stderr.strip()})')
+        check(want in text and 'linear --prs' in text and 'STALE' not in text and text in got.stdout,
+              f'preflight stack-run: a {label} rewrites needs-human.md with the rejection ({text!r})')
+        check([e['event'] for e in events] == ['preflight_failed']
+              and json.loads(events[0]['payload']).get('blocking', 0) >= 1,
+              f'preflight stack-run: a {label} fires preflight_failed once ({events})')
 
     # CONCLAVE_PREFLIGHT=0 skips it: the old stack-walk failure, no list.
     f = Fixture(tmp, 'preflight-off')
