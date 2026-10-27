@@ -79,7 +79,7 @@ review() {
     if [ "$alias" = fable ]; then
       model=$(newest '^claude-fable-([0-9-]+)-thinking-xhigh$' <<<"$ids")
     else
-      model=$(newest '^grok-([0-9.]+)-xhigh$' <<<"$ids")
+      model=$(newest '^grok-([0-9.]+)-xhigh-fast$' <<<"$ids")
     fi
     [ -n "$model" ] || refuse "cursor-agent models lists no $alias id"
   fi

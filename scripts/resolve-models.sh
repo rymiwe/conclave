@@ -118,13 +118,14 @@ fi
 muse_model="$(python3 "$(dirname "${BASH_SOURCE[0]}")/muse-models.py" "${muse_args[@]}" 2>/dev/null || true)"
 emit MUSE_WONDER_MODEL "$muse_model"
 # Cursor: frontier fallbacks only. No OpenAI.
-# CURSOR_GROK is xhigh: the stuck-builder value.
+# CURSOR_GROK is xhigh, Fast variant: the Grok voter and the stuck-builder
+# value (Ryan, 2026-10-26: Cursor Grok runs on its Fast variant).
 # CURSOR_BUILDER is high, Fast variant: the builder role (Ryan, 2026-10-02:
 # the builder is the limiting factor and Cursor Models has headroom). Voters
-# and the stuck-builder stay on the standard variants. The chair is Fast
-# too (2026-10-02), picked by the Bot's launch command, not here.
+# and the stuck-builder are Fast too. The chair is Fast (2026-10-02),
+# picked by the Bot's launch command, not here.
 emit CURSOR_FABLE "$(newest '^claude-fable-([0-9-]+)-thinking-xhigh$' <<<"$cursor_ids")"
-emit CURSOR_GROK "$(newest '^grok-([0-9.]+)-xhigh$' <<<"$cursor_ids")"
+emit CURSOR_GROK "$(newest '^grok-([0-9.]+)-xhigh-fast$' <<<"$cursor_ids")"
 emit CURSOR_BUILDER "$(newest '^grok-([0-9.]+)-high-fast$' <<<"$cursor_ids")"
 
 if [ -z "$codex_bin" ] || [ -z "$codex_model" ]; then

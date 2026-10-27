@@ -192,11 +192,11 @@ has "codex: model from -m" "$run_log" "codex exec -m gpt-6-astra "
 hasnt "codex: not codex review" "$run_log" "codex review"
 has "codex: prompt on stdin carries the diff" "$(cat "$FAKE_STDIN")" '+b'
 has "codex: prompt has the one_way line" "$(cat "$FAKE_STDIN")" 'exactly `one_way: yes` or `one_way: no`'
-FAKE_ROUTE="$(route grok xai grok-4.7-xhigh '["cursor-agent","--model","grok-4.7-xhigh"]')" run cursor "$ANSWER"
+FAKE_ROUTE="$(route grok xai grok-4.7-xhigh-fast '["cursor-agent","--model","grok-4.7-xhigh-fast"]')" run cursor "$ANSWER"
 passes cursor cursor-agent
 has "cursor: sandbox enabled" "$run_log" "--sandbox enabled"
 hasnt "cursor: no --force" "$run_log" "--force"
-has "cursor: slug used as given" "$run_log" "--model grok-4.7-xhigh "
+has "cursor: slug used as given" "$run_log" "--model grok-4.7-xhigh-fast "
 hasnt "cursor: no model listing for a slug" "$run_log" "cursor-agent models"
 hasnt "cursor: workspace is not the repo" "$run_log" "--workspace $R"
 has "cursor: prompt argument carries the diff" "$(cat "$FAKE_PROMPT_ARG")" '+b'
@@ -205,6 +205,11 @@ FAKE_ROUTE="$(route fable anthropic fable '["cursor-agent","--model","fable"]')"
   run cursorfable "$ANSWER"
 passes cursorfable cursor-agent
 has "cursor fable: resolved to the newest id" "$run_log" "--model claude-fable-9-thinking-xhigh "
+FAKE_ROUTE="$(route grok xai grok '["cursor-agent","--model","grok"]')" \
+  FAKE_CURSOR_MODELS=$'grok-4.7-xhigh\ngrok-4.7-xhigh-fast\ngrok-4.6-xhigh-fast\ngrok-4.7-high-fast' \
+  run cursorgrok "$ANSWER"
+passes cursorgrok cursor-agent
+has "cursor grok: resolved to the newest xhigh Fast id" "$run_log" "--model grok-4.7-xhigh-fast "
 FAKE_ROUTE="$(route fable anthropic fable-5 '["claude","--model","fable-5"]')" run claude "$ANSWER"
 passes claude claude
 has "claude: dontAsk" "$run_log" "--permission-mode dontAsk"

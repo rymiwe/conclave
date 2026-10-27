@@ -716,7 +716,7 @@ EOF
 cat >"$work/gate/bin/cursor-agent" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = models ]; then
-  printf '%s\n' claude-fable-9-9-thinking-xhigh grok-9.9-xhigh grok-9.9-high-fast
+  printf '%s\n' claude-fable-9-9-thinking-xhigh grok-9.9-xhigh grok-9.9-xhigh-fast grok-9.9-high-fast
   exit 0
 fi
 touch "$CURSOR_RAN"
