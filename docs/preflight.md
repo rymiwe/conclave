@@ -6,7 +6,7 @@ Code: `scripts/preflight.py` and `scripts/stage_hook.py`. Tests: `scripts/test-p
 
 ## Where preflight runs
 
-- **`scripts/conclave.sh`, kind review.** In the real launch, after the target is resolved and before the ballot's earlier voter files are cleared. `--dry-run` runs preflight in plan mode, which lists the declared commands and runs none (see "Dry run" below). Design, mixed, audit, and ask mode run none. `--findings`, `--judge`, and `--verdicts` launch no voters and run none.
+- **`scripts/conclave.sh`, kind review.** In the real launch, after the target is resolved and before the ballot's earlier voter files are cleared. `--dry-run` runs preflight in plan mode, which lists the declared checks and runs none: no declared command runs and no declared URL is fetched (see "Dry run" below). Design, mixed, audit, and ask mode run none. `--findings`, `--judge`, and `--verdicts` launch no voters and run none.
 - **`scripts/stack-run.py`.** Once, before any chair or ballot starts. `--dry-run` and `--reconcile-only` run none; stack-run's dry run only prints the wave plan.
 
 ## Checks
@@ -66,15 +66,16 @@ Preflight cannot tell a work repo from a personal one reliably and cheaply. It r
 
 ## Dry run
 
-`conclave.sh --dry-run` on a review runs preflight in plan mode (`scripts/preflight.py --plan`) after it prints the lineup. Plan mode runs none of the commands in `.conclave/preflight.json`. It reads and validates the declaration as a real launch does, so a bad declaration (bad JSON, a shell, an inline-code flag, a NUL byte) is still one blocking item. Then it lists each declared command with its name, its argv, and the ref it was read from, marked `not run (dry run)`:
+`conclave.sh --dry-run` on a review runs preflight in plan mode (`scripts/preflight.py --plan`) after it prints the lineup. Plan mode runs none of the checks in `.conclave/preflight.json`: no declared command runs and no declared `url` is fetched. It reads and validates the declaration as a real launch does, so a bad declaration (bad JSON, a shell, an inline-code flag, a NUL byte, a bad URL) is still one blocking item. Then it lists each declared check with its name, its argv or its URL (scheme, host, port, and path only), and the ref it was read from, marked `not run (dry run)`:
 
 ```text
 # Declared checks not run (dry run)
 
 1. deps installed: ["bundle", "check"] from origin/main. not run (dry run)
+2. private registry: https://registry.example.com/healthz from origin/main. not run (dry run)
 ```
 
-A declared command cannot block a dry run, because it does not run. The other checks run as in a real launch: the target, the refs, the seats, and any declared `url` GET. Their list goes under `tmp/council/<id>/preview/needs-human.md`, any real `needs-human.md` is left alone, and no stage event fires. When one of them would stop a real launch, the dry run prints the list, says `a real launch would stop here with exit 3`, and exits 3. Read the lineup above that line as the plan only when the dry run exits 0. `CONCLAVE_PREFLIGHT=0` skips the plan check too.
+A declared check cannot block a dry run, because it does not run. The other checks run as in a real launch: the target, the refs, and the seats. Their list goes under `tmp/council/<id>/preview/needs-human.md`, any real `needs-human.md` is left alone, and no stage event fires. When one of them would stop a real launch, the dry run prints the list, says `a real launch would stop here with exit 3`, and exits 3. Read the lineup above that line as the plan only when the dry run exits 0. `CONCLAVE_PREFLIGHT=0` skips the plan check too.
 
 ## What is never printed
 

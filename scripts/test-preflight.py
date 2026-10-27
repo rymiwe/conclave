@@ -932,6 +932,82 @@ def test_missing_gh(tmp: Path) -> None:
           f'repo dir: a truly missing gh keeps its own message ({found!r})')
 
 
+class Hits(http.server.BaseHTTPRequestHandler):
+    """Counts every request it gets. A dry run must send none."""
+    hits: list[str] = []
+
+    def do_GET(self) -> None:  # noqa: N802
+        Hits.hits.append(self.path)
+        self.send_response(200)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+    def log_message(self, *_args) -> None:
+        pass
+
+
+def hit_server() -> http.server.ThreadingHTTPServer:
+    Hits.hits = []
+    server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Hits)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def url_declaring_repo(tmp: Path, name: str, url: str) -> tuple[Path, dict]:
+    bin_dir = tmp / f'{name}-bin'
+    write_exe(bin_dir / 'gh', GH)
+    env = base_env(bin_dir, CONCLAVE_WAVE_PRECHECK='0', DEFAULT_BRANCH='main')
+    repo = make_repo(tmp / name)
+    declare(repo, [{'name': 'registry up', 'url': url, 'needs': 'n'}])
+    git(repo, 'update-ref', 'refs/remotes/origin/main', 'main')
+    return repo, env
+
+
+def test_plan_url_cli(tmp: Path) -> None:
+    """preflight.py --plan fetches no declared url. It lists it with its name and ref instead."""
+    server = hit_server()
+    url = f'http://127.0.0.1:{server.server_address[1]}/probe'
+    try:
+        repo, env = url_declaring_repo(tmp, 'plan-url-cli', url + '?tok=x')
+        got = preflight_cli(env, repo, tmp / 'plan-url-cli-out', '--pr', '12', '--plan')
+        detail = f'{got.returncode} hits={Hits.hits} stdout={got.stdout!r} stderr={got.stderr[-300:]!r}'
+        check(Hits.hits == [], f'plan url: preflight.py --plan fetches no declared url ({detail})')
+        check(got.returncode == 0 and f'1. registry up: {url} from origin/main. not run (dry run)' in got.stdout
+              and 'tok=' not in got.stdout,
+              f'plan url: the url is listed with its name and ref, without its query ({detail})')
+    finally:
+        server.shutdown()
+
+
+def test_plan_url_dry_run(tmp: Path) -> None:
+    """conclave.sh --dry-run fetches no declared url and lists it."""
+    server = hit_server()
+    url = f'http://127.0.0.1:{server.server_address[1]}/probe'
+    c = Conclave(tmp, 'plan-url')
+    try:
+        declare(c.repo, [{'name': 'registry up', 'url': url, 'needs': 'n'}])
+        got = c.run('--dry-run', '--repo', str(c.repo), '--base', 'main', '--head', 'main')
+        detail = f'{got.returncode} hits={Hits.hits} stdout={got.stdout[-500:]!r} stderr={got.stderr[-300:]!r}'
+        check(Hits.hits == [], f'plan url: conclave.sh --dry-run fetches no declared url ({detail})')
+        check(got.returncode == 0 and f'1. registry up: {url} from main. not run (dry run)' in got.stdout,
+              f'plan url: conclave.sh --dry-run lists the url ({detail})')
+    finally:
+        c.close()
+        server.shutdown()
+
+
+def test_url_real_launch(tmp: Path) -> None:
+    """The control: without --plan the declared url is fetched once."""
+    server = hit_server()
+    url = f'http://127.0.0.1:{server.server_address[1]}/probe'
+    try:
+        repo, env = url_declaring_repo(tmp, 'url-real', url + '?tok=x')
+        got = preflight_cli(env, repo, tmp / 'url-real-out', '--pr', '12')
+        check(got.returncode == 0 and Hits.hits == ['/probe?tok=x'],
+              f'plan url: without --plan the declared url is fetched ({got.returncode} hits={Hits.hits} {got.stdout!r})')
+    finally:
+        server.shutdown()
+
 def main() -> None:
     (ROOT / 'tmp').mkdir(exist_ok=True)
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Status)
@@ -956,6 +1032,9 @@ def main() -> None:
             test_plan_dry_run(tmp)
             test_missing_repo_dir(tmp)
             test_missing_gh(tmp)
+            test_plan_url_cli(tmp)
+            test_plan_url_dry_run(tmp)
+            test_url_real_launch(tmp)
     finally:
         server.shutdown()
     print('ok')

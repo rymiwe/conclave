@@ -6,8 +6,8 @@ Checks the review target, the seat-usage route, and the target repo's
 optional .conclave/preflight.json. Every check runs even when one fails.
 Blocking items exit 3 (BLOCKED) before anything launches. Warnings alone do
 not block. The list goes to stdout and to needs-human.md in the run dir.
---plan (the dry run) runs no declared command: it lists each one with its
-argv and source ref instead.
+--plan (the dry run) runs no declared command and fetches no declared URL:
+it lists each one with its argv or URL and source ref instead.
 
 CONCLAVE_PREFLIGHT=0 skips every check. CONCLAVE_PREFLIGHT_DONE=1 means
 stack-run already ran the seat and repo checks, so only the target is checked.
@@ -494,7 +494,8 @@ def check_declared(repo: str | Path, ref: str = '', plan: list[str] | None = Non
 
     A repo that has the file in its working tree but no commit to read it from
     gets one warning, so the skip is not silent. plan: a dry run. Each declared
-    command is appended to it (name, argv, ref) and not run.
+    check is appended to it (name, argv or URL, ref) and not run: no command
+    runs and no URL is fetched.
     """
     sha = commit_of(repo, ref) if ref else ''
     if not sha:
@@ -507,8 +508,9 @@ def check_declared(repo: str | Path, ref: str = '', plan: list[str] | None = Non
         return [item('blocking', f'bad {DECLARATION}: {reason}', f'fix {DECLARATION} on {ref} (see docs/preflight.md)')]
     found = []
     for check in checks:
-        if check['command'] is not None and plan is not None:
-            plan.append(f"{check['name']}: {json.dumps(check['command'])} from {ref}. not run (dry run)")
+        if plan is not None:
+            what = json.dumps(check['command']) if check['command'] is not None else safe_url(check['url'])
+            plan.append(f"{check['name']}: {what} from {ref}. not run (dry run)")
             continue
         if check['command'] is not None:
             failure = run_command(check['command'], repo, check['timeout'])
@@ -538,7 +540,7 @@ def report(items: list[dict], dest: str | Path, context: dict | None = None, pla
     """Print one list, write or clear needs-human.md, fire preflight_failed. 0 or BLOCKED.
 
     plan: a dry run. The same list and exit code for the checks it ran, but no
-    stage event. planned: the declared commands it did not run, printed first.
+    stage event. planned: the declared checks it did not run, printed first.
     """
     if planned:
         lines = ['# Declared checks not run (dry run)', '']
@@ -577,7 +579,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument('--head')
     parser.add_argument('--no-seats', action='store_true', help='skip the seat check (--voters was given)')
     parser.add_argument('--plan', action='store_true',
-                        help='dry run: declared commands are listed, not run; no stage event; --dir is the preview dir')
+                        help='dry run: declared checks are listed, not run or fetched; no stage event; --dir is the preview dir')
     args = parser.parse_args(argv)
     if not enabled():
         return 0
