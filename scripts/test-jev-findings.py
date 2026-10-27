@@ -529,6 +529,43 @@ def test_def_any_receiver() -> None:
     check(got == ["refund", "refund", "refund", "refund", "refund?", "save!"], f"a constant receiver is not the name ({got})")
 
 
+B4_CASES = (
+    ("app/refund.py", "async with",
+     "async def refund(order):\n    async with session() as db:\n        amount = order.total - order.fee\n"
+     "        await db.credit(order.account, amount)\n    await notify(order)\n", 4, "refund"),
+    ("app/pages.py", "async for",
+     "async def refund(order):\n    async for row in pages():\n        await credit(row, order)\n"
+     "    await notify(order)\n", 3, "refund"),
+    ("app/refund.js", "anonymous function (",
+     "function refund(order) {\n  const rows = items.map(\n    function () {\n      return order.total - order.fee;\n"
+     "    },\n  );\n  return rows;\n}\n", 4, "refund"),
+    ("app/refund2.js", "anonymous function(",
+     "function refund(order) {\n  const rows = items.map(\n    function() {\n      return order.total - order.fee;\n"
+     "    },\n  );\n  return rows;\n}\n", 4, "refund"),
+    ("app/payments.rb", "def Payments::Refund.call",
+     "module Payments\n  class Refund\n    def Payments::Refund.call(order)\n      order.total - order.fee\n"
+     "    end\n  end\nend\n", 4, "call"),
+    ("app/top.js", "anonymous function( outside any named function",
+     "items.map(\n  function () {\n    return order.total - order.fee;\n  },\n);\n", 3, None),
+)
+
+
+def test_unsure_name_is_unknown(tmp: Path) -> None:
+    """The enclosing function is the right name or 'function: unknown', never a wrong name."""
+    fc = load("finding_context11", "finding_context.py")
+    head = small_repo(tmp, {path: text for path, _, text, _, _ in B4_CASES})
+    for path, label, _, line, right in B4_CASES:
+        text, status, kind = fc.expand(str(tmp), head, path, line, "")
+        named = re.search(r"\(enclosing `([^`]+)`", text)
+        if named:
+            ok = named.group(1) == right and kind in (fc.FUNCTION_ONLY, fc.FUNCTION_AND_CALLER)
+            got = f"enclosing {named.group(1)!r}, {kind}"
+        else:
+            ok = "function: unknown" in text and kind == fc.WINDOW
+            got = f"{'unknown' if 'function: unknown' in text else 'no label'}, {kind}"
+        check(status == "expanded" and ok, f"{label}: right name ({right!r}) or unknown, never a wrong name ({got})")
+
+
 def test_head_and_verified_at_must_agree(tmp: Path) -> None:
     judge = load("jev_judge_heads", "jev-judge.py")
     repo, head = fixture_repo(tmp)
@@ -575,6 +612,8 @@ def main() -> None:
         test_cap_keeps_mark_and_says_caller_dropped(tmp / "j")
         test_def_any_receiver()
         test_head_and_verified_at_must_agree(tmp / "k")
+        (tmp / "l").mkdir()
+        test_unsure_name_is_unknown(tmp / "l")
     print(f"{'FAILED' if FAILED else 'all passed'}: {FAILED} failed")
     sys.exit(1 if FAILED else 0)
 

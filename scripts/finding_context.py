@@ -19,7 +19,7 @@ MAX_CHARS = 6000
 MAX_FILE_BYTES = 400_000
 
 _DEF_PATTERNS = [
-    re.compile(r"^\s*(?:async\s+)?def\s+(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*[?!=]?)"),
+    re.compile(r"^\s*(?:async\s+)?def\s+(?:[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*\.)?([A-Za-z_]\w*[?!=]?)"),
     re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)"),
     re.compile(
         r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
@@ -32,6 +32,12 @@ _DEF_PATTERNS = [
         r"[\w<>\[\],.?\s]+?\s+([A-Za-z_]\w*)\s*\("
     ),
 ]
+# A line that opens one of these statements is never a definition, whatever a
+# pattern above makes of it (`async with session() as db:` is not `session`).
+_STATEMENT = re.compile(r"^\s*(?:async\s+)?(?:with|for|while|if|elif|else|return|await|switch|catch)\b")
+# A captured word that is a keyword is not a name: `function () {` is anonymous.
+_NOT_NAMES = {"function", "async", "await", "with", "for", "while", "if", "else", "return",
+              "switch", "catch", "new", "do", "try"}
 _CLOSERS = {"end", "}", "};", ")", "end)", "});", "]"}
 _TEST_PATH = re.compile(
     r"(^|/)(spec|specs|test|tests|__tests__)/|_spec\.|_test\.|\.test\.|\.spec\.|(^|/)test-[^/]*$"
@@ -67,10 +73,13 @@ def _indent(line: str) -> int:
 
 
 def _def_name(line: str) -> str | None:
+    """The name a line defines, or None when it defines nothing we can name."""
+    if _STATEMENT.match(line):
+        return None
     for pat in _DEF_PATTERNS:
         m = pat.match(line)
         if m:
-            return m.group(1)
+            return None if m.group(1) in _NOT_NAMES else m.group(1)
     return None
 
 
@@ -241,7 +250,7 @@ def expand(repo: str, head: str, path: str, line: int, quoted: str) -> tuple[str
     caller_cut_note = ""
     if found is None:
         lo, hi = max(0, at - MIN_LINES // 2), min(len(lines) - 1, at + MIN_LINES // 2)
-        title = f"{path}:{lo + 1}-{hi + 1} (no enclosing function found; lines around the cited line, at head {head[:8]})"
+        title = f"{path}:{lo + 1}-{hi + 1} (function: unknown; lines around the cited line, at head {head[:8]})"
         body = _numbered(lines, lo, hi, at)
     else:
         start, end, name = found
