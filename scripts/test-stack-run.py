@@ -120,6 +120,15 @@ else:
         import time
         pathlib.Path(os.environ['CHILD_PID']).write_text(str(os.getpid()))
         time.sleep(60)
+    if args[0].endswith(os.environ.get('OPUS_CAP_PR', 'never')) and os.environ.get('CAP_AFTER'):
+        # Slow phase 1: hold the usage-limit failure until the CAP_AFTER ballot has started chair A.
+        import time
+        run_json = pathlib.Path(os.environ['FIXTURE_ROOT'])/'tmp/council/stack/run.json'
+        for _ in range(2000):
+            rows = json.loads(run_json.read_text()).get('prs', []) if run_json.exists() else []
+            if any(r['ballot'] == os.environ['CAP_AFTER'] and r['step'] == 'chair A' for r in rows):
+                break
+            time.sleep(0.01)
     if args[0].endswith(os.environ.get('OPUS_CAP_PR', 'never')):
         (d/'voter-opus.fail').write_text('failed')
         (d/'voter-opus.err').write_text(os.environ.get('OPUS_ERR', ''))
@@ -177,6 +186,14 @@ else:
         ballot = dest.parent
     else:
         ballot = pathlib.Path(re.search(r'Ballot directory: (\\S+)\\. Follow', prompt)[1])
+    if 'Round A.' in prompt and ballot.name.endswith(os.environ.get('CHAIR_A_HOLD_PR','never')):
+        # Slow chair A: hold until the CHAIR_A_HOLD_FOR ballot is finished, so its phase 1 has already run.
+        run_json = root/'tmp/council/stack/run.json'
+        for _ in range(2000):
+            rows = json.loads(run_json.read_text()).get('prs', []) if run_json.exists() else []
+            if any(r['ballot'] == os.environ['CHAIR_A_HOLD_FOR'] and r['step'] == 'finished' for r in rows):
+                break
+            time.sleep(0.01)
     if ballot.name.endswith(os.environ.get('NO_RESULT_PR','never')):
         sys.exit(0)
     if ballot.name.endswith(os.environ.get('TIMEOUT_PR','never')):
@@ -1632,6 +1649,51 @@ def test_rolling(mod) -> None:
           f"rolling: finished rows skip the pre-check ({r.record['waves']})")
 
 
+def test_max_cap_rolling(tmp: Path, mod) -> None:
+    """Cap 2: p-1's slow phase 1 hits the usage limit after p-2 freed a slot and p-3 launched."""
+    reason = f'failed: {mod.MAX_CAPPED}'
+    f = Fixture(tmp, 'max-cap-rolling')
+    f.env.update(OPUS_CAP_PR='-1', CAP_AFTER='p-3', CHAIR_A_HOLD_PR='-3', CHAIR_A_HOLD_FOR='p-1',
+                 OPUS_JSON='{"is_error":true,"result":"Claude usage limit reached"}')
+    proc = f.invoke('--no-whole-stack', '--no-reconcile', '--wave-cap', '2')
+    rows = f.record()['prs']
+    voters = [c[1][0] for c in f.calls() if c[0] == 'council' and '--dry-run' not in c[1] and '--findings' not in c[1]]
+    check(proc.returncode == 1 and rows[1]['outcome'] == 'ok' and rows[0]['outcome'].startswith('failed: phase 1 exit'),
+          f"rolling cap: p-1 fails on the limit and p-2 finishes ({proc.returncode}, {[r['outcome'] for r in rows]}, {proc.stderr[-300:]})")
+    check(voters == ['p-1', 'p-2'] and rows[2]['outcome'] == reason,
+          f"rolling cap: p-3 launched before the cap starts no phase 1 and is marked not started ({voters}, {rows[2]['outcome']})")
+
+
+def test_rolling_cap_closes_queue(mod) -> None:
+    """The cap lands while p-3 runs, so p-4 and p-5 are never launched and close like the old batch join did."""
+    reason = f'failed: {mod.MAX_CAPPED}'
+    release, capped = threading.Event(), threading.Event()
+    started: list[str] = []
+
+    def ballot(row: dict) -> None:
+        started.append(row['ballot'])
+        if row['ballot'] == 'p-1':
+            release.wait(10)
+            with r.lock:
+                r.max_capped = True
+            capped.set()
+        if row['ballot'] == 'p-3':
+            capped.wait(10)
+        row['outcome'] = 'ok'
+
+    r = bare_runner(mod, 2, 5, ballot, lambda: ('ok', 'two voters'))
+    r.record['prs'][3]['state'] = 'done'
+    with redirect_stderr(io.StringIO()):
+        thread, result = run_in_thread(r)
+        while 'p-3' not in started and thread.is_alive():
+            time.sleep(0.01)
+        release.set()
+        thread.join(10)
+    check(result == [''] and started == ['p-1', 'p-2', 'p-3']
+          and [p['outcome'] for p in r.record['prs']] == ['ok', 'ok', 'ok', reason, reason],
+          f"rolling cap: no ballot launches after the cap and the rest are not started ({result}, {started}, {r.record['prs']})")
+
+
 def test_stale_head(tmp: Path) -> None:
     """f2: the whole-stack head is the fetched PR oid, not origin/<branch>."""
     f = Fixture(tmp, 'stale-head')
@@ -1837,6 +1899,8 @@ def main() -> None:
         test_whole_stack(tmp, mod)
         test_waves(tmp, mod)
         test_rolling(mod)
+        test_max_cap_rolling(tmp, mod)
+        test_rolling_cap_closes_queue(mod)
         test_stale_head(tmp)
         test_stack_ballot_name(tmp)
         test_detach(tmp)

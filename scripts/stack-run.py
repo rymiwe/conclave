@@ -904,13 +904,19 @@ class Runner:
                 + f'Do not use these words anywhere in the brief, {WORDS}. The script rejects a brief that contains one. '
                 + NO_SHALLOW)
 
+    def is_capped(self) -> bool:
+        with self.lock:
+            return self.max_capped
+
+    def refuse_if_capped(self) -> None:
+        if self.is_capped():
+            raise RuntimeError(MAX_CAPPED)
+
     def ballot_run(self, row: dict) -> None:
         ballot = ROOT / 'tmp/council' / row['ballot']
         session = None
         try:
-            with self.lock:
-                if self.max_capped:
-                    raise RuntimeError(MAX_CAPPED)
+            self.refuse_if_capped()
             if row['state'] == 'blocked':
                 raise RuntimeError(BLOCKED)
             if row['state'] == 'done':
@@ -932,7 +938,10 @@ class Runner:
                     raise RuntimeError('brief headers invalid or brief contains a forbidden word')
                 if row['state'] == 'new':
                     (ballot / '.stack-brief.sha256').write_text(brief_hash(ballot) + '\n', encoding='utf-8')
+                # A ballot launched before the cap is seen can reach here after another ballot's phase 1 set it.
+                self.refuse_if_capped()
                 flags, percent = self.flags()
+                self.refuse_if_capped()
                 row.update(claude_flags=flags, fable_weekly_percent=percent)
                 self.mark_step(row, 'phase 1')
                 self.save()
@@ -1288,6 +1297,8 @@ class Runner:
 
         A finished ballot frees its slot at once; the next row is pre-checked and starts.
         An overflow seen in one ballot's phase 1 is sticky for any ballot whose phase 1 reads it later.
+        Once any phase 1 caps the Claude subscription no further ballot starts: in-flight ballots
+        drain and every row not yet launched is closed as not started.
         """
         queue = deque(self.record['prs'])
         running: set = set()
@@ -1297,6 +1308,8 @@ class Runner:
                     done, running = wait(running, return_when=FIRST_COMPLETED)
                     for future in done:
                         future.result()
+                if self.is_capped():
+                    break
                 launch, message = self.wave_gate(queue[0])
                 if not launch:
                     # Running ballots finish; only rows never started are closed.
@@ -1304,9 +1317,17 @@ class Runner:
                         future.result()
                     self.not_started(list(queue), f'failed: not started; seats capped ({message})')
                     return 'failed: not started; seats capped'
-                running.add(pool.submit(self.ballot_run, queue.popleft()))
+                # The pre-check can wait for seats, and a phase 1 can cap the subscription meanwhile.
+                with self.lock:
+                    if self.max_capped:
+                        break
+                    running.add(pool.submit(self.ballot_run, queue.popleft()))
             for future in running:
                 future.result()
+        for row in queue:
+            row['outcome'] = f'failed: {MAX_CAPPED}'
+        if queue:
+            self.save()
         return ''
 
 
