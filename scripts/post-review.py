@@ -250,12 +250,22 @@ def voters_finished(ballot_dir: Path, payload: dict) -> tuple[int, str | None]:
     return 0, None
 
 
+def undrafted_label(body: str) -> str | None:
+    """Why a new comment's opening label is refused, or None. This matches check-comment-labels.py."""
+    span = comment_draft.opening_label_span(body)
+    have = body[span[0]:span[1]].strip() if span else None
+    if have is None or have in POST_LABELS:
+        return None
+    return f"opens with {have}, which is not drafted; use **Requested:**, **Advisory:**, or **Informational:**"
+
+
 def labeled_body(comment: dict) -> tuple[str, str | None, str | None]:
     """(body, label, problem) for a new inline or file-level comment.
 
     A body with no label takes the label its severity maps to. With no
     label and no mapped severity, or a label that disagrees with the
-    mapped severity, problem says why and nothing is changed.
+    mapped severity, problem says why and nothing is changed. A label
+    outside POST_LABELS was already refused by undrafted_label.
     """
     body = str(comment["body"])
     severity = comment.get("severity")
@@ -270,11 +280,6 @@ def labeled_body(comment: dict) -> tuple[str, str | None, str | None]:
                 "or add a severity"
             )
         return f"{mapped} {body.lstrip()}", mapped, None
-    if have not in POST_LABELS:
-        return body, None, (
-            f"opens with {have}, which is not drafted; use "
-            "**Requested:**, **Advisory:**, or **Informational:**"
-        )
     if mapped is not None and have != mapped:
         return body, None, f"label {have} disagrees with severity {severity!r}, which maps to {mapped}"
     return body, have, None
@@ -620,6 +625,12 @@ def main() -> int:
         key = f"{ballot}:{fid}"
         if key in findings:
             die(f"comment {i}: finding {key} appears twice")
+        # Before post_as: a comment moved into the review body has its label
+        # stripped, so checking only inline and file-level comments let it through.
+        problem = undrafted_label(str(c["body"]))
+        if problem:
+            errors.append(f"comment {i} ({key}) {c['path']}:{c['line']}: {problem}")
+            continue
         in_diff = files.get(c["path"], {}).get(c["line"])
         text = in_diff
         if text is None and c.get("expect"):

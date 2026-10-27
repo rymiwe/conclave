@@ -586,7 +586,7 @@ def test_repro_and_labels(root: Path) -> None:
     check(proc.returncode == 0, f'a later preattached script still dry-runs ({proc.returncode} {proc.stderr.strip()})')
     req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
     check(len(req['body']) <= 65536, f'a later preattached script stays within the review body ({len(req["body"])})')
-    check('should the label follow the locale' in req['body'] and '<summary>f3.rb</summary>' in req['body'],
+    check('the label should follow the locale' in req['body'] and '<summary>f3.rb</summary>' in req['body'],
           'the earlier prose stays and the later script is still attached')
 
     f = Fixture(root / 'two-body-scripts')
@@ -735,7 +735,7 @@ def test_hand_written_repro_is_adopted(root: Path) -> None:
     payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f2']
     script = "puts :hand\n"
     payload['comments'][0]['body'] = (
-        "**Question:** should the label follow the locale?\n\n"
+        "**Advisory:** the label should follow the locale.\n\n"
         + block.format(name='f2.rb', script=script)
     )
     f.set_payload(payload)
@@ -1881,6 +1881,19 @@ def test_secret_scan_missing(root: Path) -> None:
           f'--post refuses when gitleaks errors ({proc.returncode} posts={f.posts()} {proc.stderr.strip()})')
 
 
+def test_question_bound_for_body(root: Path) -> None:
+    for mode, flags in (('preview', {'bare': True}), ('--post', {})):
+        f = Fixture(root / f'question-body-{mode.lstrip("-")}')
+        payload = inline_only(f, [{'finding': 'f2', 'path': 'app/label.rb', 'line': 40,
+                                   'body': '**Question:** should the label follow the locale?'}])
+        payload['body_findings'] = ['f4']
+        f.set_payload(payload)
+        proc = f.post(**flags)
+        check(proc.returncode != 0 and 'opens with **Question:**' in proc.stderr and f.posts() == 0,
+              f'a **Question:** bound for the review body is refused ({mode}, {proc.returncode} '
+              f'posts={f.posts()} {proc.stderr.strip()[-200:]})')
+
+
 def main() -> None:
     only = sys.argv[1:]
     if only:
@@ -1920,6 +1933,7 @@ def main() -> None:
         test_secret_scan_key(root)
         test_secret_scan_clean(root)
         test_secret_scan_missing(root)
+        test_question_bound_for_body(root)
     print('all post-review checks passed')
 
 

@@ -1467,9 +1467,10 @@ Blocking and should-fix findings are **Requested:**. Nits and usability
 findings are **Advisory:**. FYI is **Informational:**. **Question:** is not
 drafted. It still counts as a label on a reply, which the drafter strips,
 and on a summary, which the drafter strips and the lint refuses. A new
-inline comment that opens with it is refused by both the lint and
-`post-review.py`: the verdict is computed from the three labels above, and
-Question maps to none of them. A reply
+comment that opens with it is refused by both the lint and `post-review.py`,
+including one whose file is in no diff and would move into the review body:
+the verdict is computed from the three labels above, and Question maps to
+none of them. A reply
 carries no label, on anyone's pull request. The review summary does not
 open with a label, on anyone's pull request.
 
