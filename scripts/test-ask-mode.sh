@@ -34,7 +34,7 @@ EOF
 cat >"$work/bin/cursor-agent" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-}" = models ]; then
-  printf '%s\n' claude-fable-9-9-thinking-xhigh grok-9.9-xhigh grok-9.9-high-fast
+  printf '%s\n' claude-fable-9-9-thinking-xhigh grok-9.9-xhigh grok-9.9-xhigh-fast grok-9.9-high-fast
   exit 0
 fi
 printf '%s\n' "$@" >"$FAKE_LOG/cursor-agent.argv"
@@ -222,9 +222,9 @@ raise SystemExit(0 if a==b else 1)
 check "codex model from the resolver" line "$work/log/codex.argv" "gpt-test-astra"
 check "codex read-only sandbox" line "$work/log/codex.argv" "read-only"
 check "codex effort defaults to low" line "$work/log/codex.argv" 'model_reasoning_effort="low"'
-check "grok effort defaults to low" has "$OUT/answers.md" "## grok: grok-9.9-xhigh, effort low"
+check "grok effort defaults to low" has "$OUT/answers.md" "## grok: grok-9.9-xhigh-fast, effort low"
 check "grok is tool-less" line "$work/log/cursor-grok.argv" "ask"
-check "grok model from the resolver" line "$work/log/cursor-grok.argv" "grok-9.9-xhigh"
+check "grok model from the resolver" line "$work/log/cursor-grok.argv" "grok-9.9-xhigh-fast"
 check "default grok does not call the grok CLI" test ! -e "$work/log/grok.argv"
 check "answers side by side" has "$OUT/answers.md" "Astra answer: CLEAN"
 check "answers include grok" has "$OUT/answers.md" "Grok answer: CLEAN"
@@ -315,7 +315,7 @@ check "routed question skips muse" test ! -e "$work/log/muse.argv"
 rm -rf "$work/log/"*
 SEAT_STUB_JSON="$work/route-ahead.json" LEAN_CANNED="$work/lean-medium.json" \
   run "$CONCLAVE" "$ID" --template tell-scan --input "$work/comments.md"
-check "ahead pool steps the lean down" has "$OUT/answers.md" "## grok: grok-9.9-xhigh, effort low"
+check "ahead pool steps the lean down" has "$OUT/answers.md" "## grok: grok-9.9-xhigh-fast, effort low"
 check "on-pace pool keeps the lean" line "$work/log/codex.argv" 'model_reasoning_effort="medium"'
 rm -rf "$work/log/"*
 SEAT_STUB_JSON="$work/route-ahead.json" LEAN_CANNED="$work/lean-medium.json" \
