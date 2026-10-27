@@ -439,7 +439,9 @@ def find_repro(ballot_dir: Path, finding_id: str) -> Path | None:
         return None
     matches = []
     for path in directory.iterdir():
-        if not path.is_file():
+        # A symlink still counts when its target is missing or a directory,
+        # so it gets the UnsafeRepro note below instead of vanishing.
+        if not (path.is_file() or path.is_symlink()):
             continue
         if path.stem != finding_id:
             continue

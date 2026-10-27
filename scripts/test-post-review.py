@@ -1799,12 +1799,19 @@ def test_repro_symlink_not_inlined(root: Path) -> None:
     check("puts 'inside'" in body and REPRO_NOTE not in proc.stderr,
           f'a plain repro file still inlines ({proc.returncode} {proc.stderr.strip()})')
 
-    for name, link in (('repro-file-link', 'file'), ('repro-dir-link', 'dir')):
+    for name, link in (('repro-file-link', 'file'), ('repro-dir-link', 'dir'),
+                       ('repro-dangling-link', 'dangling'), ('repro-link-to-dir', 'link to a directory')):
         f = Fixture(root / name)
         repro = f.council / 'demo-1' / 'repro'
         if link == 'file':
             repro.mkdir()
             (repro / 'f1.rb').symlink_to(outside / 'f1.rb')
+        elif link == 'dangling':
+            repro.mkdir()
+            (repro / 'f1.rb').symlink_to(outside / 'gone.rb')
+        elif link == 'link to a directory':
+            repro.mkdir()
+            (repro / 'f1.rb').symlink_to(outside, target_is_directory=True)
         else:
             repro.symlink_to(outside, target_is_directory=True)
         proc = f.post('--dry-run')
