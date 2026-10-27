@@ -260,7 +260,8 @@ git -C "$R" checkout -q feat
 big() { # $1 case, $2 runner argv JSON, $3 family, $4 vendor, $5 model
   local d="$T/big-$1"; mkdir -p "$d"; printf '%s\n' "$ANSWER" > "$FAKE_REPLY"
   : > "$FAKE_RUN_LOG"; : > "$FAKE_STDIN"; : > "$FAKE_PROMPT_ARG"
-  FAKE_ROUTE="$(route "$3" "$4" "$5" "$2")" "$ROOT/scripts/merge-gate.sh" review "$R" main big "$PR" "$d/out" xai \
+  local builder=xai; [ "$4" = xai ] && builder=anthropic
+  FAKE_ROUTE="$(BUILDER=$builder route "$3" "$4" "$5" "$2")" "$ROOT/scripts/merge-gate.sh" review "$R" main big "$PR" "$d/out" "$builder" \
     > "$d/review.out" 2>&1; review_rc=$?
   review_out="$(cat "$d/review.out")"; run_log="$(cat "$FAKE_RUN_LOG")"
   [ "$review_rc" = 0 ] && ok "big $1: review rc 0" || bad "big $1: review rc $review_rc: $review_out"
