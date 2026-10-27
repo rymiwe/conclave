@@ -1378,11 +1378,14 @@ review_pr_number() {
 # re-seat can try. Caching the failure would hide a builder vendor.
 REVIEW_PR_FACT_NUM=""
 REVIEW_PR_FACT_VENDOR=""
+REVIEW_PR_FACT_VENDORS=""
 REVIEW_PR_FACT_HUMAN=""
 REVIEW_PR_FACT_SKIP=""
 
 review_pr_load_facts() {
-  # Sets REVIEW_PR_FACT_VENDOR (a vendor, "ambiguous", or empty) and
+  # Sets REVIEW_PR_FACT_VENDOR (a vendor, "ambiguous", or empty),
+  # REVIEW_PR_FACT_VENDORS (every vendor the trailers name, sorted, space
+  # separated) and
   # REVIEW_PR_FACT_HUMAN (yes or no). Returns 1 when there is no PR or gh fails.
   # A Co-authored-by trailer names a model when its display name contains a
   # known family (Claude counts) or its mailbox is at anthropic.com.
@@ -1390,11 +1393,12 @@ review_pr_load_facts() {
   # scripts/trailer_vendor.py owns that table.
   # gh pr view --json author has is_bot. This gh omits type; a present type
   # must be User. is_bot false with type absent or User is a human author.
-  local num json parsed vendor human key
+  local num json parsed vendor vendors human key
   num="$(review_pr_number)"
   if [ -z "$num" ]; then
     REVIEW_PR_FACT_NUM=""
     REVIEW_PR_FACT_VENDOR=""
+    REVIEW_PR_FACT_VENDORS=""
     REVIEW_PR_FACT_HUMAN=no
     return 1
   fi
@@ -1407,6 +1411,7 @@ review_pr_load_facts() {
   fi
   REVIEW_PR_FACT_NUM=""
   REVIEW_PR_FACT_VENDOR=""
+  REVIEW_PR_FACT_VENDORS=""
   REVIEW_PR_FACT_HUMAN=no
   # No repo yet is not a failed fetch. resolve_routing sets REPO before the
   # lineup; a later call can load once the repo exists.
@@ -1422,7 +1427,7 @@ review_pr_load_facts() {
   parsed="$(REVIEW_PR_JSON="$json" python3 - "$ROOT/scripts" <<'PY'
 import json, os, sys
 sys.path.insert(0, sys.argv[1])
-from trailer_vendor import vendor_from_commits
+from trailer_vendor import vendor_from_commits, vendors_named
 doc = json.loads(os.environ["REVIEW_PR_JSON"])
 vendor = vendor_from_commits(doc)
 author = doc.get("author") if isinstance(doc.get("author"), dict) else {}
@@ -1431,7 +1436,7 @@ if author.get("is_bot") is False:
     typ = author.get("type")
     if typ is None or typ == "User":
         human = "yes"
-sys.stdout.write(vendor + "\n" + human + "\n")
+sys.stdout.write(vendor + "\n" + human + "\n" + " ".join(sorted(vendors_named(doc))) + "\n")
 PY
 )" || {
     REVIEW_PR_FACT_SKIP="$key"
@@ -1439,6 +1444,10 @@ PY
   }
   vendor="${parsed%%$'\n'*}"
   human="${parsed#*$'\n'}"
+  vendors=""
+  case "$human" in
+    *$'\n'*) vendors="${human#*$'\n'}"; vendors="${vendors%%$'\n'*}" ;;
+  esac
   human="${human%%$'\n'*}"
   case "$vendor" in
     anthropic|openai|xai|meta|google|ambiguous) ;;
@@ -1450,7 +1459,12 @@ PY
   esac
   REVIEW_PR_FACT_NUM="$key"
   REVIEW_PR_FACT_VENDOR="$vendor"
+  REVIEW_PR_FACT_VENDORS="$vendors"
   REVIEW_PR_FACT_HUMAN="$human"
+  if [ "$vendor" = ambiguous ] && [ -n "$vendors" ]; then
+    # Fail closed: the trailers do not say who built it, so no vendor they name reviews it.
+    printf 'review: PR commit trailers are ambiguous; excluding every vendor they name (%s)\n' "${vendors// /, }" >&2
+  fi
   REVIEW_PR_FACT_SKIP=""
   return 0
 }
@@ -1458,7 +1472,9 @@ PY
 review_resolved_builder_vendor() {
   # Vendor for --builder-vendor, or empty.
   # A brief author: of a known family still maps to its vendor.
-  # Otherwise only a PR commit trailer that names one model vendor.
+  # Otherwise a PR commit trailer that names one model vendor. Ambiguous
+  # trailers return the first vendor they name; review_append_author_args
+  # excludes the others by seat, so no named family reviews the PR.
   if [ -n "${HEADER_AUTHOR:-}" ]; then
     review_author_vendor "$HEADER_AUTHOR" || true
     return 0
@@ -1467,6 +1483,18 @@ review_resolved_builder_vendor() {
   review_pr_load_facts || return 0
   case "$REVIEW_PR_FACT_VENDOR" in
     anthropic|openai|xai|meta|google) printf '%s\n' "$REVIEW_PR_FACT_VENDOR" ;;
+    ambiguous) printf '%s\n' "${REVIEW_PR_FACT_VENDORS%% *}" ;;
+  esac
+}
+
+review_vendor_seat() {
+  # seat-usage seat for a vendor, for --exclude-seat.
+  case "$1" in
+    anthropic) printf 'claude\n' ;;
+    openai) printf 'chatgpt\n' ;;
+    xai) printf 'grok\n' ;;
+    google) printf 'google\n' ;;
+    meta) printf 'muse\n' ;;
   esac
 }
 
@@ -1505,6 +1533,16 @@ review_append_author_args() {
   vendor="$(review_resolved_builder_vendor)"
   if [ -n "$vendor" ]; then
     _dest+=(--builder-vendor "$vendor")
+  fi
+  # --builder-vendor takes one vendor. Ambiguous trailers can name several, so
+  # the rest are excluded by seat.
+  if [ -z "${HEADER_AUTHOR:-}" ] && [ "$REVIEW_PR_FACT_VENDOR" = ambiguous ]; then
+    local extra seat
+    for extra in ${REVIEW_PR_FACT_VENDORS#* }; do
+      [ "$extra" = "$vendor" ] && continue
+      seat="$(review_vendor_seat "$extra")"
+      [ -n "$seat" ] && _dest+=(--exclude-seat "$seat")
+    done
   fi
   # This call is done. A later re-seat may ask gh if this one failed.
   REVIEW_PR_FACT_SKIP=""
