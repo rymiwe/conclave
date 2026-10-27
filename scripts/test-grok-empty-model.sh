@@ -28,7 +28,7 @@ printf 'prompt\n' >"$WORK/packet/PROMPT.md"
 # leg STATE FUNCTION [ARG] runs one leg with CURSOR_GROK unset or empty, then
 # checks the return code, the message, and that nothing launched.
 leg() {
-  local state="$1" fn="$2" arg="${3:-}" dir="$WORK/out-$2-$1" rc=0 msg
+  local state="$1" fn="$2" arg="${3:-}" dir="$WORK/out-$2-$1" msg
   mkdir -p "$dir"
   printf 'brief\n' >"$dir/voter-grok.brief.md"
   : >"$LAUNCH_LOG"
