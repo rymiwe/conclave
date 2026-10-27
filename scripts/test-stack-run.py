@@ -1873,6 +1873,17 @@ def test_preflight_stack(tmp: Path, mod) -> None:
     check(got.returncode == 1 and 'the run waits for seats' in got.stdout
           and f.record()['waves'][0]['precheck'] == 'blocked',
           f'preflight stack-run: with --wave-wait capped seats only warn and the wave gate waits ({got.returncode} {got.stdout.strip()})')
+    # Preflight takes the first seat answer (clear). The wave-1 gate asks again and gets "ask".
+    f = Fixture(tmp, 'preflight-then-gate-ask')
+    seat_route(f, SEAT_OK, SEAT_ASK)
+    f.env.pop('CONCLAVE_PREFLIGHT')
+    got = f.invoke(*PER_PR, '--prs', '1')
+    text = needs(f).read_text() if needs(f).is_file() else ''
+    check([c[1] for c in f.calls() if c[0] == 'seat'] == [['--route', 'lineup', '--json', '--kind', 'review']] * 2,
+          'preflight stack-run: with preflight on, seat-usage is asked twice, once by preflight and once by the wave gate')
+    check('seats capped' not in text and got.returncode == 1 and f.record()['waves'][0]['precheck'] == 'blocked'
+          and not any(c[0] == 'council' for c in f.calls()),
+          f'preflight stack-run: preflight passes, then the wave-1 gate stops the wave with no ballot ({got.returncode} {text!r} {f.record()["waves"][0]})')
     f = Fixture(tmp, 'preflight-seats-inconclusive')
     got = f.invoke(*PER_PR, '--prs', '1')
     check(got.returncode == 0 and 'seat check inconclusive' in got.stdout and '## Blocking\n\n(none)' in got.stdout,

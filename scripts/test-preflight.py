@@ -63,10 +63,18 @@ def make_repo(path: Path) -> Path:
     return path
 
 
-def declare(repo: Path, checks: list[dict] | str) -> None:
+def declare(repo: Path, checks: list[dict] | str, commit: bool = True) -> None:
+    """Write the declaration and, by default, commit it to the checked-out branch.
+
+    Preflight reads it from a base commit, so a fixture that wants it to run
+    commits it. commit=False leaves it untracked, which must never run.
+    """
     (repo / '.conclave').mkdir(exist_ok=True)
     text = checks if isinstance(checks, str) else json.dumps({'version': 1, 'checks': checks})
     (repo / '.conclave/preflight.json').write_text(text)
+    if commit:
+        git(repo, 'add', '.conclave/preflight.json')
+        git(repo, 'commit', '-q', '-m', 'declare preflight')
 
 
 def base_env(bin_dir: Path, **extra: str) -> dict[str, str]:
@@ -128,8 +136,10 @@ def lineup_json(*families: str, mode: str = 'default') -> str:
 
 class Status(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
-        code = {'/ok': 200, '/bad': 503}.get(self.path.split('?')[0], 404)
+        code = {'/ok': 200, '/bad': 503, '/redirect': 302}.get(self.path.split('?')[0], 404)
         self.send_response(code)
+        if code == 302:
+            self.send_header('Location', '/ok')
         self.send_header('Content-Length', '4')
         self.end_headers()
         self.wfile.write(b'body')
@@ -153,8 +163,8 @@ def test_declared(tmp: Path, port: int) -> None:
     dest = tmp / 'decl-none-out'
     dest.mkdir()
     (dest / 'needs-human.md').write_text('stale list from an earlier run\n')
-    got = preflight_cli(env, repo, dest)
-    check(preflight.check_declared(repo) == [], 'declared: a missing .conclave/preflight.json yields no items')
+    got = preflight_cli(env, repo, dest, '--base', 'main')
+    check(preflight.check_declared(repo, 'main') == [], 'declared: a missing .conclave/preflight.json yields no items')
     check(got.returncode == 0 and got.stdout == 'preflight: ok\n' and got.stderr == ''
           and not (dest / 'needs-human.md').exists(),
           f'declared: missing file skips silently; ok line only; stale needs-human.md removed ({got.stdout!r} {got.stderr!r})')
@@ -173,7 +183,7 @@ def test_declared(tmp: Path, port: int) -> None:
         repo = make_repo(tmp / f'decl-bad-{label.replace(" ", "-")}')
         declare(repo, text)
         dest = tmp / f'decl-bad-{label.replace(" ", "-")}-out'
-        got = preflight_cli(env, repo, dest)
+        got = preflight_cli(env, repo, dest, '--base', 'main')
         needs = (dest / 'needs-human.md').read_text() if (dest / 'needs-human.md').is_file() else ''
         check(got.returncode == preflight.BLOCKED and needs.count('bad .conclave/preflight.json') == 1
               and reason in needs and '\n2. ' not in needs and 'Traceback' not in got.stderr,
@@ -192,7 +202,7 @@ def test_declared(tmp: Path, port: int) -> None:
     ])
     dest = tmp / 'decl-fail-out'
     start = time.monotonic()
-    got = preflight_cli(env, repo, dest)
+    got = preflight_cli(env, repo, dest, '--base', 'main')
     elapsed = time.monotonic() - start
     needs = (dest / 'needs-human.md').read_text() if (dest / 'needs-human.md').is_file() else ''
     blocking, _, warnings = needs.partition('## Warnings')
@@ -213,18 +223,31 @@ def test_declared(tmp: Path, port: int) -> None:
     repo = make_repo(tmp / 'decl-warn')
     declare(repo, [{'name': 'soft check', 'command': ['false'], 'needs': 'optional fix', 'severity': 'warning'}])
     dest = tmp / 'decl-warn-out'
-    got = preflight_cli(env, repo, dest)
+    got = preflight_cli(env, repo, dest, '--base', 'main')
     check(got.returncode == 0 and '## Blocking\n\n(none)' in got.stdout and 'soft check' in got.stdout
           and (dest / 'needs-human.md').is_file(),
           f'declared: warnings alone exit 0 and still write the list ({got.returncode} {got.stdout!r})')
 
-    # (3) Commands run in the target repo with the caller's env.
+    # (3) Commands run in the target repo with a scrubbed env: no token, key, or op variable reaches the child.
+    write_exe(bin_dir / 'probe', '''\
+        #!/bin/sh
+        { pwd; env; } >"$1"
+        test -f a.txt
+        ''')
     repo = make_repo(tmp / 'decl-env')
-    declare(repo, [{'name': 'env and cwd', 'command': ['sh', '-c', 'test -f a.txt && test "$PREFLIGHT_PROBE" = yes'],
-                    'needs': 'n'}])
-    got = preflight_cli(dict(env, PREFLIGHT_PROBE='yes'), repo, tmp / 'decl-env-out')
-    check(got.returncode == 0 and got.stdout == 'preflight: ok\n',
-          f'declared: a command runs with cwd = target repo and the caller env ({got.stdout!r})')
+    probe_out = tmp / 'decl-env-probe.txt'
+    declare(repo, [{'name': 'env and cwd', 'command': ['probe', str(probe_out)], 'needs': 'n'}])
+    canaries = {'GH_TOKEN': 'CANARY-GH-TOKEN-111', 'OP_SERVICE_ACCOUNT_TOKEN': 'CANARY-OP-SA-222',
+                'AWS_SECRET_ACCESS_KEY': 'CANARY-AWS-KEY-333', 'SOME_API_KEY': 'CANARY-API-KEY-444',
+                'OP_CONNECT_TOKEN': 'CANARY-OP-CONNECT-555', 'PREFLIGHT_PROBE': 'CANARY-PROBE-666'}
+    got = preflight_cli(dict(env, **canaries), repo, tmp / 'decl-env-out', '--base', 'main')
+    seen = probe_out.read_text() if probe_out.is_file() else ''
+    names = {line.split('=', 1)[0] for line in seen.splitlines()[1:] if '=' in line}
+    check(got.returncode == 0 and got.stdout == 'preflight: ok\n' and seen.splitlines()[:1] == [str(repo.resolve())],
+          f'declared: a command runs with cwd = target repo ({got.stdout!r} {seen[:80]!r})')
+    check(all(value not in seen for value in canaries.values()) and not (names & set(canaries))
+          and 'HOME' in names and 'PATH' in names and names <= set(preflight.ENV_ALLOW) | {'PWD', 'SHLVL', '_', 'OLDPWD'},
+          f'declared: the child sees only the allowlisted env, none of the canaries ({sorted(names)})')
 
     # (9) CONCLAVE_PREFLIGHT=0 skips everything, even a malformed file.
     repo = make_repo(tmp / 'decl-off')
@@ -242,27 +265,149 @@ def test_secrets(tmp: Path, port: int) -> None:
     hook_log = tmp / 'secret-hook.jsonl'
     env = base_env(bin_dir, CONCLAVE_WAVE_PRECHECK='0', CONCLAVE_STAGE_HOOK=str(bin_dir / 'hook'),
                    HOOK_LOG=str(hook_log), HOOK_EXIT='1', LEAKY_VALUE='SECRET-ENV-321')
+    write_exe(bin_dir / 'chatty', '#!/bin/sh\necho SECRET-OUT-123; echo SECRET-ERR-456 >&2; echo "$LEAKY_VALUE"; exit 1\n')
     repo = make_repo(tmp / 'secret-repo')
     declare(repo, [
         {'name': 'chatty check', 'needs': 'fix the chatty thing',
-         'command': ['sh', '-c', 'echo SECRET-OUT-123; echo SECRET-ERR-456 >&2; echo "$LEAKY_VALUE"; exit 1']},
+         'command': ['chatty']},
         {'name': 'token url', 'url': f'http://127.0.0.1:{port}/bad?token=SECRET-TOKEN-789', 'needs': 'fix the token url'},
-        {'name': 'userinfo url', 'url': f'http://admin:SECRET-PASS-000@127.0.0.1:{port}/bad#frag', 'needs': 'fix the login url'},
     ])
     dest = tmp / 'secret-out'
-    got = preflight_cli(env, repo, dest)
+    got = preflight_cli(env, repo, dest, '--base', 'main')
     needs = (dest / 'needs-human.md').read_text() if (dest / 'needs-human.md').is_file() else ''
     log = (dest / 'stage-hook.log').read_text() if (dest / 'stage-hook.log').is_file() else ''
     payloads = ''.join(c['payload'] or '' for c in hook_calls(hook_log))
-    check(got.returncode == preflight.BLOCKED and 'chatty check: exit 1' in needs and 'token url' in needs
-          and 'userinfo url' in needs, f'secrets: the three checks fail and block ({got.returncode} {needs!r})')
+    check(got.returncode == preflight.BLOCKED and 'chatty check: exit 1' in needs and 'token url' in needs,
+          f'secrets: the two checks fail and block ({got.returncode} {needs!r})')
     check(f'http://127.0.0.1:{port}/bad)' in needs, 'secrets: a shown URL keeps host and path only')
     check(log and 'preflight_failed failed: exit 1' in log, f'secrets: the failing hook wrote stage-hook.log ({log!r})')
     for secret in SECRETS:
         check(all(secret not in text for text in (got.stdout, got.stderr, needs, log, payloads)),
               f'secrets: {secret} is in none of stdout, stderr, needs-human.md, stage-hook.log, hook payload')
-    check('token=' not in needs + got.stdout and 'admin' not in needs + got.stdout and '#frag' not in needs,
-          'secrets: no query, userinfo, or fragment is shown')
+    check('token=' not in needs + got.stdout and 'admin' not in needs + got.stdout,
+          'secrets: no query or userinfo is shown')
+
+
+def marker_bin(tmp: Path, name: str) -> tuple[Path, Path]:
+    """A bin dir whose `touch-marker` tool creates marker. Running it proves a declared command ran."""
+    bin_dir = tmp / f'{name}-bin'
+    marker = tmp / f'{name}-marker'
+    write_exe(bin_dir / 'touch-marker', f'#!/bin/sh\n: >{marker}\n')
+    return bin_dir, marker
+
+
+def test_declaration_source(tmp: Path) -> None:
+    """The declaration is read from the base commit only. The checkout never supplies a command."""
+    bin_dir, marker = marker_bin(tmp, 'src')
+    env = base_env(bin_dir, CONCLAVE_WAVE_PRECHECK='0', GH_TOKEN='CANARY-GH-TOKEN-111',
+                   OP_SERVICE_ACCOUNT_TOKEN='CANARY-OP-SA-222')
+    bad = [{'name': 'evil', 'command': ['touch-marker'], 'needs': 'n'}]
+
+    # The checkout is a PR branch that carries a malicious declaration. The base has none.
+    repo = make_repo(tmp / 'src-branch')
+    git(repo, 'checkout', '-q', '-b', 'pr')
+    declare(repo, bad)
+    got = preflight_cli(env, repo, tmp / 'src-branch-out', '--base', 'main', '--head', 'pr')
+    check(got.returncode == 0 and got.stdout == 'preflight: ok\n' and not marker.exists(),
+          f'source: a malicious declaration on the PR branch does not run ({got.returncode} {got.stdout!r})')
+    check(preflight.check_declared(repo, 'main') == [] and not marker.exists(),
+          'source: check_declared reads the base commit, so the PR branch copy is invisible')
+
+    # The base declares something harmless. The PR branch edits it to run a command.
+    repo = make_repo(tmp / 'src-edit')
+    declare(repo, [{'name': 'fine', 'command': ['true'], 'needs': 'n'}])
+    git(repo, 'checkout', '-q', '-b', 'pr')
+    declare(repo, bad)
+    got = preflight_cli(env, repo, tmp / 'src-edit-out', '--base', 'main', '--head', 'pr')
+    check(got.returncode == 0 and not marker.exists(), 'source: a PR branch edit of the base declaration does not run')
+
+    # An untracked declaration in the working tree on the base branch.
+    repo = make_repo(tmp / 'src-untracked')
+    declare(repo, bad, commit=False)
+    got = preflight_cli(env, repo, tmp / 'src-untracked-out', '--base', 'main')
+    check(got.returncode == 0 and got.stdout == 'preflight: ok\n' and not marker.exists(),
+          f'source: an untracked declaration on the base branch does not run ({got.stdout!r})')
+
+    # A dirty tracked declaration: the committed text wins over the working tree.
+    repo = make_repo(tmp / 'src-dirty')
+    declare(repo, [{'name': 'fine', 'command': ['true'], 'needs': 'n'}])
+    (repo / '.conclave/preflight.json').write_text(json.dumps({'version': 1, 'checks': bad}))
+    got = preflight_cli(env, repo, tmp / 'src-dirty-out', '--base', 'main')
+    check(got.returncode == 0 and not marker.exists(), 'source: an uncommitted edit of the declaration does not run')
+
+    # No base commit to read from: nothing runs, and the skip is a warning, not silence.
+    repo = make_repo(tmp / 'src-noref')
+    declare(repo, bad)
+    got = preflight_cli(env, repo, tmp / 'src-noref-out')
+    check(got.returncode == 0 and not marker.exists() and 'was not read' in got.stdout and 'Warnings' in got.stdout,
+          f'source: with no base ref the file is not read and one warning says so ({got.returncode} {got.stdout!r})')
+
+    # The committed declaration on the base does run (the control for the cases above).
+    repo = make_repo(tmp / 'src-control')
+    declare(repo, bad)
+    got = preflight_cli(env, repo, tmp / 'src-control-out', '--base', 'main')
+    check(got.returncode == 0 and marker.exists(), 'source: a declaration committed on the base does run')
+    marker.unlink()
+
+    # A declaration that is a symlink is refused, not followed.
+    repo = make_repo(tmp / 'src-symlink')
+    (repo / '.conclave').mkdir()
+    (repo / '.conclave/preflight.json').symlink_to('../a.txt')
+    git(repo, 'add', '.conclave/preflight.json')
+    git(repo, 'commit', '-q', '-m', 'link')
+    got = preflight_cli(env, repo, tmp / 'src-symlink-out', '--base', 'main')
+    check(got.returncode == preflight.BLOCKED and 'must be a regular file' in got.stdout and not marker.exists(),
+          f'source: a symlinked declaration is refused ({got.returncode} {got.stdout!r})')
+
+
+def test_command_rules(tmp: Path, port: int) -> None:
+    """Shells, wrappers, inline interpreters and checkout paths are rejected. URLs are http(s) without userinfo."""
+    bin_dir, marker = marker_bin(tmp, 'rules')
+    env = base_env(bin_dir, CONCLAVE_WAVE_PRECHECK='0')
+    touch = f'touch {marker}'
+    rejected = [
+        ['sh', '-c', touch], ['bash', '-lc', touch], ['/bin/sh', '-c', touch], ['zsh', '-c', touch],
+        ['dash', '-c', touch], ['env', 'touch-marker'], ['/usr/bin/env', 'true'], ['xargs', 'true'],
+        ['nohup', 'touch-marker'], ['timeout', '5', 'touch-marker'], ['sudo', 'true'], ['find', '.', '-exec', 'true', ';'],
+        ['python3', '-c', 'print(1)'], ['python3.12', '-c', 'print(1)'], ['python', '-Sc', 'print(1)'],
+        ['node', '-e', '1'], ['node', '--eval=1'], ['perl', '-e', '1'], ['ruby', '-e', '1'], ['php', '-r', '1'],
+        ['./touch-marker'], ['bin/touch-marker'], ['../touch-marker'],
+    ]
+    for argv in rejected:
+        checks, reason = preflight.parse_declaration(json.dumps({'version': 1, 'checks': [
+            {'name': 'x', 'command': argv, 'needs': 'n'}]}))
+        check(checks is None and reason, f'rules: {" ".join(argv[:2])} is rejected ({reason})')
+    accepted = [['true'], ['git', 'status'], ['python3', 'check.py'], ['python3', '-m', 'pytest', '-x'],
+                ['node', 'check.js', '-e'], ['/usr/bin/test', '-f', 'a.txt'], ['pg_isready', '-h', 'localhost']]
+    for argv in accepted:
+        checks, reason = preflight.parse_declaration(json.dumps({'version': 1, 'checks': [
+            {'name': 'x', 'command': argv, 'needs': 'n'}]}))
+        check(checks and not reason, f'rules: {" ".join(argv[:2])} is accepted ({reason})')
+
+    # End to end: sh -c on the base is one blocking item and nothing runs.
+    repo = make_repo(tmp / 'rules-sh')
+    declare(repo, [{'name': 'wrapped', 'command': ['sh', '-c', touch], 'needs': 'n'}])
+    got = preflight_cli(env, repo, tmp / 'rules-sh-out', '--base', 'main')
+    check(got.returncode == preflight.BLOCKED and 'bad .conclave/preflight.json' in got.stdout
+          and 'sh is a shell or wrapper' in got.stdout and not marker.exists(),
+          f'rules: a committed sh -c declaration blocks and nothing runs ({got.returncode} {got.stdout!r})')
+
+    # URLs: http(s) only, no userinfo, no redirect following.
+    for label, url, reason in (
+            ('userinfo', f'http://admin:SECRET-PASS-000@127.0.0.1:{port}/ok', 'user name or password'),
+            ('user only', f'http://admin@127.0.0.1:{port}/ok', 'user name or password'),
+            ('file', 'file:///etc/hostname', 'http or https'), ('ftp', 'ftp://127.0.0.1/x', 'http or https'),
+            ('no host', 'http:///ok', 'http or https')):
+        repo = make_repo(tmp / f'rules-url-{label.replace(" ", "-")}')
+        declare(repo, [{'name': 'url check', 'url': url, 'needs': 'n'}])
+        got = preflight_cli(env, repo, tmp / f'rules-url-{label.replace(" ", "-")}-out', '--base', 'main')
+        check(got.returncode == preflight.BLOCKED and reason in got.stdout and 'SECRET-PASS-000' not in got.stdout + got.stderr,
+              f'rules: a {label} url is rejected and no password is shown ({got.returncode} {got.stdout!r})')
+    repo = make_repo(tmp / 'rules-redirect')
+    declare(repo, [{'name': 'redirecting', 'url': f'http://127.0.0.1:{port}/redirect', 'needs': 'n'}])
+    got = preflight_cli(env, repo, tmp / 'rules-redirect-out', '--base', 'main')
+    check(got.returncode == preflight.BLOCKED and 'status 302, wanted 200' in got.stdout,
+          f'rules: a redirect is an answer, not followed ({got.returncode} {got.stdout!r})')
 
 
 def test_stage_hook(tmp: Path) -> None:
@@ -338,7 +483,7 @@ def test_stage_hook(tmp: Path) -> None:
                          ('timeout', {'CONCLAVE_STAGE_HOOK': str(bin_dir / 'sleeper'),
                                       'CONCLAVE_STAGE_HOOK_TIMEOUT': '1'})):
         out = tmp / f"hook-blocked-{label.replace(' ', '-')}"
-        got = preflight_cli(dict(env, CONCLAVE_WAVE_PRECHECK='0', **extra), repo, out)
+        got = preflight_cli(dict(env, CONCLAVE_WAVE_PRECHECK='0', **extra), repo, out, '--base', 'main')
         text = (out / 'stage-hook.log').read_text() if (out / 'stage-hook.log').is_file() else ''
         check(got.returncode == preflight.BLOCKED and 'preflight_failed failed' in text,
               f'hook: a failing hook ({label}) leaves preflight exit 3 and writes stage-hook.log ({got.returncode} {text!r})')
@@ -359,6 +504,13 @@ def test_seats_and_targets(tmp: Path) -> None:
     check(got.returncode == preflight.BLOCKED and 'seats capped: seat-usage asked for a human' in got.stdout
           and 'every pool capped' in got.stdout and 'astra:capped' in got.stdout,
           f'seats: an ask route blocks and names the reason and skipped codes ({got.stdout!r})')
+    check('Default: wait for the capped seat to reset' in got.stdout and '--voters' in got.stdout
+          and 'CONCLAVE_PREFLIGHT=0' in got.stdout and '--wave-wait' not in got.stdout,
+          f'seats: the exit-3 message offers the options and names a default ({got.stdout!r})')
+    stack = preflight.check_seats(lambda *a, **k: subprocess.CompletedProcess(a, 0, lineup_json(mode='ask'), ''), caller='stack')
+    check(stack and 'Default: wait for the capped seat to reset' in stack[0]['todo'] and '--wave-wait SECONDS' in stack[0]['todo']
+          and 'CONCLAVE_PREFLIGHT=0' in stack[0]['todo'] and '--voters' not in stack[0]['todo'],
+          f"seats: the stack-run message offers --wave-wait, not --voters ({stack and stack[0]['todo']!r})")
     check((tmp / 'seat.log').read_text().splitlines() == ['--route lineup --json --kind review'],
           'seats: preflight asks the same route as the wave gate')
     seat_json.write_text(lineup_json('grok'))
@@ -542,10 +694,35 @@ def test_conclave(tmp: Path) -> None:
         check(got.returncode not in (0, 3) and not c.needs() and '# Needs from human' not in got.stdout
               and not c.launched(), f'conclave.sh: CONCLAVE_PREFLIGHT=0 skips preflight ({got.returncode})')
 
-        # Dry run stays a preview: no preflight.
-        got = c.run('--dry-run', '--repo', str(c.repo), '--base', 'main', '--head', 'no-such-head')
-        check('# Needs from human' not in got.stdout and 'preflight: ok' not in got.stdout and not c.needs(),
-              f'conclave.sh: --dry-run runs no preflight ({got.returncode})')
+        git(c.repo, 'reset', '-q', '--hard', 'HEAD~1')  # drop the declared failing check
+        # A dry run shows the stop a real launch would hit: same list, same exit 3, nothing launched or fired.
+        (c.dir / 'needs-human.md').unlink(missing_ok=True)
+        c.hook_log.unlink(missing_ok=True)
+        c.seat.write_text(lineup_json(mode='ask'))
+        real = c.run('--repo', str(c.repo), '--base', 'main', '--head', 'main')
+        c.hook_log.unlink(missing_ok=True)
+        (c.dir / 'needs-human.md').unlink(missing_ok=True)
+        got = c.run('--dry-run', '--repo', str(c.repo), '--base', 'main', '--head', 'main')
+        preview = c.dir / 'preview/needs-human.md'
+        check(real.returncode == 3 and got.returncode == 3,
+              f'dry run: a capped route exits 3 in a dry run as in a real launch ({real.returncode} {got.returncode})')
+        check('seats capped' in got.stdout and 'a real launch would stop here with exit 3' in got.stderr
+              and preview.is_file() and 'seats capped' in preview.read_text(),
+              f'dry run: the stop and its reason are shown, and written under preview/ ({got.stdout[-300:]!r} {got.stderr[-300:]!r})')
+        check(not c.needs() and not hook_calls(c.hook_log) and not c.launched(),
+              'dry run: no needs-human.md in the ballot dir, no stage event, no voter')
+
+        # With seats free the dry run reports ok and exits 0.
+        c.seat.write_text(lineup_json('fable', 'astra'))
+        got = c.run('--dry-run', '--repo', str(c.repo), '--base', 'main', '--head', 'main')
+        check(got.returncode == 0 and 'preflight: ok' in got.stdout and 'would stop' not in got.stderr,
+              f'dry run: clear preflight exits 0 ({got.returncode} {got.stdout[-200:]!r})')
+
+        # CONCLAVE_PREFLIGHT=0 keeps the dry run a plain preview.
+        c.seat.write_text(lineup_json(mode='ask'))
+        got = c.run('--dry-run', '--repo', str(c.repo), '--base', 'main', '--head', 'main', CONCLAVE_PREFLIGHT='0')
+        check(got.returncode == 0 and 'preflight:' not in got.stdout + got.stderr and 'Needs from human' not in got.stdout,
+              f'dry run: CONCLAVE_PREFLIGHT=0 skips the preview check too ({got.returncode})')
     finally:
         c.close()
 
@@ -596,6 +773,8 @@ def main() -> None:
             port = server.server_address[1]
             test_declared(tmp, port)
             test_secrets(tmp, port)
+            test_declaration_source(tmp)
+            test_command_rules(tmp, port)
             test_stage_hook(tmp)
             test_seats_and_targets(tmp)
             test_conclave(tmp)

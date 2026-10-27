@@ -2949,6 +2949,8 @@ review_dry_run() {
   fi
   printf 'Dry-run review lineup: tmp/council/%s/preview/lineup.md (ballot untouched)\n' "$ID"
   cat "$DIR/preview/lineup.md"
+  # A real launch stops at preflight before any voter runs, so the plan says so.
+  review_preflight plan
 }
 
 ballot_decide_unedited() {
@@ -3431,9 +3433,16 @@ review_preflight() {
   # .conclave/preflight.json. Exit 3 when anything blocks. The parse lives
   # in scripts/preflight.py. CONCLAVE_PREFLIGHT=0 skips it. Under stack-run
   # (CONCLAVE_PREFLIGHT_DONE=1) only the target is checked. docs/preflight.md.
+  # "plan" is the dry run: the same checks and exit code, written under
+  # preview/ and with no stage event, so the preview matches a real launch.
   [ "$(conclave_env PREFLIGHT 1)" != 0 ] || return 0
-  local rc=0
-  local -a args=("--repo=$REPO" "--dir=$DIR" "--ballot=$ID")
+  local rc=0 where="$DIR"
+  local -a args=("--repo=$REPO" "--ballot=$ID")
+  if [ "${1:-}" = plan ]; then
+    where="$DIR/preview"
+    args+=(--plan)
+  fi
+  args+=("--dir=$where")
   case "$REVIEW_MODE" in
     pr) args+=("--pr=$FLAG_PR") ;;
     refs) args+=("--base=$FLAG_BASE" "--head=$FLAG_HEAD") ;;

@@ -6,8 +6,8 @@ Code: `scripts/preflight.py` and `scripts/stage_hook.py`. Tests: `scripts/test-p
 
 ## Where preflight runs
 
-- **`scripts/conclave.sh`, kind review.** In the real launch, after the target is resolved and before the ballot's earlier voter files are cleared. `--dry-run` stays a preview and runs no preflight. Design, mixed, audit, and ask mode run none. `--findings`, `--judge`, and `--verdicts` launch no voters and run none.
-- **`scripts/stack-run.py`.** Once, before any chair or ballot starts. `--dry-run` and `--reconcile-only` run none.
+- **`scripts/conclave.sh`, kind review.** In the real launch, after the target is resolved and before the ballot's earlier voter files are cleared. `--dry-run` runs the same preflight in plan mode (see "Dry run" below). Design, mixed, audit, and ask mode run none. `--findings`, `--judge`, and `--verdicts` launch no voters and run none.
+- **`scripts/stack-run.py`.** Once, before any chair or ballot starts. `--dry-run` and `--reconcile-only` run none; stack-run's dry run only prints the wave plan.
 
 ## Checks
 
@@ -27,10 +27,11 @@ Every check runs, even when an earlier one fails, so the list is complete. Each 
 - `CONCLAVE_WAVE_PRECHECK=0` skips this check, here and before each wave.
 - `conclave.sh` skips it when `--voters` is given, because `--voters` wins over the route.
 - stack-run with `--wave-wait S` turns capped seats into a warning. The first wave then waits for seats as before.
+- A blocked seat item lists the options and a default. `conclave.sh`: wait for the capped seat to reset and rerun (the default), pass `--voters` with seats that have quota, or set `CONCLAVE_PREFLIGHT=0` to run the old fixed default pair. stack-run: wait for the reset and rerun (the default), pass `--wave-wait SECONDS` so the run waits for seats before the first wave, or set `CONCLAVE_PREFLIGHT=0` (the per-wave pre-check still stops a capped wave).
 
 Before preflight, a review with an asking route fell back to the fixed default pair. It now stops at minute 0 instead. `CONCLAVE_PREFLIGHT=0` or `--voters` keeps the old launch.
 
-**Repo prerequisites.** An optional file in the target repo, `.conclave/preflight.json`. It names what a reviewer needs to run a repro: a test database, installed dependencies, a private registry.
+**Repo prerequisites.** An optional file in the target repo, `.conclave/preflight.json`, read from the base commit. It names what a reviewer needs to run a repro: a test database, installed dependencies, a private registry.
 
 ```json
 {"version": 1,
@@ -41,17 +42,30 @@ Before preflight, a review with an asking route fell back to the fixed default p
  ]}
 ```
 
+- The file is read with `git show --no-textconv <base>:.conclave/preflight.json`, never from the working tree. The base is the PR's base branch (`origin/<name>` when it resolves) for `--pr`, `--base` for refs, and the bottom PR's base for stack-run. An untracked file, an uncommitted edit, and the PR branch's own copy are never read, so a PR cannot add a command to its own review. With no base to read from, the file is skipped and one warning says so. The file must be a regular file of at most 64 KB. A symlink is refused.
 - `version` must be `1`. `checks` is a list.
 - `name` is required. It is the label in the report.
 - `needs` is required. It is the text that tells the human what to do.
 - Each check has exactly one of `command` or `url`.
-- `command` is an argv list, never a shell string. It runs with the target repo as its working directory, stdin from `/dev/null`, and the caller's environment, so it can find its own config. Output is discarded.
-- `url` gets one HTTP GET. `expect_status` defaults to 200. The body is never read.
+- `command` is an argv list, never a shell string. It runs with the target repo as its working directory, stdin from `/dev/null`, and a scrubbed environment: `PATH` (absolute entries only), `HOME`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TMPDIR`, `TZ`, and `USER`, and nothing else. Tokens, keys, and `OP_*` variables in the caller's environment never reach the child. Output is discarded.
+- `command[0]` must be a tool on `PATH` or an absolute path. A path that points into the checkout (`./run.sh`, `bin/check`) is rejected.
+- A shell or wrapper is rejected as `command[0]`: `sh`, `bash`, `zsh`, `dash`, `env`, `xargs`, `nohup`, `timeout`, `sudo`, `find`, `awk`, and similar. An interpreter (`python`, `node`, `perl`, `ruby`, `php`) is rejected when an inline-code flag such as `-c`, `-e`, `-r`, or `--eval` comes before its script. `python3 check.py` and `python3 -m pytest` are fine.
+- `url` gets one HTTP GET. It must be `http` or `https` with a host and no user name or password. Redirects are not followed, so a 3xx is the answer. `expect_status` defaults to 200. The body is never read.
 - `timeout` is in seconds. Default 15, at most 120.
 - `severity` is `blocking` (the default) or `warning`.
 - A check passes on exit 0, or on the expected status. It fails on a nonzero exit, a timeout, a missing or non-executable binary, a connection error, or another status.
 - No file: these checks are skipped, with no message.
 - A file that is not valid JSON, has an unknown key, or does not match this format is one blocking item: `bad .conclave/preflight.json: <reason>`.
+
+### What this does not stop
+
+The deny list is defense in depth, not a jail. A declaration comes from the reviewed base commit, so the base's maintainers are trusted. A tool they name still runs in the target checkout, and the checkout may be on the PR branch. A tool that reads project files there (`bundle`, `make`, `npm`, `pytest`) can run PR code. Prefer checks that only probe (`pg_isready`, `bundle check`) and keep them off tools that execute the project.
+
+Preflight cannot tell a work repo from a personal one reliably and cheaply. It restricts the checks instead of guessing: URL checks are http(s) only and carry no credentials, so a work repo's declaration cannot send a token to a host. To skip URL checks, leave `url` out of the declaration.
+
+## Dry run
+
+`conclave.sh --dry-run` on a review runs preflight in plan mode (`scripts/preflight.py --plan`) after it prints the lineup. It runs the same checks and exits with the same code, but it writes the list under `tmp/council/<id>/preview/needs-human.md`, leaves any real `needs-human.md` alone, and fires no stage event. When a real launch would stop, the dry run prints the list, says `a real launch would stop here with exit 3`, and exits 3. Read the lineup above that line as the plan only when the dry run exits 0. `CONCLAVE_PREFLIGHT=0` skips the plan check too.
 
 ## What is never printed
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Usage: scripts/preflight.py --repo DIR --dir DIR [--pr N | --base REF --head REF] [--ballot ID] [--no-seats]
+# Usage: scripts/preflight.py --repo DIR --dir DIR [--pr N | --base REF --head REF] [--ballot ID] [--no-seats] [--plan]
 """Launch-time checks before any voter runs. One list of what the human must fix.
 
 Checks the review target, the seat-usage route, and the target repo's
@@ -10,7 +10,9 @@ not block. The list goes to stdout and to needs-human.md in the run dir.
 CONCLAVE_PREFLIGHT=0 skips every check. CONCLAVE_PREFLIGHT_DONE=1 means
 stack-run already ran the seat and repo checks, so only the target is checked.
 Command output, env values, headers, URL queries and credentials are never
-printed. See docs/preflight.md.
+printed. The repo's declared checks are read from the base commit with git
+show, never from the working tree, and run with a scrubbed environment.
+See docs/preflight.md.
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -39,6 +42,20 @@ GIT_TIMEOUT = 30
 CHECK_TIMEOUT = 15
 CHECK_TIMEOUT_MAX = 120
 DECLARATION = '.conclave/preflight.json'
+DECLARATION_MAX = 65536
+# Declared commands get these variables and nothing else. A token, a key, or a
+# 1Password variable in the caller's environment never reaches a child.
+ENV_ALLOW = ('PATH', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TMPDIR', 'TZ', 'USER')
+DEFAULT_PATH = '/usr/local/bin:/usr/bin:/bin'
+# A shell, or a tool that runs another command, is a way to run anything.
+WRAPPERS = frozenset((
+    'sh', 'bash', 'zsh', 'dash', 'ash', 'ksh', 'csh', 'tcsh', 'fish', 'busybox', 'env', 'xargs', 'nohup', 'nice',
+    'ionice', 'timeout', 'time', 'sudo', 'doas', 'su', 'runuser', 'exec', 'command', 'eval', 'stdbuf', 'setsid',
+    'chroot', 'watch', 'flock', 'unshare', 'nsenter', 'strace', 'parallel', 'find', 'awk', 'gawk', 'mawk', 'nawk'))
+# An interpreter may run a script or module. It may not run code from argv.
+INLINE_LETTERS = {'python': 'c', 'perl': 'eE', 'ruby': 'e', 'node': 'ep', 'nodejs': 'ep', 'php': 'r', 'lua': 'e',
+                  'pwsh': 'c', 'powershell': 'c', 'deno': '', 'bun': 'e', 'osascript': 'e'}
+INLINE_LONG = frozenset(('--eval', '--print', '--command', '-command', '-encodedcommand', '--execute', 'eval'))
 NEEDS_FILE = 'needs-human.md'
 CHECK_KEYS = {'name', 'command', 'url', 'expect_status', 'timeout', 'needs', 'severity'}
 
@@ -121,15 +138,24 @@ def seat_precheck(run=subprocess.run) -> tuple[str, str]:
     return precheck_verdict(proc.stdout)
 
 
-def check_seats(run=subprocess.run, waiting: bool = False) -> list[dict]:
+SEAT_OPTIONS = {
+    'conclave': ('Default: wait for the capped seat to reset (the reason says when), then rerun. '
+                 'Or pass --voters with seats that have quota. '
+                 'Or set CONCLAVE_PREFLIGHT=0 to skip preflight and run the old fixed default pair'),
+    'stack': ('Default: wait for the capped seat to reset (the reason says when), then rerun. '
+              'Or pass --wave-wait SECONDS, for example 1800, so the run waits for seats before the first wave. '
+              'Or set CONCLAVE_PREFLIGHT=0 to skip preflight; the per-wave pre-check still stops a capped wave'),
+}
+
+
+def check_seats(run=subprocess.run, waiting: bool = False, caller: str = 'conclave') -> list[dict]:
     """Seat items. waiting: the caller re-checks capped seats later, so blocked only warns."""
     status, message = seat_precheck(run)
     if status == 'blocked':
         if waiting:
             return [item('warning', f'seats capped: {message}',
                          'the run waits for seats (--wave-wait) before the first wave')]
-        return [item('blocking', f'seats capped: {message}',
-                     'wait for usage to reset, or pass --voters with seats that have quota')]
+        return [item('blocking', f'seats capped: {message}', SEAT_OPTIONS[caller])]
     if status == 'inconclusive':
         return [item('warning', f'seat check inconclusive: {message}',
                      'nothing; the run proceeds without a seat check')]
@@ -140,47 +166,70 @@ def check_seats(run=subprocess.run, waiting: bool = False) -> list[dict]:
 
 def check_pr(repo: str | Path, number: int | str) -> list[dict]:
     """The PR must resolve in repo. A closed or merged PR only warns."""
-    argv = ['gh', 'pr', 'view', str(number), '--json', 'number,state,url']
+    return view_pr(repo, number)[0]
+
+
+def view_pr(repo: str | Path, number: int | str) -> tuple[list[dict], str]:
+    """(items, base branch name or ''). A PR review reads the declaration from that base."""
+    argv = ['gh', 'pr', 'view', str(number), '--json', 'number,state,url,baseRefName']
     try:
         proc = subprocess.run(argv, cwd=str(repo), stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, timeout=GH_TIMEOUT)
     except FileNotFoundError:
-        return [item('blocking', f'PR #{number}: gh not found', 'install gh and run gh auth login')]
+        return [item('blocking', f'PR #{number}: gh not found', 'install gh and run gh auth login')], ''
     except OSError:
-        return [item('blocking', f'PR #{number}: gh could not run', 'check the gh install')]
+        return [item('blocking', f'PR #{number}: gh could not run', 'check the gh install')], ''
     except subprocess.TimeoutExpired:
         return [item('blocking', f'PR #{number}: gh pr view timed out after {GH_TIMEOUT}s',
-                     'check the network and gh auth status')]
+                     'check the network and gh auth status')], ''
     if proc.returncode:
         return [item('blocking', f'PR #{number} not found in {repo} (gh pr view exit {proc.returncode})',
-                     'check the PR number and --repo, and gh auth status')]
+                     'check the PR number and --repo, and gh auth status')], ''
     try:
         doc = json.loads(proc.stdout)
     except ValueError:
         doc = None
     if not isinstance(doc, dict):
-        return [item('blocking', f'PR #{number}: gh pr view returned no PR', 'check the PR number and --repo')]
+        return [item('blocking', f'PR #{number}: gh pr view returned no PR', 'check the PR number and --repo')], ''
+    base = doc.get('baseRefName')
+    base = base if isinstance(base, str) else ''
     state = str(doc.get('state') or '').upper()
     if state in ('CLOSED', 'MERGED'):
-        return [item('warning', f'PR #{number} is {state.lower()}', 'confirm a review of a closed PR is wanted')]
-    return []
+        return [item('warning', f'PR #{number} is {state.lower()}', 'confirm a review of a closed PR is wanted')], base
+    return [], base
+
+
+def pr_base_ref(repo: str | Path, name: str) -> str:
+    """origin/<name> when it resolves, else <name>, else ''. A PR's base is read from the freshest copy."""
+    for ref in (f'origin/{name}', name) if name and not name.startswith('-') else ():
+        if commit_of(repo, ref):
+            return ref
+    return ''
+
+
+def valid_ref(ref: str) -> bool:
+    return bool(ref) and not ref.startswith('-') and not any(c in ref for c in '\n\r\x00')
+
+
+def commit_of(repo: str | Path, ref: str) -> str:
+    """The commit sha ref names in repo, or ''."""
+    if not valid_ref(ref):
+        return ''
+    try:
+        proc = subprocess.run(['git', '-C', str(repo), 'rev-parse', '--verify', '--quiet', f'{ref}^{{commit}}'],
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return ''
+    return proc.stdout.strip() if proc.returncode == 0 else ''
 
 
 def check_refs(repo: str | Path, refs: list[str]) -> list[dict]:
     """Each ref must name a commit in repo."""
     found = []
     for ref in refs:
-        if not ref or ref.startswith('-') or any(c in ref for c in '\n\r\x00'):
+        if not valid_ref(ref):
             found.append(item('blocking', f'ref {ref!r} is not a valid ref', 'fix --base/--head'))
-            continue
-        try:
-            proc = subprocess.run(['git', '-C', str(repo), 'rev-parse', '--verify', '--quiet', f'{ref}^{{commit}}'],
-                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL, timeout=GIT_TIMEOUT)
-            ok = proc.returncode == 0
-        except (OSError, subprocess.TimeoutExpired):
-            ok = False
-        if not ok:
+        elif not commit_of(repo, ref):
             found.append(item('blocking', f'ref {ref} does not resolve to a commit in {repo}',
                               'fetch it (git fetch origin) or fix --base/--head'))
     return found
@@ -201,15 +250,70 @@ def safe_url(url: str) -> str:
     return urllib.parse.urlunsplit((parts.scheme, host + port, parts.path, '', ''))
 
 
-def load_declaration(repo: str | Path) -> tuple[list[dict] | None, str]:
-    """(checks, '') or (None, reason). A missing file is ([], '')."""
-    path = Path(repo) / DECLARATION
-    if not path.exists():
-        return [], ''
+def read_declaration(repo: str | Path, sha: str) -> str | None:
+    """The declaration as committed at sha, or None when that commit has none.
+
+    Only the object store is read, with git show. The working tree is never
+    opened, so an untracked file, an uncommitted edit, or the PR branch's own
+    copy cannot supply a command. Raises ValueError with a reason when the
+    path is not a regular file or cannot be read.
+    """
+    git = ['git', '-C', str(repo)]
     try:
-        doc = json.loads(path.read_text(encoding='utf-8'))
-    except (OSError, UnicodeDecodeError) as exc:
-        return None, f'cannot read it ({type(exc).__name__})'
+        tree = subprocess.run([*git, 'ls-tree', '-z', sha, '--', DECLARATION], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=GIT_TIMEOUT)
+        if tree.returncode:
+            raise ValueError('cannot read the base commit')
+        if not tree.stdout:
+            return None
+        mode = tree.stdout.split(' ', 1)[0]
+        if mode not in ('100644', '100755'):
+            raise ValueError('must be a regular file')
+        shown = subprocess.run([*git, 'show', '--no-textconv', f'{sha}:{DECLARATION}'], stdin=subprocess.DEVNULL,
+                               capture_output=True, timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        raise ValueError('cannot read the base commit') from None
+    if shown.returncode:
+        raise ValueError('cannot read the base commit')
+    if len(shown.stdout) > DECLARATION_MAX:
+        raise ValueError(f'larger than {DECLARATION_MAX} bytes')
+    try:
+        return shown.stdout.decode('utf-8')
+    except UnicodeDecodeError:
+        raise ValueError('not UTF-8') from None
+
+
+def wrapper_reason(command: list[str]) -> str:
+    """Why argv runs arbitrary code through a shell, a wrapper, or an interpreter's inline flag, else ''.
+
+    A deny list, not a jail: it stops the obvious ways to turn argv back into
+    a shell string. The declaration comes from the reviewed base commit.
+    """
+    name = os.path.basename(command[0]).lower()
+    name = re.sub(r'\.exe$', '', name)
+    name = re.sub(r'[\d.]+$', '', name) or name
+    if name in WRAPPERS:
+        return f'{name} is a shell or wrapper; name the tool itself'
+    letters = INLINE_LETTERS.get(name)
+    if letters is None:
+        return ''
+    if name == 'deno' and command[1:2] == ['eval']:
+        return 'deno eval runs code from argv'
+    for arg in command[1:]:
+        if not arg.startswith('-'):
+            break  # the script or module name; later flags are the script's own
+        flag = arg.lower()
+        if flag in INLINE_LONG or (flag.startswith('--') and flag.split('=', 1)[0] in INLINE_LONG):
+            return f'{name} {arg} runs code from argv'
+        if not arg.startswith('--') and any(c in letters for c in arg[1:]):
+            return f'{name} {arg} runs code from argv'
+    return ''
+
+
+def parse_declaration(text: str) -> tuple[list[dict] | None, str]:
+    """(checks, '') or (None, reason) for the declaration's text."""
+    try:
+        doc = json.loads(text)
     except ValueError as exc:
         return None, f'not valid JSON (line {getattr(exc, "lineno", "?")})'
     if not isinstance(doc, dict):
@@ -248,14 +352,25 @@ def load_declaration(repo: str | Path) -> tuple[list[dict] | None, str]:
         if command is not None and (not isinstance(command, list) or not command
                                     or not all(isinstance(a, str) and a for a in command)):
             return None, f'{where}: command must be a non-empty list of strings'
+        if command is not None:
+            if '/' in command[0] and not command[0].startswith('/'):
+                return None, f'{where}: command must be a tool on PATH or an absolute path, not a path in the checkout'
+            why = wrapper_reason(command)
+            if why:
+                return None, f'{where}: {why}'
         expect = row.get('expect_status', 200)
         if url is not None:
             try:
-                scheme = urllib.parse.urlsplit(url).scheme if isinstance(url, str) else ''
+                parts = urllib.parse.urlsplit(url) if isinstance(url, str) else None
+                bad_port = parts is not None and parts.port == 0
             except ValueError:
-                scheme = ''
-            if scheme not in ('http', 'https'):
+                parts, bad_port = None, False
+            if parts is None or parts.scheme not in ('http', 'https') or not parts.hostname:
                 return None, f'{where}: url must be an http or https URL'
+            if bad_port:
+                return None, f'{where}: url port is not valid'
+            if '@' in parts.netloc:
+                return None, f'{where}: url must not carry a user name or password'
             if type(expect) is not int or not 100 <= expect <= 599:
                 return None, f'{where}: expect_status must be an HTTP status code'
         elif 'expect_status' in row:
@@ -266,11 +381,28 @@ def load_declaration(repo: str | Path) -> tuple[list[dict] | None, str]:
     return checks, ''
 
 
+def scrubbed_env() -> dict[str, str]:
+    """The allowlisted variables and nothing else. PATH keeps only absolute entries, so the checkout cannot shadow a tool."""
+    env = {name: os.environ[name] for name in ENV_ALLOW if name in os.environ}
+    path = [p for p in env.get('PATH', '').split(os.pathsep) if p.startswith('/')]
+    env['PATH'] = os.pathsep.join(path) or DEFAULT_PATH
+    return env
+
+
+def load_declaration(repo: str | Path, sha: str) -> tuple[list[dict] | None, str]:
+    """(checks, '') or (None, reason). No declaration at sha is ([], '')."""
+    try:
+        text = read_declaration(repo, sha)
+    except ValueError as exc:
+        return None, str(exc)
+    return ([], '') if text is None else parse_declaration(text)
+
+
 def run_command(argv: list[str], cwd: str | Path, timeout: float) -> str:
-    """'' on exit 0, else a reason class. Output is discarded, never read."""
+    """'' on exit 0, else a reason class. Output is discarded, never read. The env is scrubbed."""
     try:
         proc = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, start_new_session=True)
+                                stderr=subprocess.DEVNULL, start_new_session=True, env=scrubbed_env())
     except FileNotFoundError:
         return 'not found'
     except PermissionError:
@@ -291,10 +423,18 @@ def run_command(argv: list[str], cwd: str | Path, timeout: float) -> str:
     return f'exit {rc}' if rc else ''
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is an answer (its 3xx status), not a request to somewhere the declaration did not name."""
+
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
 def fetch_status(url: str, expect: int, timeout: float) -> str:
-    """'' when GET url answers expect, else a reason class. The body is never read."""
+    """'' when GET url answers expect, else a reason class. The body is never read. Redirects are not followed."""
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, method='GET'), timeout=timeout) as resp:
+        with urllib.request.build_opener(NoRedirect).open(urllib.request.Request(url, method='GET'),
+                                                          timeout=timeout) as resp:
             status = resp.status
     except urllib.error.HTTPError as exc:
         status = exc.code
@@ -310,10 +450,21 @@ def fetch_status(url: str, expect: int, timeout: float) -> str:
     return '' if status == expect else f'status {status}, wanted {expect}'
 
 
-def check_declared(repo: str | Path) -> list[dict]:
-    checks, reason = load_declaration(repo)
+def check_declared(repo: str | Path, ref: str = '') -> list[dict]:
+    """Run the checks the commit at ref declares. No ref, no read: the working tree is never a source.
+
+    A repo that has the file in its working tree but no commit to read it from
+    gets one warning, so the skip is not silent.
+    """
+    sha = commit_of(repo, ref) if ref else ''
+    if not sha:
+        if (Path(repo) / DECLARATION).exists():
+            return [item('warning', f'{DECLARATION} was not read: no base commit to read it from',
+                         'review with --pr, or --base REF; the file is never read from the checkout')]
+        return []
+    checks, reason = load_declaration(repo, sha)
     if checks is None:
-        return [item('blocking', f'bad {DECLARATION}: {reason}', f'fix {DECLARATION} in {repo} (see docs/preflight.md)')]
+        return [item('blocking', f'bad {DECLARATION}: {reason}', f'fix {DECLARATION} on {ref} (see docs/preflight.md)')]
     found = []
     for check in checks:
         if check['command'] is not None:
@@ -339,8 +490,11 @@ def render(items: list[dict]) -> str:
     return '\n'.join(lines)
 
 
-def report(items: list[dict], dest: str | Path, context: dict | None = None) -> int:
-    """Print one list, write or clear needs-human.md, fire preflight_failed. 0 or BLOCKED."""
+def report(items: list[dict], dest: str | Path, context: dict | None = None, plan: bool = False) -> int:
+    """Print one list, write or clear needs-human.md, fire preflight_failed. 0 or BLOCKED.
+
+    plan: a dry run. The same list and the same exit code, but no stage event.
+    """
     dest = Path(dest)
     path = dest / NEEDS_FILE
     if not items:
@@ -354,6 +508,10 @@ def report(items: list[dict], dest: str | Path, context: dict | None = None) -> 
     blocking = sum(i['severity'] == 'blocking' for i in items)
     if not blocking:
         return 0
+    if plan:
+        print(f'preflight: a real launch would stop here with exit {BLOCKED} ({blocking} blocking). '
+              f'Nothing is launched in a dry run either. See {path}', file=sys.stderr)
+        return BLOCKED
     print(f'preflight: blocked ({blocking} blocking); nothing launched. See {path}', file=sys.stderr)
     stage_hook.emit('preflight_failed', {**(context or {}), 'dir': str(dest), 'needs_file': str(path),
                                          'blocking': blocking, 'warnings': len(items) - blocking}, dest)
@@ -369,20 +527,26 @@ def main(argv: list[str]) -> int:
     parser.add_argument('--base')
     parser.add_argument('--head')
     parser.add_argument('--no-seats', action='store_true', help='skip the seat check (--voters was given)')
+    parser.add_argument('--plan', action='store_true',
+                        help='dry run: the same checks and exit code, no stage event; --dir is the preview dir')
     args = parser.parse_args(argv)
     if not enabled():
         return 0
     items: list[dict] = []
+    declared_from = ''
     if args.pr:
-        items += check_pr(args.repo, args.pr)
+        found, base = view_pr(args.repo, args.pr)
+        items += found
+        declared_from = pr_base_ref(args.repo, base)
     if args.base:
         items += check_refs(args.repo, [args.base, args.head or 'HEAD'])
+        declared_from = args.base
     if not handed_off():
         if not args.no_seats:
             items += check_seats()
-        items += check_declared(args.repo)
+        items += check_declared(args.repo, declared_from)
     context = {'ballot': args.ballot} if args.ballot else {}
-    return report(items, args.dir, context)
+    return report(items, args.dir, context, plan=args.plan)
 
 
 if __name__ == '__main__':
