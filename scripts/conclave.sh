@@ -1387,6 +1387,7 @@ review_pr_load_facts() {
   # A Co-authored-by trailer names a model when its display name contains a
   # known family. The mailbox does not. Co-authored-by: Cursor
   # <cursoragent@cursor.com> has no family in the display name, so it does not.
+  # scripts/trailer_vendor.py owns that table.
   # gh pr view --json author has is_bot. This gh omits type; a present type
   # must be User. is_bot false with type absent or User is a human author.
   local num json parsed vendor human key
@@ -1418,39 +1419,12 @@ review_pr_load_facts() {
     REVIEW_PR_FACT_SKIP="$key"
     return 1
   }
-  parsed="$(REVIEW_PR_JSON="$json" python3 - <<'PY'
-import json, os, re, sys
+  parsed="$(REVIEW_PR_JSON="$json" python3 - "$ROOT/scripts" <<'PY'
+import json, os, sys
+sys.path.insert(0, sys.argv[1])
+from trailer_vendor import vendor_from_commits
 doc = json.loads(os.environ["REVIEW_PR_JSON"])
-families = (
-    ("wonder-full", "meta"),
-    ("fable", "anthropic"),
-    ("opus", "anthropic"),
-    ("astra", "openai"),
-    ("grok", "xai"),
-    ("muse", "meta"),
-    ("argon", "google"),
-    ("wonder", "meta"),
-)
-trailer = re.compile(r"(?im)^[ \t]*co-authored-by:[ \t]*(.+)$")
-vendors = set()
-for commit in doc.get("commits") or []:
-    if not isinstance(commit, dict):
-        continue
-    text = (commit.get("messageHeadline") or "") + "\n" + (commit.get("messageBody") or "")
-    for match in trailer.finditer(text):
-        line = match.group(1).strip()
-        name = line.split("<", 1)[0].strip().lower()
-        if name in ("cursor", "cursor agent"):
-            continue
-        for fam, vendor in families:
-            if re.search(r"(?<![a-z0-9])" + re.escape(fam) + r"(?![a-z0-9])", name):
-                vendors.add(vendor)
-if len(vendors) == 1:
-    vendor = next(iter(vendors))
-elif vendors:
-    vendor = "ambiguous"
-else:
-    vendor = ""
+vendor = vendor_from_commits(doc)
 author = doc.get("author") if isinstance(doc.get("author"), dict) else {}
 human = "no"
 if author.get("is_bot") is False:

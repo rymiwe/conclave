@@ -19,6 +19,9 @@ cat > "$T/bin/gh" <<'G'
 #!/usr/bin/env bash
 echo "gh $*" >> "$FAKE_GH_LOG"
 case "$1 $2 $*" in
+  "pr view "*"--json commits"*) [ -n "${FAKE_COMMITS_FAIL:-}" ] && { echo "HTTP 401" >&2; exit 1; }
+    # A default inside ${var:-...} swallows the JSON's closing brace.
+    if [ -n "${FAKE_COMMITS+x}" ]; then printf '%s\n' "$FAKE_COMMITS"; else printf '%s\n' '{"commits":[]}'; fi ;;
   "pr view "*"--json labels"*) [ -n "${FAKE_GH_LABELS_FAIL:-}" ] && { echo "HTTP 401" >&2; exit 1; }
     printf '{"labels":[%s]}\n' "${FAKE_LABELS:-}";;
   "pr view "*) echo "Title: t"; echo; echo "body";;
@@ -95,8 +98,9 @@ export FAKE_GH_LOG="$T/gh.log" FAKE_STDIN="$T/reviewer.stdin" FAKE_REPLY="$T/rep
 export FAKE_RUN_LOG="$T/run.log" FAKE_SU_LOG="$T/su.log" FAKE_PROMPT_ARG="$T/prompt.arg"
 # The contract: top-level runner is the argv list, the same list on reviewers[0].runner.
 route() { # $1 family, $2 vendor, $3 model, $4 runner argv as a JSON list, $5 skipped JSON list
-  printf '[{"role": "review", "mode": "default", "runner": %s, "reason": "ranked", "reviewers": [{"family": "%s", "vendor": "%s", "model": "%s", "runner": %s}], "skipped": %s}]' \
-    "$4" "$1" "$2" "$3" "$4" "${5:-[]}"
+  # builder_vendor is the caller's vendor (BUILDER, default xai), recorded for merge.
+  printf '[{"role": "review", "mode": "default", "builder_vendor": "%s", "runner": %s, "reason": "ranked", "reviewers": [{"family": "%s", "vendor": "%s", "model": "%s", "runner": %s}], "skipped": %s}]' \
+    "${BUILDER:-xai}" "$4" "$1" "$2" "$3" "$4" "${5:-[]}"
 }
 ROUTE_ARGON="$(route argon google gemini-4-argon-high '["agy","--model","gemini-4-argon-high"]')"
 export FAKE_ROUTE="$ROUTE_ARGON"
@@ -110,7 +114,7 @@ PR=https://github.com/o/r/pull/1
 run() { # $1 case name, reply text in $2; leaves $T/$1/{review,merge}.out
   local d="$T/$1"; mkdir -p "$d"; printf '%s\n' "$2" > "$FAKE_REPLY"; : > "$FAKE_GH_LOG"
   : > "$FAKE_RUN_LOG"; : > "$FAKE_SU_LOG"; : > "$FAKE_STDIN"; : > "$FAKE_PROMPT_ARG"
-  "$ROOT/scripts/merge-gate.sh" review "$R" main feat "$PR" "$d/out" xai > "$d/review.out" 2>&1; review_rc=$?
+  "$ROOT/scripts/merge-gate.sh" review "$R" main feat "$PR" "$d/out" "${BUILDER:-xai}" > "$d/review.out" 2>&1; review_rc=$?
   "$ROOT/scripts/merge-gate.sh" merge "$PR" "$d/out" > "$d/merge.out" 2>&1; merge_rc=$?
   merge_out="$(cat "$d/merge.out")"; gh_log="$(cat "$FAKE_GH_LOG")"
   review_out="$(cat "$d/review.out")"; su_log="$(cat "$FAKE_SU_LOG")"
@@ -136,13 +140,20 @@ has "pass: agy runs sandboxed" "$agy_log" "--sandbox"
 has "pass: review names the reviewer and runner" "$review_out" "merge-gate: reviewer gemini-4-argon-high on agy"
 hasnt "pass: log does not say --runner agy" "$review_out" "--runner agy"
 has "pass: route output kept" "$(cat "$T/pass/out/gate-route.json")" '"runner": ["agy","--model","gemini-4-argon-high"]'
+has "pass: route records the builder vendor" "$(cat "$T/pass/out/gate-route.json")" '"builder_vendor": "xai"'
+has "pass: no trailer notes the caller" "$review_out" "merge-gate: note: no model trailer on the PR commits; builder vendor xai is the caller's"
+hasnt "pass: merge prints no vendor reason" "$merge_out" "recorded reviewer vendor"
+hasnt "pass: merge prints no missing route" "$merge_out" "gate-route.json"
 
 # The router decides; when it asks, fails, or gives no launch argv, refuse
 # before any reviewer runs. Each refusal also clears the earlier verdict, so
 # merge refuses too.
 refused() { # $1 case, $2 expected text
+  local body
+  # A no-trailer note may precede a later refusal. The refusal itself stays one line.
+  body=$(printf '%s\n' "$review_out" | grep -v '^merge-gate: note: ' || true)
   [ "$review_rc" = 3 ] && ok "$1: review rc 3" || bad "$1: review rc $review_rc"
-  [ "$(printf '%s\n' "$review_out" | wc -l)" = 1 ] && ok "$1: one-line message" || bad "$1: not one line: $review_out"
+  [ "$(printf '%s\n' "$body" | wc -l)" = 1 ] && ok "$1: one-line message" || bad "$1: not one line: $review_out"
   has "$1: reason" "$review_out" "$2"
   [ -z "$run_log" ] && ok "$1: no reviewer launched" || bad "$1: reviewer launched: $run_log"
   [ "$merge_rc" = 3 ] && ok "$1: merge refuses" || bad "$1: merge rc $merge_rc"
@@ -197,7 +208,8 @@ has "codex: model from -m" "$run_log" "codex exec -m gpt-6-astra "
 hasnt "codex: not codex review" "$run_log" "codex review"
 has "codex: prompt on stdin carries the diff" "$(cat "$FAKE_STDIN")" '+b'
 has "codex: prompt has the one_way line" "$(cat "$FAKE_STDIN")" 'exactly `one_way: yes` or `one_way: no`'
-FAKE_ROUTE="$(route grok xai grok-4.7-xhigh-fast '["cursor-agent","--model","grok-4.7-xhigh-fast"]')" run cursor "$ANSWER"
+# Reviewer vendor is xai. A same-vendor route is refused, so this builder is anthropic.
+BUILDER=anthropic FAKE_ROUTE="$(BUILDER=anthropic route grok xai grok-4.7-xhigh-fast '["cursor-agent","--model","grok-4.7-xhigh-fast"]')" run cursor "$ANSWER"
 passes cursor cursor-agent
 has "cursor: sandbox enabled" "$run_log" "--sandbox enabled"
 hasnt "cursor: no --force" "$run_log" "--force"
@@ -212,7 +224,8 @@ FAKE_ROUTE="$(route fable anthropic fable '["cursor-agent","--model","fable"]')"
   run cursorfable "$ANSWER"
 passes cursorfable cursor-agent
 has "cursor fable: resolved to the newest id" "$run_log" "--model claude-fable-9-thinking-xhigh"
-FAKE_ROUTE="$(route grok xai grok '["cursor-agent","--model","grok"]')" \
+# Reviewer vendor is xai, so this builder is anthropic.
+BUILDER=anthropic FAKE_ROUTE="$(BUILDER=anthropic route grok xai grok '["cursor-agent","--model","grok"]')" \
   FAKE_CURSOR_MODELS=$'grok-4.7-xhigh\ngrok-4.7-xhigh-fast\ngrok-4.6-xhigh-fast\ngrok-4.7-high-fast' \
   run cursorgrok "$ANSWER"
 passes cursorgrok cursor-agent
@@ -356,5 +369,145 @@ python3 "$ROOT/scripts/merge_gate.py" cursor-result "$T/mismatch.jsonl" "$T/mism
 { asst "$C1"; asst "$C2"; jq -cn '{type:"result",is_error:true,result:"boom"}'; } > "$T/err.jsonl"
 python3 "$ROOT/scripts/merge_gate.py" cursor-result "$T/err.jsonl" "$T/err.md" > /dev/null 2>&1; rc=$?
 [ "$rc" = 1 ] && ok "error result with assistant text is no answer" || bad "error result rc $rc"
+
+# Builder vendor is checked against commit trailers before seat-usage, and
+# merge re-checks the vendors recorded on gate-route.json.
+GROK_COMMITS='{"commits":[{"messageHeadline":"c","messageBody":"Co-authored-by: Grok <a@b>\n"}]}'
+OPUS_COMMITS='{"commits":[{"messageHeadline":"c","messageBody":"Co-authored-by: Opus 4 <a@b>\n"}]}'
+SEVERAL_COMMITS='{"commits":[{"messageHeadline":"a","messageBody":"Co-authored-by: Grok <a@b>\n"},{"messageHeadline":"b","messageBody":"Co-authored-by: Opus 4 <c@d>\n"}]}'
+
+mkdir -p "$T/mismatch/out"; echo stale > "$T/mismatch/out/gate.md"
+FAKE_COMMITS="$OPUS_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" run mismatch "$ANSWER"
+refused "mismatch" "merge-gate: refused: builder vendor xai does not match the PR commit trailers (anthropic)"
+[ -z "$su_log" ] && ok "mismatch: seat-usage not called" || bad "mismatch: seat-usage ran: $su_log"
+has "mismatch: commits were read" "$gh_log" "--json commits"
+hasnt "mismatch: no note" "$review_out" "merge-gate: note:"
+[ ! -e "$T/mismatch/out/gate.md" ] && ok "mismatch: earlier verdict removed" || bad "mismatch: gate.md remains"
+
+FAKE_COMMITS="$GROK_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" run match "$ANSWER"
+[ "$review_rc" = 0 ] && ok "match: review rc 0" || bad "match: review rc $review_rc"
+[ "$merge_rc" = 0 ] && ok "match: merge rc 0" || bad "match: merge rc $merge_rc"
+has "match: gh pr merge" "$gh_log" "gh pr merge $PR --squash --match-head-commit $HEAD_SHA"
+has "match: seat-usage got xai" "$su_log" "--builder-vendor xai"
+hasnt "match: no note" "$review_out" "merge-gate: note:"
+hasnt "match: merge prints no vendor reason" "$merge_out" "recorded reviewer vendor"
+
+FAKE_COMMITS="$SEVERAL_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" run several "$ANSWER"
+refused "several" "merge-gate: refused: the PR commit trailers name several vendors (anthropic, xai), so no single builder vendor can be verified"
+[ -z "$su_log" ] && ok "several: seat-usage not called" || bad "several: seat-usage ran: $su_log"
+hasnt "several: no note" "$review_out" "merge-gate: note:"
+
+FAKE_COMMITS='{"commits":[]}' BUILDER=anthropic \
+  FAKE_ROUTE="$(BUILDER=anthropic route argon google gemini-4-argon-high '["agy","--model","gemini-4-argon-high"]')" \
+  run notrailer "$ANSWER"
+[ "$review_rc" = 0 ] && ok "no trailer: review rc 0" || bad "no trailer: review rc $review_rc"
+[ "$merge_rc" = 0 ] && ok "no trailer: merge rc 0" || bad "no trailer: merge rc $merge_rc"
+has "no trailer: note names the caller" "$review_out" "merge-gate: note: no model trailer on the PR commits; builder vendor anthropic is the caller's"
+has "no trailer: seat-usage got the caller" "$su_log" "--builder-vendor anthropic"
+has "no trailer: gh pr merge" "$gh_log" "pr merge"
+hasnt "no trailer: merge prints no vendor reason" "$merge_out" "recorded reviewer vendor"
+
+FAKE_COMMITS="$GROK_COMMITS" BUILDER=grok FAKE_ROUTE="$ROUTE_ARGON" run grokalias "$ANSWER"
+[ "$review_rc" = 0 ] && ok "grok alias: review rc 0" || bad "grok alias: review rc $review_rc"
+[ "$merge_rc" = 0 ] && ok "grok alias: merge rc 0" || bad "grok alias: merge rc $merge_rc"
+has "grok alias: seat-usage got xai" "$su_log" "--builder-vendor xai"
+hasnt "grok alias: seat-usage did not get grok" "$su_log" "--builder-vendor grok"
+hasnt "grok alias: no note" "$review_out" "merge-gate: note:"
+has "grok alias: gh pr merge" "$gh_log" "pr merge"
+
+FAKE_COMMITS_FAIL=1 FAKE_ROUTE="$ROUTE_ARGON" run commitsfail "$ANSWER"
+refused "commits read failed" "merge-gate: refused: could not read the PR commits for $PR"
+[ -z "$su_log" ] && ok "commits read failed: seat-usage not called" || bad "commits read failed: seat-usage ran: $su_log"
+hasnt "commits read failed: no note" "$review_out" "merge-gate: note:"
+[ -z "$run_log" ] && ok "commits read failed: no reviewer" || bad "commits read failed: reviewer launched"
+
+FAKE_COMMITS="$GROK_COMMITS" \
+  FAKE_ROUTE="$(route grok xai grok-4.7-xhigh '["cursor-agent","--model","grok-4.7-xhigh"]')" \
+  run samevendor "$ANSWER"
+refused "same vendor" "merge-gate: refused: the recorded reviewer vendor xai is the builder's vendor xai (gate-route.json)"
+[ -n "$su_log" ] && ok "same vendor: seat-usage ran" || bad "same vendor: seat-usage did not run"
+hasnt "same vendor: no note" "$review_out" "merge-gate: note:"
+[ -z "$run_log" ] && ok "same vendor: no reviewer" || bad "same vendor: reviewer launched: $run_log"
+
+merge_saved() { # $1 name, dir already prepared
+  : > "$FAKE_GH_LOG"
+  "$ROOT/scripts/merge-gate.sh" merge "$PR" "$T/$1" > "$T/$1.merge" 2>&1
+  vmerge_rc=$?
+  vmerge_out=$(cat "$T/$1.merge")
+  vgh=$(cat "$FAKE_GH_LOG")
+  [ "$vmerge_rc" = 3 ] && ok "$1: merge rc 3" || bad "$1: merge rc $vmerge_rc"
+  hasnt "$1: no gh pr merge" "$vgh" "pr merge"
+}
+rm -rf "$T/route-equal"; cp -a "$T/pass/out" "$T/route-equal"
+python3 - "$T/route-equal/gate-route.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+data = json.load(open(p))
+data[0]["builder_vendor"] = "grok"
+data[0]["reviewers"][0]["vendor"] = "xai"
+json.dump(data, open(p, "w"))
+PY
+merge_saved route-equal
+has "route-equal: same vendor" "$vmerge_out" "reason: the recorded reviewer vendor xai is the builder's vendor xai (gate-route.json)"
+has "route-equal: nothing merged" "$vmerge_out" "Nothing was merged."
+hasnt "route-equal: verdict still stands" "$vmerge_out" "no gate answer"
+
+rm -rf "$T/route-missing"; cp -a "$T/pass/out" "$T/route-missing"
+rm "$T/route-missing/gate-route.json"
+merge_saved route-missing
+has "route-missing: names the file" "$vmerge_out" "reason: no gate-route.json at"
+hasnt "route-missing: verdict still stands" "$vmerge_out" "no gate answer"
+
+rm -rf "$T/route-nobuilder"; cp -a "$T/pass/out" "$T/route-nobuilder"
+python3 - "$T/route-nobuilder/gate-route.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+data = json.load(open(p))
+del data[0]["builder_vendor"]
+json.dump(data, open(p, "w"))
+PY
+merge_saved route-nobuilder
+has "route-nobuilder: missing builder" "$vmerge_out" "reason: no recorded builder vendor (gate-route.json)"
+hasnt "route-nobuilder: reviewer was recorded" "$vmerge_out" "no recorded reviewer vendor"
+
+rm -rf "$T/route-bad"; cp -a "$T/pass/out" "$T/route-bad"
+printf '{\n' > "$T/route-bad/gate-route.json"
+merge_saved route-bad
+has "route-bad: unreadable" "$vmerge_out" "reason: gate-route.json is unreadable"
+
+python3 - "$ROOT/scripts" <<'PY' || fail=1
+import sys
+sys.path.insert(0, sys.argv[1])
+from trailer_vendor import normalize_vendor, vendor_from_commits
+
+def doc(*bodies):
+    return {"commits": [{"messageHeadline": "h", "messageBody": b} for b in bodies]}
+
+fail = 0
+def check(name, got, want):
+    global fail
+    if got != want:
+        print(f"FAIL {name}: got {got!r} want {want!r}")
+        fail = 1
+    else:
+        print(f"ok {name}")
+
+check("one grok", vendor_from_commits(doc("Co-authored-by: Grok <a@b>\n")), "xai")
+check("several", vendor_from_commits(doc(
+    "Co-authored-by: Grok <a@b>\n",
+    "Co-authored-by: Opus <c@d>\n")), "ambiguous")
+check("one line two vendors", vendor_from_commits(doc(
+    "Co-authored-by: Opus and Grok <a@b>\n")), "ambiguous")
+check("none", vendor_from_commits(doc("just a fix\n")), "")
+check("cursor only", vendor_from_commits(doc(
+    "Co-authored-by: Cursor <cursoragent@cursor.com>\n")), "")
+check("opus 4", vendor_from_commits(doc("Co-authored-by: Opus 4 <a@b>\n")), "anthropic")
+check("opus4 is not a family", vendor_from_commits(doc("Co-authored-by: opus4 <a@b>\n")), "")
+check("myopus is not a family", vendor_from_commits(doc("Co-authored-by: myopus <a@b>\n")), "")
+check("case", vendor_from_commits(doc("Co-Authored-By: FABLE <a@b>\n")), "anthropic")
+check("normalize grok", normalize_vendor("Grok"), "xai")
+check("normalize xai", normalize_vendor("XAI"), "xai")
+sys.exit(fail)
+PY
 
 exit "$fail"
