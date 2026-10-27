@@ -15,7 +15,7 @@ Every check runs, even when an earlier one fails, so the list is complete. Each 
 
 **Review target.**
 
-- `--pr N`: `gh pr view N` must succeed in the target repo. A PR that does not resolve is blocking. A closed or merged PR is a warning.
+- `--pr N`: `gh pr view N` must succeed in the target repo. A PR that does not resolve is blocking. A closed or merged PR is a warning. A `--repo` that is not a directory is blocking and named as such (`--repo <path> is not a directory`); `gh not found` means only that `gh` is not installed.
 - `--base` and `--head`: each ref must resolve with `git rev-parse --verify <ref>^{commit}` in the target repo. A ref that does not resolve is blocking. `--head` defaults to `HEAD`.
 - `--whole` has no target to check.
 - stack-run checks every PR it was given (`--pr`, or each of `--prs`) with `gh pr view`. It then walks the stack. When the whole-stack ballot will run, it reads the top head oid, fetches `pull/<n>/head`, and checks the two refs that ballot passes: `origin/<bottom base>` and the top head oid. Per-PR ballots pass `--pr`, so their `conclave.sh` checks the PR again and fetches its refs itself.

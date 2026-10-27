@@ -903,6 +903,35 @@ def test_plan_dry_run(tmp: Path) -> None:
         c.close()
 
 
+def test_missing_repo_dir(tmp: Path) -> None:
+    """A --repo that is not a directory is named as such, not blamed on gh. A missing gh keeps its own message."""
+    bin_dir = tmp / 'repo-dir-bin'
+    write_exe(bin_dir / 'gh', GH)
+    env = base_env(bin_dir, CONCLAVE_WAVE_PRECHECK='0')
+    missing = tmp / 'no-such-repo-dir'
+    dest = tmp / 'repo-dir-out'
+    got = preflight_cli(env, missing, dest, '--pr', '2')
+    detail = f'{got.returncode} stdout={got.stdout!r} stderr={got.stderr[-300:]!r}'
+    check(got.returncode == preflight.BLOCKED and f'--repo {missing} is not a directory' in got.stdout
+          and 'gh not found' not in got.stdout,
+          f'repo dir: a missing --repo directory is reported with its path, not as gh not found ({detail})')
+
+
+def test_missing_gh(tmp: Path) -> None:
+    """A truly missing gh, with a --repo that exists, still says gh is missing."""
+    repo = make_repo(tmp / 'repo-dir-ok')
+    no_gh = tmp / 'repo-dir-no-gh'
+    no_gh.mkdir()
+    saved = os.environ.get('PATH')
+    try:
+        os.environ['PATH'] = str(no_gh)
+        found = preflight.check_pr(repo, 2)
+    finally:
+        os.environ['PATH'] = saved or ''
+    check(len(found) == 1 and found[0]['what'] == 'PR #2: gh not found' and 'is not a directory' not in found[0]['what'],
+          f'repo dir: a truly missing gh keeps its own message ({found!r})')
+
+
 def main() -> None:
     (ROOT / 'tmp').mkdir(exist_ok=True)
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Status)
@@ -925,6 +954,8 @@ def main() -> None:
             test_post_plan_ready(tmp)
             test_plan_cli(tmp)
             test_plan_dry_run(tmp)
+            test_missing_repo_dir(tmp)
+            test_missing_gh(tmp)
     finally:
         server.shutdown()
     print('ok')

@@ -168,7 +168,14 @@ def check_seats(run=subprocess.run, waiting: bool = False, caller: str = 'concla
 # Review targets.
 
 def check_pr(repo: str | Path, number: int | str) -> list[dict]:
-    """The PR must resolve in repo. A closed or merged PR only warns."""
+    """The PR must resolve in repo. A closed or merged PR only warns.
+
+    A missing repo directory is named as such: subprocess raises the same
+    FileNotFoundError for a missing cwd as for a missing gh.
+    """
+    if not Path(repo).is_dir():
+        return [item('blocking', f'PR #{number}: --repo {repo} is not a directory',
+                     'pass --repo with the path of the target repo checkout')]
     argv = ['gh', 'pr', 'view', str(number), '--json', 'number,state,url']
     try:
         proc = subprocess.run(argv, cwd=str(repo), stdin=subprocess.DEVNULL, capture_output=True,
