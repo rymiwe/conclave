@@ -2130,6 +2130,12 @@ review_collect_grok_report() {
   if [ -n "$stated" ] && [ -f "$stated" ]; then
     case "$stated" in
       "$legtmp"/*)
+        # The voter controls both the stated path and the leg TMPDIR, so a '..'
+        # or a symlink could pull an outside file into the ballot and its comment.
+        if ! review_resolves_inside "$legtmp" "$stated"; then
+          echo "grok: stated report path resolves outside the leg TMPDIR; refused" >"$DIR/voter-grok.fail"
+          return 1
+        fi
         cp -- "$stated" "$dest"
         return 0
         ;;
@@ -2210,12 +2216,12 @@ review_run_grok_native() {
   if [ -s "$DIR/voter-grok-report.md" ]; then
     return 0
   fi
+  why="$(cat "$DIR/voter-grok.fail" 2>/dev/null || true)"
+  why="${why#grok: }"
   if [ -n "$resumed" ]; then
-    why="$(cat "$DIR/voter-grok.fail" 2>/dev/null || true)"
-    why="${why#grok: }"
     echo "grok: $resumed, no report${why:+ ($why)}" >"$DIR/voter-grok.fail"
   elif [ "$ec" -ne 0 ]; then
-    echo "grok: exit $ec and no report" >"$DIR/voter-grok.fail"
+    echo "grok: exit $ec and no report${why:+ ($why)}" >"$DIR/voter-grok.fail"
   else
     [ -f "$DIR/voter-grok.fail" ] || echo "grok: no report collected" >"$DIR/voter-grok.fail"
   fi
