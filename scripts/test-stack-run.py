@@ -71,6 +71,8 @@ def row(n):
             'baseRefName': 'main' if n == 1 else f'branch-{1 if os.environ.get("BRANCHED") else n-1}',
             'isCrossRepository': False, 'headRepositoryOwner': {'login': 'test'},
             'headRefOid': os.environ.get('TOP_OID', 'a' * 40)}
+if args[:2] == ['pr', 'view'] and args[2] == os.environ.get('MISSING_PR'):
+    sys.exit('no pull requests found')
 if args[:2] == ['repo', 'view']:
     data = {'defaultBranchRef': {'name': 'main'}}
 elif args[:2] == ['pr', 'view']:
@@ -91,7 +93,7 @@ COUNCIL = '''\
 #!/usr/bin/env python3
 import json, os, pathlib, sys
 args = sys.argv[1:]
-with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['council', args, os.environ.get('COUNCIL_CHAIR_MODEL'), os.environ.get('CONCLAVE_CHAIR')])+'\\n')
+with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['council', args, os.environ.get('COUNCIL_CHAIR_MODEL'), os.environ.get('CONCLAVE_CHAIR'), os.environ.get('CONCLAVE_PREFLIGHT_DONE')])+'\\n')
 d = pathlib.Path(os.environ['FIXTURE_ROOT'])/'tmp/council'/args[0]
 d.mkdir(parents=True, exist_ok=True)
 if '--dry-run' in args:
@@ -229,7 +231,8 @@ class Fixture:
         self.repo.mkdir(parents=True)
         scripts = self.root / 'scripts'
         scripts.mkdir(parents=True)
-        for name in ('stack-run.py', 'review-stack.py', 'conclave_env.py', 'review-kind.sh', 'lineup.py'):
+        for name in ('stack-run.py', 'review-stack.py', 'conclave_env.py', 'review-kind.sh', 'lineup.py',
+                     'preflight.py', 'stage_hook.py'):
             shutil.copyfile(SCRIPTS / name, scripts / name)
         self.bin = self.base / 'bin'
         write_exe(self.bin / 'gh', GH)
@@ -249,7 +252,8 @@ class Fixture:
                         COUNCIL_CURSOR_AGENT=str(self.bin / 'cursor-agent'),
                         COUNCIL_SEAT_USAGE=str(self.bin / 'seat-usage'),
                         COUNCIL_SEAT_JSON=str(self.seat), TMPDIR=str(self.temp))
-        for name in ('CHAIR', 'WAVE_CAP', 'WAVE_PRECHECK', 'WAVE_POLL'):
+        for name in ('CHAIR', 'WAVE_CAP', 'WAVE_PRECHECK', 'WAVE_POLL', 'PREFLIGHT', 'PREFLIGHT_DONE',
+                     'STAGE_HOOK', 'STAGE_HOOK_TIMEOUT'):
             self.env.pop(f'CONCLAVE_{name}', None)
             self.env.pop(f'COUNCIL_{name}', None)
 
@@ -298,6 +302,8 @@ class Fixture:
         self.git('commit','-m','fixture')
         oid = self.git('rev-parse','HEAD')
         self.git('update-ref','refs/pull/3/head', oid)
+        # The whole-stack ballot passes --base origin/main; preflight checks that it resolves.
+        self.git('update-ref','refs/remotes/origin/main', oid)
         self.git('remote','add','origin',str(self.repo))
         (self.repo / '.env').write_text('private local env\n')
         (self.repo / 'config').mkdir()
@@ -1347,6 +1353,10 @@ def seat_route(f: Fixture, *answers: str) -> None:
     seq = f.base / 'seat-seq.txt'
     seq.write_text('\n'.join(answers) + '\n')
     f.env['SEAT_SEQ'] = str(seq)
+    # These fixtures test the per-wave gate: its answer order, polling and records.
+    # Preflight would take the first answer and stop a capped run before any wave.
+    # test_preflight_stack covers preflight's own seat check.
+    f.env['CONCLAVE_PREFLIGHT'] = '0'
 
 
 def most_at_once(calls: list) -> int:
@@ -1752,6 +1762,145 @@ def test_rolling_cap_after_inconclusive_precheck(mod) -> None:
     check(err.getvalue().count('launching anyway') == 3 and [w['precheck'] for w in r.record['waves']] == ['inconclusive'] * 3,
           f'inconclusive cap: a launched ballot keeps the warning and the inconclusive record ({err.getvalue()!r})')
 
+HOOK = '''\
+#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['HOOK_LOG'], 'a') as f:
+    f.write(json.dumps({'argv': sys.argv[1:], 'event': os.environ.get('CONCLAVE_STAGE_EVENT'),
+                        'payload': os.environ.get('CONCLAVE_STAGE_PAYLOAD')}) + '\\n')
+'''
+
+
+def arm_hook(f: Fixture) -> Path:
+    """Point CONCLAVE_STAGE_HOOK at a stub that records argv and env. Returns its log."""
+    write_exe(f.bin / 'hook', HOOK)
+    log = f.base / 'hook.jsonl'
+    f.env.update(CONCLAVE_STAGE_HOOK=f"{f.bin / 'hook'} --from-test", HOOK_LOG=str(log))
+    return log
+
+
+def hook_calls(log: Path) -> list[dict]:
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def test_preflight_stack(tmp: Path, mod) -> None:
+    def needs(f: Fixture) -> Path:
+        return f.root / 'tmp/council/stack/needs-human.md'
+
+    # (1) A PR gh cannot find stops the run before any chair or ballot.
+    f = Fixture(tmp, 'preflight-missing-pr')
+    log = arm_hook(f)
+    f.env['MISSING_PR'] = '2'
+    got = f.invoke(*PER_PR)
+    text = needs(f).read_text() if needs(f).is_file() else ''
+    check(got.returncode == 3 and not f.calls(),
+          f'preflight stack-run: a missing PR exits 3 before any chair or ballot ({got.returncode} {got.stderr.strip()})')
+    check('## Blocking\n\n1. PR #2 not found' in text and text in got.stdout,
+          f'preflight stack-run: needs-human.md names the PR and matches stdout ({text!r})')
+    events = hook_calls(log)
+    payload = json.loads(events[0]['payload']) if events else {}
+    check([e['event'] for e in events] == ['preflight_failed']
+          and events[0]['argv'][:2] == ['--from-test', 'preflight_failed']
+          and json.loads(events[0]['argv'][2]) == payload,
+          f'preflight stack-run: preflight_failed fires once, event and payload as the last two args ({events})')
+    check(payload.get('stack_id') == 'stack' and payload.get('blocking') == 1
+          and payload.get('needs_file') == str(needs(f)) and payload.get('dir') == str(needs(f).parent),
+          f'preflight stack-run: preflight_failed payload has stack_id, dir, needs_file, blocking ({payload})')
+
+    # (1) The whole-stack base ref does not resolve.
+    f = Fixture(tmp, 'preflight-bad-ref')
+    f.reconcile_repo()
+    f.git('update-ref', '-d', 'refs/remotes/origin/main')
+    got = f.invoke()
+    text = needs(f).read_text() if needs(f).is_file() else ''
+    check(got.returncode == 3 and not f.calls() and 'ref origin/main does not resolve' in text,
+          f'preflight stack-run: an unresolvable whole-stack base exits 3 before any chair ({got.returncode} {text!r})')
+
+    # CONCLAVE_PREFLIGHT=0 skips it: the old stack-walk failure, no list.
+    f = Fixture(tmp, 'preflight-off')
+    f.env.update(MISSING_PR='2', CONCLAVE_PREFLIGHT='0')
+    got = f.invoke(*PER_PR)
+    check(got.returncode == 1 and not f.calls() and not needs(f).exists() and 'Needs from human' not in got.stdout,
+          f'preflight stack-run: CONCLAVE_PREFLIGHT=0 skips every check ({got.returncode} {got.stdout.strip()})')
+    f = Fixture(tmp, 'preflight-off-flag')
+    f.env['CONCLAVE_PREFLIGHT'] = '0'
+    check(f.invoke(*PER_PR, '--prs', '1').returncode == 0
+          and all(c[4] is None for c in f.calls() if c[0] == 'council'),
+          'preflight stack-run: with preflight off, phase 1 gets no CONCLAVE_PREFLIGHT_DONE')
+
+    # (8) holistic_done and wave_done; the handoff flag reaches phase 1 only.
+    f = Fixture(tmp, 'preflight-events')
+    f.reconcile_repo()
+    log = arm_hook(f)
+    got = f.invoke('--no-reconcile')
+    events = hook_calls(log)
+    payloads = [json.loads(e['payload']) for e in events]
+    check(got.returncode == 0 and [e['event'] for e in events] == ['holistic_done', 'wave_done', 'wave_done'],
+          f'preflight stack-run: holistic_done once, then wave_done per per-PR wave ({[e["event"] for e in events]} {got.stderr.strip()})')
+    check(payloads and payloads[0].get('ballot') == 'p-stack-stack' and payloads[0].get('outcome') == 'ok',
+          f'preflight stack-run: holistic_done payload names the ballot and outcome ({payloads[:1]})')
+    check([p.get('wave') for p in payloads[1:]] == [2, 3] and payloads[1].get('ballots') == ['p-1', 'p-2']
+          and payloads[1].get('outcomes') == ['ok', 'ok'] and payloads[2].get('ballots') == ['p-3'],
+          f'preflight stack-run: wave_done payload has wave, ballots, outcomes ({payloads[1:]})')
+    check(all(p.get('stack_id') == 'stack' and p.get('dir') == str(f.root / 'tmp/council/stack')
+              and p.get('event') == e['event'] == e['argv'][1] and str(p.get('ts', '')).endswith('Z')
+              for p, e in zip(payloads, events)),
+          'preflight stack-run: every payload has event, ts, stack_id, dir')
+    check(all('test-chair' not in e['payload']
+              and not mod.FORBIDDEN.search(prompt_outside_repo(e['payload'], str(ROOT), str(f.root))) for e in events),
+          'preflight stack-run: payloads carry no model or vendor names')
+    launches = [c for c in f.calls() if c[0] == 'council' and '--findings' not in c[1]]
+    findings = [c for c in f.calls() if c[0] == 'council' and '--findings' in c[1]]
+    check(launches and all(c[4] == '1' for c in launches) and findings and all(c[4] is None for c in findings),
+          'preflight stack-run: phase 1 conclave.sh sees CONCLAVE_PREFLIGHT_DONE=1; the chair --findings call does not')
+
+    # (9) Capped seats block at minute 0 with the same route call the wave gate makes.
+    f = Fixture(tmp, 'preflight-seats')
+    seat_route(f, SEAT_ASK)
+    f.env.pop('CONCLAVE_PREFLIGHT')
+    got = f.invoke(*PER_PR)
+    text = needs(f).read_text() if needs(f).is_file() else ''
+    check(got.returncode == 3 and not any(c[0] in ('council', 'cursor') for c in f.calls())
+          and 'seats capped' in text and 'every pool capped' in text and 'astra:capped' in text,
+          f'preflight stack-run: a capped seat route blocks before any chair ({got.returncode} {text!r})')
+    check([c[1] for c in f.calls() if c[0] == 'seat'] == [['--route', 'lineup', '--json', '--kind', 'review']],
+          'preflight stack-run: one seat-usage call, the same route the wave gate asks')
+    f = Fixture(tmp, 'preflight-seats-wait')
+    seat_route(f, SEAT_ASK)
+    f.env.pop('CONCLAVE_PREFLIGHT')
+    f.env['CONCLAVE_WAVE_POLL'] = '0.1'
+    got = f.invoke(*PER_PR, '--prs', '1', '--wave-wait', '1')
+    check(got.returncode == 1 and 'the run waits for seats' in got.stdout
+          and f.record()['waves'][0]['precheck'] == 'blocked',
+          f'preflight stack-run: with --wave-wait capped seats only warn and the wave gate waits ({got.returncode} {got.stdout.strip()})')
+    f = Fixture(tmp, 'preflight-seats-inconclusive')
+    got = f.invoke(*PER_PR, '--prs', '1')
+    check(got.returncode == 0 and 'seat check inconclusive' in got.stdout and '## Blocking\n\n(none)' in got.stdout,
+          f'preflight stack-run: an inconclusive seat check only warns ({got.returncode} {got.stdout.strip()})')
+
+    # stalled fires on a chair timeout.
+    f = Fixture(tmp, 'preflight-stalled')
+    log = arm_hook(f)
+    f.env['TIMEOUT_PR'] = '-1'
+    got = f.invoke(*PER_PR, '--prs', '1', '--chair-timeout', '1')
+    events = hook_calls(log)
+    stalled = [json.loads(e['payload']) for e in events if e['event'] == 'stalled']
+    waves = [json.loads(e['payload']) for e in events if e['event'] == 'wave_done']
+    check(got.returncode == 1 and len(stalled) == 1 and stalled[0].get('ballot') == 'p-1'
+          and stalled[0].get('step') == 'chair_a' and stalled[0].get('seconds') == 1,
+          f'preflight stack-run: stalled fires once on a chair timeout with ballot, step, seconds ({stalled})')
+    check(len(waves) == 1 and waves[0].get('outcomes') == ['failed'] and 'timeout' not in json.dumps(waves),
+          f'preflight stack-run: wave_done reports the failed outcome class, not the error text ({waves})')
+
+    # (6) A missing hook leaves the run's exit code alone and logs to stage-hook.log.
+    f = Fixture(tmp, 'preflight-hook-missing')
+    f.env['CONCLAVE_STAGE_HOOK'] = str(f.base / 'no-such-hook')
+    got = f.invoke(*PER_PR, '--prs', '1')
+    hook_log = f.root / 'tmp/council/stack/stage-hook.log'
+    check(got.returncode == 0 and hook_log.is_file() and 'wave_done failed: not found' in hook_log.read_text()
+          and 'stage-hook: wave_done failed: not found' in got.stderr,
+          f'preflight stack-run: a missing hook is logged and the run still exits 0 ({got.returncode} {got.stderr.strip()})')
+
 
 def test_stale_head(tmp: Path) -> None:
     """f2: the whole-stack head is the fetched PR oid, not origin/<branch>."""
@@ -1994,6 +2143,7 @@ def main() -> None:
         test_max_cap_rolling(tmp, mod)
         test_rolling_cap_closes_queue(mod)
         test_rolling_cap_after_inconclusive_precheck(mod)
+        test_preflight_stack(tmp, mod)
         test_stale_head(tmp)
         test_stack_ballot_name(tmp)
         test_detach(tmp)

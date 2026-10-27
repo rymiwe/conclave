@@ -131,6 +131,18 @@ that disagrees with it stops the run. A `branch:` header must equal the PR's
 head branch, and a `pr:` URL must be the PR `gh` finds in `--repo`. A PR or
 ref-pair diff over 300 files stops too; set `CONCLAVE_REVIEW_MAX_FILES` to go on.
 
+### Preflight
+
+Before any leg launches, a real review run checks the target (`gh pr view`, or
+`git rev-parse` on `--base` and `--head`), the seat-usage route, and the
+target repo's optional `.conclave/preflight.json`. All blocking items and
+warnings go into one list, on stdout and in `needs-human.md` in the ballot
+directory. Anything blocking exits 3 before a leg starts. `--dry-run` runs no
+preflight. `CONCLAVE_PREFLIGHT=0` skips it. stack-run runs it once up front
+and sets `CONCLAVE_PREFLIGHT_DONE=1` for its phase 1 calls, which then check
+only their target. `CONCLAVE_STAGE_HOOK` runs a command on stage events. See
+[`docs/preflight.md`](preflight.md).
+
 Phase 1 proves every worktree's `write-tree` equals the head tree, then checks
 the diff shape. For a PR the insertion and deletion counts must match
 `gh pr view` additions and deletions. A mismatch is the wrong base; the script
@@ -711,6 +723,8 @@ When the pre-check blocks, no new ballot starts. Ballots already running finish;
 `run.json` keeps a `waves` list. Each entry is now one launch, not one batch: a number, the ballot it gated, the pre-check result (`ok`, `blocked`, `inconclusive`, `skipped`, `not needed`, or `not started` when a usage limit stopped the launch after the pre-check), and the message. `run.md` shows the same list. The flag and setting names keep the word wave.
 
 `CONCLAVE_WAVE_PRECHECK=0` skips the pre-check. It is for tests and for an escape when the route is wrong. `CONCLAVE_WAVE_POLL` sets the seconds between checks; tests use it.
+
+Preflight runs once before wave 1 with the same route call, so capped seats stop the run at minute 0 with exit 3. With `--wave-wait`, capped seats are only a preflight warning and the first wave waits as above. Each per-PR wave fires the `wave_done` stage event, the whole-stack wave fires `holistic_done`, and a chair timeout fires `stalled`. See [`docs/preflight.md`](preflight.md).
 
 ### Per ballot
 

@@ -204,5 +204,6 @@ Each command moves `tmp/council/<id>/` to its next state.
 
 - [`docs/routing.md`](docs/routing.md) — roles, pools, and the routing still being built.
 - [`docs/review.md`](docs/review.md) — review phases, from lineup through the findings gate.
+- [`docs/preflight.md`](docs/preflight.md) — launch checks before any voter, the needs-from-human list, and stage hooks.
 - [`docs/executor-setup.md`](docs/executor-setup.md) — vendor CLIs, logins, and the Jev key on a new executor.
 - [`AGENTS.md`](AGENTS.md) — who may judge, who may build, and how another repo calls this one.
