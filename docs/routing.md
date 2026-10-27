@@ -178,9 +178,12 @@ One script. `kind` decides what voters see and what they return.
 
 Ask mode is not a kind: one prompt to each named voter, no ballot (`docs/review.md`, "Ask mode"). It calls `seat-usage --route ask` for a plain question and records the effort each leg ran. Jev picks that effort's lean. It does not rank the answers.
 
-A PR stack is one review ballot per PR, bottom up, then one reconciliation
-pass at the stack top: `scripts/stack-run.py` (`docs/review.md`, "Stack
-review"). Each ballot gets its own chair, so no chair carries the whole stack.
+A PR stack is one whole-stack review ballot first, then one review ballot
+per PR, bottom up, in waves of at most two, then one reconciliation pass at
+the stack top: `scripts/stack-run.py` (`docs/review.md`, "Stack review").
+Each per-PR brief lists the whole-stack findings so reviewers do not report
+them again. Before each wave, a `seat-usage` check must show two voters, or
+the wave and every later one wait or stop. Each ballot gets its own chair.
 The runner starts the Claude seat on Opus when `seat-usage` shows the weekly
 Fable slice at or above 95%. After a Fable leg on the Claude subscription hits a usage limit, later
 ballots in that stack stay on Cursor Fable.

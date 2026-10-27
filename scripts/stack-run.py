@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # Usage: scripts/stack-run.py --repo DIR --pr N --stack-id ID [--prs N,N,...]
-"""Run resumable per-PR review ballots, reconcile findings at the stack top, then one whole-stack ballot.
+"""Run one whole-stack ballot, then resumable per-PR review ballots in capped waves, then reconcile findings at the stack top.
 
 Only chairs write review prose. The runner records each step, validates their
 receipts, and folds stack verdicts into existing decisions without posting.
+Each wave starts only after a seat-usage pre-check passes.
 Fable at or above 95% weekly usage starts on Opus. An observed Fable overflow still moves later ballots to Cursor.
 """
 from __future__ import annotations
@@ -31,7 +32,8 @@ ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-from conclave_env import publish, setting  # noqa: E402
+from conclave_env import setting  # noqa: E402
+import lineup  # noqa: E402
 # Prompts name where the word list lives instead of carrying the words.
 WORDS = (f"the vendor and family words matched by review_forbidden_word in "
          f"{ROOT / 'scripts/review-kind.sh'} (read that one line)")
@@ -58,6 +60,76 @@ BLOCK = re.compile(r'^(\S+) — \*\*what breaks', re.M)
 LIMIT = re.compile(r'usage limit|limit reached|hit your .*limit|session limit|weekly limit|requires usage credits|out of extra usage', re.I)
 BLOCKED = 'phase 1 recorded errors in errors.md; fix them, then remove blind/ or rerun conclave.sh'
 MAX_CAPPED = 'not started; the Claude subscription is at a usage limit (coverage leg)'
+SEAT_TIMEOUT = 25
+
+
+def wave_cap(args: argparse.Namespace) -> tuple[int, str]:
+    """Ballots per wave and where that number came from.
+
+    --wave-cap, then the deprecated --jobs, then CONCLAVE_WAVE_CAP, then 2.
+    """
+    if args.wave_cap is not None:
+        return args.wave_cap, '--wave-cap'
+    if args.jobs is not None:
+        return args.jobs, '--jobs'
+    raw = setting('WAVE_CAP')
+    if raw is None or raw == '':
+        return 2, 'default'
+    if raw.strip() not in ('1', '2', '3'):
+        raise RuntimeError(f'CONCLAVE_WAVE_CAP must be 1, 2, or 3, not {raw!r}')
+    return int(raw), 'CONCLAVE_WAVE_CAP'
+
+
+def route_detail(raw: str) -> str:
+    """The route's reason and skipped codes, as ' (...)', or ''."""
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return ''
+    if isinstance(doc, list):
+        doc = doc[0] if doc else {}
+    if not isinstance(doc, dict):
+        return ''
+    parts = []
+    reason = doc.get('reason') or doc.get('why')
+    if reason:
+        parts.append(str(reason))
+    codes = [f"{item.get('family') or '-'}:{item['code']}" for item in doc.get('skipped') or []
+             if isinstance(item, dict) and item.get('code')]
+    if codes:
+        parts.append('skipped ' + ', '.join(codes))
+    return f" ({'; '.join(parts)})" if parts else ''
+
+
+def precheck_verdict(raw: str) -> tuple[str, str]:
+    """Judge one seat-usage --route lineup answer: ok, blocked, or inconclusive.
+
+    Empty output is inconclusive, as it is for conclave.sh. Other unreadable
+    output is blocked.
+    """
+    if not raw.strip():
+        return 'inconclusive', 'seat-usage printed nothing'
+    lines = lineup.parse(raw).splitlines()
+    status = lines[0] if lines else 'bad'
+    detail = route_detail(raw)
+    if status in ('ok', 'downgrade'):
+        voters = [v for v in (lines[1] if len(lines) > 1 else '').split(',') if v]
+        if len(set(voters)) >= 2:
+            return 'ok', 'voters ' + ','.join(voters) + detail
+        return 'blocked', f"fewer than 2 voters ({','.join(voters) or 'none'}){detail}"
+    if status == 'ask':
+        return 'blocked', f'seat-usage asked for a human{detail}'
+    return 'blocked', f'seat-usage returned no usable lineup{detail}'
+
+
+def stack_findings_prompt(whole: Path) -> str:
+    """Round A text that hands a per-PR chair the whole-stack findings."""
+    return (f"The whole stack was already reviewed. Read {whole / 'judgment.md'} and {whole / 'decide.md'}: "
+            'those findings are already reported at stack level. '
+            'Add a section ## Already reported at stack level (do not re-report) to the brief. '
+            'List each of those findings on one line: id, file:line, and the defect. '
+            'Tell reviewers not to report them again unless this PR adds a distinct defect. '
+            'Those files name the models that ran; copy no model name from them. ')
 
 
 def read(path: Path) -> str:
@@ -492,9 +564,19 @@ class Runner:
         self.deferred_signal: int | None = None
         self.sticky = False
         self.max_capped = False
+        self.cap, self.cap_source = wave_cap(args)
+        poll = setting('WAVE_POLL', '60')
+        try:
+            self.poll = float(poll)
+        except ValueError:
+            self.poll = -1.0
+        if not math.isfinite(self.poll) or self.poll <= 0:
+            raise RuntimeError(f'CONCLAVE_WAVE_POLL must be a positive number of seconds, not {poll!r}')
+        # The finished whole-stack ballot whose findings per-PR round A reads.
+        self.whole_ready: Path | None = None
         self.previous = json.loads(read(self.dest / 'run.json') or '{}')
         self.record: dict = {'prs': self.previous.get('prs', []), 'reconcile': 'pending', 'context': 'pending',
-                             'whole_stack': 'pending',
+                             'whole_stack': 'pending', 'wave_cap': self.cap, 'waves': [],
                              'POSTED?': list(dict.fromkeys(self.previous.get('POSTED?', [])))}
         self.model = args.chair_model
         self.detach_step = ''
@@ -612,7 +694,12 @@ class Runner:
             status = self.record.get('whole_stack', 'pending')
             hits = whole.get('POSTED?') or []
             posted = f"; POSTED?: {', '.join(hits)}" if hits else ''
-            lines.append(f"\nWhole stack{(' ' + ballot) if ballot else ''}: {status}{posted}\n")
+            lines.append(f"\nWhole stack{(' ' + ballot) if ballot else ''}: {status}{posted}")
+            lines.append(f"\nWave cap: {self.record.get('wave_cap', self.cap)}")
+            for wave in self.record.get('waves', []):
+                lines.append(f"- wave {wave['wave']} ({', '.join(wave['ballots'])}): "
+                             f"pre-check {wave['precheck']}; {wave['message']}")
+            lines.append('')
             (self.dest / 'run.md').write_text('\n'.join(lines), encoding='utf-8')
             self.note_first_step()
 
@@ -728,6 +815,12 @@ class Runner:
         """Bottom PR base as origin/<branch>, top PR head as the GitHub oid."""
         return origin_ref(str(prs[0].get('base', ''))), self.top_head_oid(prs)
 
+    def target_env(self, row: dict) -> dict[str, str]:
+        """The chair model id for the whole-stack ballot's conclave.sh calls only."""
+        if not row.get('target') or not self.model:
+            return {}
+        return {'CONCLAVE_CHAIR_MODEL': self.model, 'COUNCIL_CHAIR_MODEL': self.model}
+
     def chair(self, label: str, prompt: str, workspace: Path, row: dict,
               step: str, resume: str | None = None) -> str | None:
         args = [self.cursor, '-p', '--model', self.model, '--output-format', 'stream-json', '-f', '--trust',
@@ -741,7 +834,7 @@ class Runner:
         # Chair marker on this subprocess only. Do not publish it on the runner:
         # phase 1 and the runner's other children must not receive it from here.
         # CONCLAVE_CHAIR_MODEL is the model id, not this marker.
-        chair_env = os.environ.copy()
+        chair_env = dict(os.environ, **self.target_env(row))
         chair_env['CONCLAVE_CHAIR'] = '1'
         try:
             with log.open('w') as out, log.with_suffix('.err').open('w') as err:
@@ -804,7 +897,8 @@ class Runner:
                 'a finding that the design lets code skip CI, auth, or validation is still reported); ## Specification (ticket and shared context); '
                 '## In / out of scope (in: files this PR changes; out: code later PRs add; never review against the stack top). '
                 'Include relevant ticket and domain facts, not a blind paste of the context. '
-                f'Do not use these words anywhere in the brief, {WORDS}. The script rejects a brief that contains one. '
+                + (stack_findings_prompt(self.whole_ready) if self.whole_ready else '')
+                + f'Do not use these words anywhere in the brief, {WORDS}. The script rejects a brief that contains one. '
                 + NO_SHALLOW)
 
     def ballot_run(self, row: dict) -> None:
@@ -842,8 +936,9 @@ class Runner:
                 start = time.monotonic()
                 try:
                     with (self.logs / f"{row['ballot']}-phase1.out").open('w') as out, (self.logs / f"{row['ballot']}-phase1.err").open('w') as err:
+                        env = dict(os.environ, **self.target_env(row))
                         for args in self.phase_commands(row['ballot'], row['pr'], flags, row.get('target')):
-                            rc = self.process(args, cwd=self.repo, stdout=out, stderr=err).returncode
+                            rc = self.process(args, cwd=self.repo, stdout=out, stderr=err, env=env).returncode
                             if rc:
                                 raise RuntimeError(f'phase 1 exit {rc}: {shlex.join(args)}')
                 finally:
@@ -995,7 +1090,9 @@ class Runner:
 
     def run(self) -> int:
         prs = self.stack()
-        self.sticky = any(read(self.ballot(pr['number']) / 'voter-claude.via').strip() == 'cursor' for pr in prs)
+        whole_name = self.whole_ballot_name()
+        names = [self.ballot(pr['number']).name for pr in prs] + [whole_name]
+        self.sticky = any(read(ROOT / 'tmp/council' / name / 'voter-claude.via').strip() == 'cursor' for name in names)
         previous_hits: dict[int, list[str]] = {}
         for row in self.previous.get('prs', []):
             previous_hits.setdefault(row['pr'], []).extend(row.get('POSTED?', []))
@@ -1007,22 +1104,27 @@ class Runner:
                 'claude_flags': [], 'fable_weekly_percent': None,
                 'POSTED?': list(dict.fromkeys(previous_hits.get(pr['number'], [])))})
         self.record['prs'] = rows
+        # Reconcile no longer gates the whole-stack ballot, so --no-reconcile keeps it.
+        whole = not self.args.no_whole_stack and not self.args.reconcile_only
         if self.args.dry_run:
             flags, _ = self.flags(refresh=False)
             lines = []
+            if not self.args.reconcile_only:
+                lines.append(f'wave cap: {self.cap} ({self.cap_source})')
+                for number, wave in enumerate(self.wave_plan(whole), 1):
+                    lines.append(f"wave {number}: {', '.join(wave)}")
+            if whole:
+                base, head = self.stack_refs(prs)
+                target = ['--base', base, '--head', head]
+                status = state(ROOT / 'tmp/council' / whole_name)
+                steps = self.preview_steps(whole_name, status, prs[-1]['number'], flags, target)
+                lines.append(f"{whole_name}: {status}; steps: {'; '.join(steps) or 'none'}; "
+                             f"base: {base}; head: {head}; claude flags: {json.dumps(flags)}")
             for row in self.record['prs']:
                 steps = [] if self.args.reconcile_only else self.preview_steps(row['ballot'], row['state'], row['pr'], flags)
                 lines.append(f"{row['ballot']}: {row['state']}; steps: {'; '.join(steps) or 'none'}; claude flags: {json.dumps(flags)}")
             if not self.args.no_reconcile:
                 lines.append('After ballots: reconcile stack top')
-            if not self.args.no_whole_stack and not self.args.no_reconcile and not self.args.reconcile_only:
-                base, head = self.stack_refs(prs)
-                name = self.whole_ballot_name()
-                target = ['--base', base, '--head', head]
-                status = state(ROOT / 'tmp/council' / name)
-                steps = self.preview_steps(name, status, prs[-1]['number'], flags, target)
-                lines.append(f"{name}: {status}; steps: {'; '.join(steps) or 'none'}; "
-                             f"base: {base}; head: {head}; claude flags: {json.dumps(flags)}")
             text = '\n'.join(lines) + '\n'
             (self.dest / 'dry-run.md').write_text(text, encoding='utf-8')
             print(text, end='')
@@ -1053,15 +1155,20 @@ class Runner:
                 raise RuntimeError('context.md missing, empty, or contains a forbidden word')
             self.record['context'] = 'ready'
             self.save()
-            # Submit in stack order, at most two at once. A completed wave's
-            # overflow is sticky before the next wave starts.
-            with ThreadPoolExecutor(max_workers=self.args.jobs) as pool:
-                rows = self.record['prs']
-                for i in range(0, len(rows), self.args.jobs):
-                    futures = [pool.submit(self.ballot_run, row) for row in rows[i:i + self.args.jobs]]
-                    for future in futures:
-                        future.result()
-        if self.max_capped:
+            # The whole-stack ballot is wave 1 and finishes before any per-PR ballot.
+            if whole:
+                stop = self.whole_stack_wave(prs)
+            else:
+                self.record['whole_stack'] = 'skipped'
+                stop = ''
+            if not stop:
+                stop = self.per_pr_waves()
+        else:
+            self.record['whole_stack'] = 'skipped'
+            stop = ''
+        if stop:
+            self.record['reconcile'] = stop
+        elif self.max_capped:
             self.record['reconcile'] = f'failed: {MAX_CAPPED}'
         elif self.args.no_reconcile:
             self.record['reconcile'] = 'skipped'
@@ -1073,39 +1180,126 @@ class Runner:
                 self.record['reconcile'] = 'ok'
             except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
                 self.record['reconcile'] = f'failed: {exc}'
-        self.finish_whole_stack(prs)
         self.save()
-        whole = str(self.record.get('whole_stack', ''))
+        whole_status = str(self.record.get('whole_stack', ''))
         return int(any(r['outcome'].startswith('failed:') for r in self.record['prs'])
-                   or self.record['reconcile'].startswith('failed:') or whole.startswith('failed:'))
+                   or self.record['reconcile'].startswith('failed:') or whole_status.startswith('failed:'))
 
-    def finish_whole_stack(self, prs: list[dict]) -> None:
-        """One combined-diff ballot after a successful reconcile. Same launcher as a PR."""
-        if self.args.no_whole_stack or self.args.no_reconcile or self.args.reconcile_only:
-            self.record['whole_stack'] = 'skipped'
-            return
-        if self.record.get('reconcile') != 'ok':
-            self.record['whole_stack'] = 'not started'
-            return
-        base, head = self.stack_refs(prs)
-        self.fetch_top_head(prs, head)
+    def wave_plan(self, whole: bool) -> list[list[str]]:
+        """Ballot ids per wave: the whole-stack ballot alone, then per-PR ballots bottom up."""
+        rows = self.record['prs']
+        plan = [[self.whole_ballot_name()]] if whole else []
+        return plan + [[r['ballot'] for r in rows[i:i + self.cap]] for i in range(0, len(rows), self.cap)]
+
+    def precheck(self) -> tuple[str, str]:
+        """Ask the route conclave.sh seats from. A missing or failing binary is inconclusive."""
+        if setting('WAVE_PRECHECK', '1') == '0':
+            return 'skipped', 'CONCLAVE_WAVE_PRECHECK=0'
+        seat_cli = os.path.expanduser(setting('SEAT_USAGE', '~/.local/bin/seat-usage'))
+        try:
+            proc = self.process([seat_cli, '--route', 'lineup', '--json', '--kind', 'review'],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                timeout=SEAT_TIMEOUT)
+        except OSError as exc:
+            return 'inconclusive', f'seat-usage did not run: {exc.strerror or exc}'
+        except subprocess.TimeoutExpired:
+            return 'inconclusive', f'seat-usage timed out after {SEAT_TIMEOUT}s'
+        if proc.returncode:
+            return 'inconclusive', f'seat-usage exited {proc.returncode}'
+        return precheck_verdict(proc.stdout)
+
+    def wave_gate(self, rows: list[dict]) -> tuple[bool, str]:
+        """Record the next wave and pre-check it. False means do not launch it."""
+        number = len(self.record['waves']) + 1
+        names = [r['ballot'] for r in rows]
+        entry = {'wave': number, 'ballots': names, 'precheck': 'pending', 'message': ''}
+        self.record['waves'].append(entry)
+        # Only a ballot with no blind reports yet (new, needs legs) starts voters.
+        # The rest are finished, blocked, or chair-only, and spend no seat.
+        if self.max_capped or all(r['state'] not in ('new', 'needs legs') for r in rows):
+            status, message = 'not needed', 'no voters to launch'
+        else:
+            deadline = time.monotonic() + self.args.wave_wait
+            while True:
+                status, message = self.precheck()
+                left = deadline - time.monotonic()
+                if status != 'blocked' or left <= 0:
+                    break
+                print(f'stack-run: wave {number} seats capped ({message}); '
+                      f'checking again in {min(self.poll, left):.0f}s', file=sys.stderr)
+                time.sleep(min(self.poll, left))
+        entry.update(precheck=status, message=message)
+        self.save()
+        if status == 'inconclusive':
+            print(f'stack-run: warning: wave {number} pre-check inconclusive ({message}); launching anyway',
+                  file=sys.stderr)
+        elif status == 'blocked':
+            print(f"stack-run: wave {number} ({', '.join(names)}) not launched: seats capped ({message}); "
+                  'rerun the same command to resume', file=sys.stderr)
+        return status != 'blocked', message
+
+    def not_started(self, rows: list[dict], outcome: str) -> None:
+        """Close per-PR rows that will not run. A finished ballot stays reusable."""
+        for row in rows:
+            row['outcome'] = 'reused' if row['state'] == 'done' else outcome
+        self.save()
+
+    def whole_failed(self, outcome: str) -> str:
+        self.record['whole_stack'] = outcome
+        why = outcome.removeprefix('failed: ')
+        self.not_started(self.record['prs'],
+                         f'failed: not started; whole-stack ballot failed ({why}); rerun to resume, '
+                         'or pass --no-whole-stack to review per PR without it')
+        print(f'stack-run: whole-stack ballot failed ({why}); no per-PR ballot started and reconcile skipped; '
+              'rerun to resume, or pass --no-whole-stack', file=sys.stderr)
+        return 'failed: not started; whole-stack ballot failed'
+
+    def whole_stack_wave(self, prs: list[dict]) -> str:
+        """Run the combined-diff ballot to completion. Return why nothing else may start, or ''."""
         name = self.whole_ballot_name()
         ballot = ROOT / 'tmp/council' / name
-        if ballot == self.dest:
-            raise RuntimeError('--stack-id must differ from the whole-stack ballot id')
+        self.record['whole_stack'] = 'running'
+        self.save()
+        try:
+            base, head = self.stack_refs(prs)
+            self.fetch_top_head(prs, head)
+        except (OSError, ValueError, KeyError, RuntimeError) as exc:
+            return self.whole_failed(f'failed: {exc}')
         previous = self.previous.get('whole_stack_row') or {}
         row = {'pr': prs[-1]['number'], 'ballot': name, 'state': state(ballot), 'outcome': 'pending',
                'step': 'pending', 'chair_a_seconds': 0, 'chair_b_seconds': 0, 'phase1_seconds': 0,
                'claude_flags': [], 'fable_weekly_percent': None,
                'POSTED?': list(dict.fromkeys(previous.get('POSTED?', []))),
                'target': ['--base', base, '--head', head]}
-        self.record['whole_stack'] = 'running'
         self.record['whole_stack_row'] = row
-        self.save()
-        if self.model:
-            publish('CHAIR_MODEL', self.model)
+        launch, message = self.wave_gate([row])
+        if not launch:
+            self.record['whole_stack'] = f'failed: not started; seats capped ({message})'
+            self.not_started(self.record['prs'], f'failed: not started; seats capped ({message})')
+            return 'failed: not started; seats capped'
         self.ballot_run(row)
         self.record['whole_stack'] = row['outcome']
+        if row['outcome'] in ('ok', 'reused') and state(ballot) == 'done':
+            self.whole_ready = ballot
+            return ''
+        outcome = row['outcome']
+        return self.whole_failed(outcome if outcome.startswith('failed:') else f'failed: {outcome}')
+
+    def per_pr_waves(self) -> str:
+        """Per-PR ballots bottom up, at most self.cap at once. Return why the rest stopped, or ''."""
+        rows = self.record['prs']
+        # A wave finishes before the next starts, so an overflow seen in one
+        # wave is sticky for every later wave.
+        with ThreadPoolExecutor(max_workers=self.cap) as pool:
+            for i in range(0, len(rows), self.cap):
+                wave = rows[i:i + self.cap]
+                launch, message = self.wave_gate(wave)
+                if not launch:
+                    self.not_started(rows[i:], f'failed: not started; seats capped ({message})')
+                    return 'failed: not started; seats capped'
+                for future in [pool.submit(self.ballot_run, row) for row in wave]:
+                    future.result()
+        return ''
 
 
 def detach(args: argparse.Namespace) -> int:
@@ -1168,7 +1362,12 @@ def main() -> int:
     parser.add_argument('--prs')
     parser.add_argument('--context')
     parser.add_argument('--ticket')
-    parser.add_argument('--jobs', type=int, choices=(1, 2), default=1)
+    parser.add_argument('--wave-cap', type=int, choices=(1, 2, 3),
+                        help='Per-PR ballots per wave. Default: CONCLAVE_WAVE_CAP, else 2')
+    parser.add_argument('--jobs', type=int, choices=(1, 2),
+                        help='Deprecated alias for --wave-cap')
+    parser.add_argument('--wave-wait', type=int, default=0,
+                        help='Seconds to keep re-checking a capped wave before stopping. Default 0')
     parser.add_argument('--chair-model')
     parser.add_argument('--chair-timeout', type=int, default=3600)
     parser.add_argument('--dry-run', action='store_true')
@@ -1176,12 +1375,14 @@ def main() -> int:
     group.add_argument('--reconcile-only', action='store_true')
     group.add_argument('--no-reconcile', action='store_true')
     parser.add_argument('--no-whole-stack', action='store_true',
-                        help='Skip the whole-stack ballot after reconcile')
+                        help='Skip the whole-stack ballot that runs before the per-PR ballots')
     parser.add_argument('--detach', action='store_true',
                         help='Re-exec under setsid and nohup, then return after the first ballot step starts')
     args = parser.parse_args()
     if args.pr <= 0 or args.chair_timeout <= 0:
         parser.error('--pr and --chair-timeout must be positive')
+    if args.wave_wait < 0:
+        parser.error('--wave-wait must be zero or more seconds')
     if args.detach:
         return detach(args)
     runner = None
