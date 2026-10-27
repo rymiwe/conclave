@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# merge-gate.sh review + merge against a temp repo with stubbed gh and agy
-# (no network, no quota): a normal diff passes and gh pr merge runs; one_way:
+# merge-gate.sh review + merge against a temp repo with stubbed gh, seat-usage
+# and every reviewer binary (no network, no quota): the gate runs the reviewer
+# seat-usage names, read-only; a normal diff passes and gh pr merge runs; one_way:
 # yes, a one-way label, a missing or garbled verdict, and unreadable labels
 # are refused; prose that only mentions one_way is not a verdict.
 set -u
@@ -25,11 +26,47 @@ case "$1 $2 $*" in
   *) echo "unexpected gh $*" >&2; exit 9;;
 esac
 G
+# Every reviewer stub logs "<name> <argv>" to $FAKE_RUN_LOG (a multi-line
+# argument, the prompt, is logged as PROMPT) and answers with $FAKE_REPLY.
+cat > "$T/bin/logargv" <<'L'
+#!/usr/bin/env bash
+line=$1; shift
+for a in "$@"; do case "$a" in *$'\n'*) a=PROMPT;; esac; line="$line $a"; done
+printf '%s\n' "$line" >> "$FAKE_RUN_LOG"
+L
 cat > "$T/bin/agy" <<'A'
 #!/usr/bin/env bash
-echo "agy $*" >> "$FAKE_AGY_LOG"
-cat > "$FAKE_AGY_STDIN"
+"$(dirname "$0")/logargv" agy "$@"
+cat > "$FAKE_STDIN"
 jq -cn --rawfile r "$FAKE_REPLY" '{event:"init",init:{agent:"conclave-voter"}},{event:"result",result:{status:"SUCCESS",response:$r}}'
+A
+cat > "$T/bin/cursor-agent" <<'A'
+#!/usr/bin/env bash
+if [ "$1" = models ]; then
+  echo "cursor-agent models" >> "$FAKE_RUN_LOG"
+  printf '%s\n' "${FAKE_CURSOR_MODELS:-}"; exit 0
+fi
+"$(dirname "$0")/logargv" cursor-agent "$@"
+for a in "$@"; do last=$a; done
+printf '%s\n' "$last" > "$FAKE_PROMPT_ARG"
+jq -cn --rawfile r "$FAKE_REPLY" '{type:"system"},{type:"result",is_error:true,result:"partial"},{type:"result",is_error:false,result:$r},{type:"result",is_error:false,result:""}'
+A
+cat > "$T/bin/codex" <<'A'
+#!/usr/bin/env bash
+"$(dirname "$0")/logargv" codex "$@"
+cat > "$FAKE_STDIN"
+o=""; while [ "$#" -gt 0 ]; do [ "$1" = --output-last-message ] && o=$2; shift; done
+cp "$FAKE_REPLY" "$o"; echo "codex progress noise"
+A
+cat > "$T/bin/claude" <<'A'
+#!/usr/bin/env bash
+"$(dirname "$0")/logargv" claude "$@"
+jq -cn --rawfile r "$FAKE_REPLY" '{type:"result",is_error:false,result:$r}'
+A
+cat > "$T/bin/muse" <<'A'
+#!/usr/bin/env bash
+"$(dirname "$0")/logargv" muse "$@"
+cat "$FAKE_REPLY"
 A
 # The router stub logs its argv and prints $FAKE_ROUTE (exit $FAKE_ROUTE_RC).
 cat > "$T/bin/seat-usage" <<'S'
@@ -40,11 +77,18 @@ echo "[seat-usage] pull-only cached 1m ago" >&2
 printf '%s\n' "$FAKE_ROUTE"
 exit "${FAKE_ROUTE_RC:-0}"
 S
-chmod +x "$T/bin/gh" "$T/bin/agy" "$T/bin/seat-usage"
+chmod +x "$T/bin/"*
 export MERGE_GATE_GH="$T/bin/gh" MERGE_GATE_AGY="$T/bin/agy" MERGE_GATE_SEAT_USAGE="$T/bin/seat-usage"
-export FAKE_GH_LOG="$T/gh.log" FAKE_AGY_STDIN="$T/agy.stdin" FAKE_REPLY="$T/reply.md"
-export FAKE_AGY_LOG="$T/agy.log" FAKE_SU_LOG="$T/su.log"
-ROUTE_ARGON='[{"role": "review", "mode": "default", "runner": "agy", "reason": "ranked", "reviewers": [{"family": "argon", "vendor": "google", "model": "gemini-4-argon-high"}], "skipped": [{"family": "astra", "model": "gpt-6-astra", "code": "runner"}]}]'
+export MERGE_GATE_CURSOR_AGENT="$T/bin/cursor-agent" MERGE_GATE_CODEX="$T/bin/codex"
+export MERGE_GATE_CLAUDE="$T/bin/claude" MERGE_GATE_MUSE="$T/bin/muse"
+export FAKE_GH_LOG="$T/gh.log" FAKE_STDIN="$T/reviewer.stdin" FAKE_REPLY="$T/reply.md"
+export FAKE_RUN_LOG="$T/run.log" FAKE_SU_LOG="$T/su.log" FAKE_PROMPT_ARG="$T/prompt.arg"
+# The contract: top-level runner is the argv list, the same list on reviewers[0].runner.
+route() { # $1 family, $2 vendor, $3 model, $4 runner argv as a JSON list, $5 skipped JSON list
+  printf '[{"role": "review", "mode": "default", "runner": %s, "reason": "ranked", "reviewers": [{"family": "%s", "vendor": "%s", "model": "%s", "runner": %s}], "skipped": %s}]' \
+    "$4" "$1" "$2" "$3" "$4" "${5:-[]}"
+}
+ROUTE_ARGON="$(route argon google gemini-4-argon-high '["agy","--model","gemini-4-argon-high"]')"
 export FAKE_ROUTE="$ROUTE_ARGON"
 
 R="$T/repo"; git init -q -b main "$R"
@@ -55,11 +99,12 @@ PR=https://github.com/o/r/pull/1
 
 run() { # $1 case name, reply text in $2; leaves $T/$1/{review,merge}.out
   local d="$T/$1"; mkdir -p "$d"; printf '%s\n' "$2" > "$FAKE_REPLY"; : > "$FAKE_GH_LOG"
-  : > "$FAKE_AGY_LOG"; : > "$FAKE_SU_LOG"
+  : > "$FAKE_RUN_LOG"; : > "$FAKE_SU_LOG"; : > "$FAKE_STDIN"; : > "$FAKE_PROMPT_ARG"
   "$ROOT/scripts/merge-gate.sh" review "$R" main feat "$PR" "$d/out" xai > "$d/review.out" 2>&1; review_rc=$?
   "$ROOT/scripts/merge-gate.sh" merge "$PR" "$d/out" > "$d/merge.out" 2>&1; merge_rc=$?
   merge_out="$(cat "$d/merge.out")"; gh_log="$(cat "$FAKE_GH_LOG")"
-  review_out="$(cat "$d/review.out")"; agy_log="$(cat "$FAKE_AGY_LOG")"; su_log="$(cat "$FAKE_SU_LOG")"
+  review_out="$(cat "$d/review.out")"; su_log="$(cat "$FAKE_SU_LOG")"
+  run_log="$(cat "$FAKE_RUN_LOG")"; agy_log="$(grep '^agy ' "$FAKE_RUN_LOG")"
   echo "--- $1: review rc=$review_rc merge rc=$merge_rc"; sed 's/^/    /' "$d/merge.out"
 }
 
@@ -69,41 +114,101 @@ run pass $'approve\n\nFindings:\nNone.\n\nChecked and found clean:\n- f\n\none_w
 [ "$merge_rc" = 0 ] && ok "pass: merge rc 0" || bad "pass: merge rc $merge_rc"
 has "pass: gh pr merge invoked squash at the reviewed sha" "$gh_log" "gh pr merge $PR --squash --match-head-commit $HEAD_SHA"
 has "pass: labels checked" "$gh_log" "gh pr view $PR --json labels"
-p="$(cat "$FAKE_AGY_STDIN")"
+p="$(cat "$FAKE_STDIN")"
 has "prompt asks for the one_way line" "$p" 'exactly `one_way: yes` or `one_way: no`'
 has "prompt asks for one_way_at file:line" "$p" 'one_way_at: <file>:<line>'
 has "prompt carries the diff" "$p" '+b'
 has "verdict json written" "$(cat "$T/pass/out/gate-verdict.json")" '"one_way": "no"'
-has "pass: router asked with the builder vendor and the agy runner" "$su_log" "seat-usage --route review --cached --json --builder-vendor xai --runner agy"
+has "pass: router asked with the builder vendor" "$su_log" "seat-usage --route review --cached --json --builder-vendor xai"
+hasnt "pass: router not asked for a runner" "$su_log" "--runner"
 has "pass: agy runs the router's model" "$agy_log" "--model gemini-4-argon-high "
-has "pass: review names the reviewer" "$review_out" "merge-gate: reviewer gemini-4-argon-high"
-has "pass: route output kept" "$(cat "$T/pass/out/gate-route.json")" '"runner": "agy"'
+has "pass: agy runs sandboxed" "$agy_log" "--sandbox"
+has "pass: review names the reviewer and runner" "$review_out" "merge-gate: reviewer gemini-4-argon-high on agy"
+hasnt "pass: log does not say --runner agy" "$review_out" "--runner agy"
+has "pass: route output kept" "$(cat "$T/pass/out/gate-route.json")" '"runner": ["agy","--model","gemini-4-argon-high"]'
 
-# The router decides; when nothing agy can run qualifies, refuse before agy.
-# Each refusal also clears the earlier verdict, so merge refuses too.
+# The router decides; when it asks, fails, or gives no launch argv, refuse
+# before any reviewer runs. Each refusal also clears the earlier verdict, so
+# merge refuses too.
 refused() { # $1 case, $2 expected text
   [ "$review_rc" = 3 ] && ok "$1: review rc 3" || bad "$1: review rc $review_rc"
   [ "$(printf '%s\n' "$review_out" | wc -l)" = 1 ] && ok "$1: one-line message" || bad "$1: not one line: $review_out"
   has "$1: reason" "$review_out" "$2"
-  [ -z "$agy_log" ] && ok "$1: agy not called" || bad "$1: agy called: $agy_log"
+  [ -z "$run_log" ] && ok "$1: no reviewer launched" || bad "$1: reviewer launched: $run_log"
   [ "$merge_rc" = 3 ] && ok "$1: merge refuses" || bad "$1: merge rc $merge_rc"
   hasnt "$1: no gh pr merge" "$gh_log" "pr merge"
 }
 mkdir -p "$T/stale/out"; cp "$T/pass/out/"gate* "$T/stale/out/"
-FAKE_ROUTE='[{"role": "review", "mode": "ask", "runner": "agy", "reason": "need 1 agy-runnable review seat(s) outside Google; 0 eligible: ask", "reviewers": [], "skipped": []}]' \
+FAKE_ROUTE='[{"role": "review", "mode": "ask", "runner": null, "reason": "need 1 review seat(s)\n  outside xAI; 0 eligible: ask", "reviewers": [], "skipped": []}]' \
   run stale $'approve\none_way: no'
-refused "route asks" "merge-gate: refused: no agy-runnable reviewer: need 1 agy-runnable review seat(s) outside Google; 0 eligible: ask"
+refused "route asks" "merge-gate: refused: no eligible reviewer: need 1 review seat(s) outside xAI; 0 eligible: ask"
+OLD="seat-usage is too old to return a review runner; update quartermaster"
 FAKE_ROUTE='[{"role": "review", "mode": "default", "reason": "ranked", "reviewers": [{"family": "astra", "vendor": "openai", "model": "gpt-6-astra"}]}]' \
   run oldroute $'approve\none_way: no'
-refused "old seat-usage without --runner" "merge-gate: refused: seat-usage did not apply --runner agy; update quartermaster"
+refused "old seat-usage with no runner" "merge-gate: refused: $OLD"
+FAKE_ROUTE='[{"role": "review", "mode": "default", "runner": "agy", "reason": "ranked", "reviewers": [{"family": "argon", "vendor": "google", "model": "gemini-4-argon-high"}]}]' \
+  run oldagy $'approve\none_way: no'
+refused "old seat-usage with runner agy as a string" "merge-gate: refused: $OLD"
 FAKE_ROUTE='' FAKE_ROUTE_RC=2 FAKE_ROUTE_ERR='unknown builder vendor nope; vendors: anthropic, google, meta, openai, xai' \
   run routefail $'approve\none_way: no'
-refused "router exits nonzero" "merge-gate: refused: seat-usage --route review --runner agy failed: unknown builder vendor nope"
+refused "router exits nonzero" "merge-gate: refused: seat-usage --route review failed: unknown builder vendor nope"
 FAKE_ROUTE='not json' run notjson $'approve\none_way: no'
 refused "router output not JSON" "merge-gate: refused: seat-usage output is not JSON"
-FAKE_ROUTE='[{"role": "review", "mode": "default", "runner": "agy", "reviewers": [{"model": "--sandbox x"}]}]' \
-  run badmodel $'approve\none_way: no'
+FAKE_ROUTE="$(route argon google '--sandbox x' '["agy"]')" run badmodel $'approve\none_way: no'
 refused "unusable model id" "merge-gate: refused: seat-usage reviewer has no usable model id"
+FAKE_ROUTE="$(route argon google gemini-4-argon-high '["agy","--model","x;rm -rf /"]')" run badargv $'approve\none_way: no'
+refused "shell metacharacter in the runner" "merge-gate: refused: seat-usage runner is not a launch command"
+FAKE_ROUTE="$(route argon google gemini-4-argon-high '["agy","--model","bad model"]')" run badargvmodel $'approve\none_way: no'
+refused "argv model not a single token" "merge-gate: refused: seat-usage reviewer has no usable model id"
+FAKE_ROUTE="$(route astra openai gpt-6-astra '["/opt/bin/aider","--model","gpt-6-astra"]')" run unknown $'approve\none_way: no'
+refused "unknown runner" "merge-gate: refused: no read-only launch for runner aider"
+FAKE_ROUTE="$(route fable anthropic fable '["cursor-agent","--model","fable"]')" FAKE_CURSOR_MODELS='gpt-5' \
+  run nofable $'approve\none_way: no'
+has "fable alias unresolved: models listed" "$run_log" "cursor-agent models"
+run_log="$(grep -v '^cursor-agent models$' "$FAKE_RUN_LOG")"
+refused "fable alias unresolved" "merge-gate: refused: cursor-agent models lists no fable id"
+
+# Other runners: each launches read-only and its answer becomes the verdict.
+ANSWER=$'approve\n\nFindings:\nNone.\n\none_way: no'
+passes() { # $1 case, $2 runner name
+  [ "$review_rc" = 0 ] && ok "$1: review rc 0" || bad "$1: review rc $review_rc"
+  [ "$merge_rc" = 0 ] && ok "$1: merges" || bad "$1: merge rc $merge_rc"
+  has "$1: gh pr merge at the reviewed sha" "$gh_log" "gh pr merge $PR --squash --match-head-commit $HEAD_SHA"
+  has "$1: verdict from the $2 answer" "$(cat "$T/$1/out/gate-verdict.json")" '"one_way": "no"'
+  has "$1: gate.md is the answer" "$(cat "$T/$1/out/gate.md")" "one_way: no"
+  [ -z "$agy_log" ] && ok "$1: agy not called" || bad "$1: agy called: $agy_log"
+  has "$1: review names the runner" "$review_out" " on $2 "
+}
+FAKE_ROUTE="$(route astra openai gpt-6-astra '["codex","exec","-m","gpt-6-astra"]' \
+  '[{"family": "argon", "model": "gemini-4-argon-high", "code": "capped"}]')" run codex "$ANSWER"
+passes codex codex
+has "codex: argv has -s read-only" "$run_log" "-s read-only"
+has "codex: model from -m" "$run_log" "codex exec -m gpt-6-astra "
+hasnt "codex: not codex review" "$run_log" "codex review"
+has "codex: prompt on stdin carries the diff" "$(cat "$FAKE_STDIN")" '+b'
+has "codex: prompt has the one_way line" "$(cat "$FAKE_STDIN")" 'exactly `one_way: yes` or `one_way: no`'
+FAKE_ROUTE="$(route grok xai grok-4.7-xhigh '["cursor-agent","--model","grok-4.7-xhigh"]')" run cursor "$ANSWER"
+passes cursor cursor-agent
+has "cursor: sandbox enabled" "$run_log" "--sandbox enabled"
+hasnt "cursor: no --force" "$run_log" "--force"
+has "cursor: slug used as given" "$run_log" "--model grok-4.7-xhigh "
+hasnt "cursor: no model listing for a slug" "$run_log" "cursor-agent models"
+hasnt "cursor: workspace is not the repo" "$run_log" "--workspace $R"
+has "cursor: prompt argument carries the diff" "$(cat "$FAKE_PROMPT_ARG")" '+b'
+FAKE_ROUTE="$(route fable anthropic fable '["cursor-agent","--model","fable"]')" \
+  FAKE_CURSOR_MODELS=$'claude-fable-8-thinking-xhigh - Fable 8\nclaude-fable-9-thinking-xhigh - Fable 9\nclaude-fable-9-thinking-high\ngrok-4.7-xhigh' \
+  run cursorfable "$ANSWER"
+passes cursorfable cursor-agent
+has "cursor fable: resolved to the newest id" "$run_log" "--model claude-fable-9-thinking-xhigh "
+FAKE_ROUTE="$(route fable anthropic fable-5 '["claude","--model","fable-5"]')" run claude "$ANSWER"
+passes claude claude
+has "claude: dontAsk" "$run_log" "--permission-mode dontAsk"
+has "claude: model" "$run_log" "--model fable-5 "
+FAKE_ROUTE="$(route muse meta muse-wonder-2 '["muse","exec","--model","muse-wonder-2"]')" run muse "$ANSWER"
+passes muse muse
+has "muse: --disable-shell" "$run_log" "--disable-shell"
+has "muse: --disable-write" "$run_log" "--disable-write"
+has "muse: model" "$run_log" "--model muse-wonder-2 "
 
 # 2. one_way: yes -> refused, names the reason and the file:line, no merge.
 run yes $'approve\n\nFindings:\nNone.\n\n**one_way: yes**\none_way_at: db/migrate/002_drop.sql:3 drops column users.email'

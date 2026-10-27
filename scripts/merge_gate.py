@@ -5,6 +5,7 @@
     merge_gate.py parse <gate.md>
     merge_gate.py merge <pr_url> <out_dir>
     merge_gate.py pick <gate-route.json>
+    merge_gate.py cursor-result|claude-result|plain-result <reviewer output> <gate.md>
 
 The reviewer ends its answer with `one_way: yes` or `one_way: no`, and on yes
 one `one_way_at: <file>:<line> <what>` line per step a git revert cannot undo.
@@ -18,10 +19,15 @@ the PR has the `one-way` label, or when gh cannot read the labels. Otherwise
 it runs `gh pr merge <pr> --squash --match-head-commit <reviewed sha>` and
 returns gh's exit code. MERGE_GATE_GH overrides the gh binary.
 
-pick reads the `seat-usage --route review --json --runner agy` output and
-prints the reviewer model. When the route asked, named no reviewer, or did not
-apply the agy runner (an older seat-usage), it prints one line saying why and
-exits 3.
+pick reads the `seat-usage --route review --json` output and prints one JSON
+line, {"model": ..., "runner": [argv...]}. The argv is the top-level `runner`
+list, else reviewers[0].runner. When the route asked, named no reviewer, has
+no argv list (an older seat-usage), or the model or argv is unsafe, it prints
+one line saying why and exits 3.
+
+cursor-result, claude-result, and plain-result write the reviewer's answer to
+gate.md from a cursor-agent stream, a claude JSON result, or a plain file, and
+exit 1 when there is no answer.
 """
 from __future__ import annotations
 
@@ -177,11 +183,18 @@ def merge(pr: str, out_dir: str) -> int:
                            "--match-head-commit", head]).returncode
 
 
-RUNNER = "agy"
+MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+SHELL_META = re.compile(r"[;|&$`<>\n]")
 
 
-def pick(route_json: str) -> tuple[str | None, str]:
-    """(model, "") for the router's agy-runnable reviewer, else (None, why)."""
+def _argv(v: object) -> list[str] | None:
+    if isinstance(v, list) and v and all(isinstance(p, str) for p in v):
+        return v
+    return None
+
+
+def pick(route_json: str) -> tuple[dict | None, str]:
+    """({"model", "runner"}, "") for the router's reviewer, else (None, why)."""
     try:
         rows = json.loads(Path(route_json).read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError) as e:
@@ -189,16 +202,69 @@ def pick(route_json: str) -> tuple[str | None, str]:
     row = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else None
     if row is None or row.get("role") != "review":
         return None, "seat-usage output has no review row"
-    if row.get("runner") != RUNNER:
-        return None, f"seat-usage did not apply --runner {RUNNER}; update quartermaster"
     reviewers = row.get("reviewers") if isinstance(row.get("reviewers"), list) else []
     if row.get("mode") == "ask" or not reviewers:
         why = " ".join(str(row.get("reason") or "no reviewer").split())
-        return None, f"no {RUNNER}-runnable reviewer: {why}"
-    model = reviewers[0].get("model") if isinstance(reviewers[0], dict) else None
-    if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model):
+        return None, f"no eligible reviewer: {why}"
+    first = reviewers[0] if isinstance(reviewers[0], dict) else {}
+    # The argv list is the contract. A string runner (`agy`) or none is an
+    # older seat-usage that only names a model.
+    runner = _argv(row.get("runner")) or _argv(first.get("runner"))
+    if runner is None:
+        return None, "seat-usage is too old to return a review runner; update quartermaster"
+    model = first.get("model")
+    if not isinstance(model, str) or not MODEL_ID.fullmatch(model):
         return None, "seat-usage reviewer has no usable model id"
-    return model, ""
+    if any(SHELL_META.search(p) for p in runner):
+        return None, "seat-usage runner is not a launch command"
+    return {"model": model, "runner": runner}, ""
+
+
+def cursor_result(stream: str, md: str) -> int:
+    """The last cursor-agent `result` event that is not an error and has text."""
+    r = ""
+    try:
+        lines = Path(stream).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as e:
+        print(f"merge-gate: cannot read {stream}: {e}", file=sys.stderr)
+        lines = []
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(e, dict) and e.get("type") == "result" and e.get("is_error") is False
+                and isinstance(e.get("result"), str) and e["result"].strip()):
+            r = e["result"]
+    return _answer(r, md)
+
+
+def claude_result(out: str, md: str) -> int:
+    """The `.result` string from `claude -p --output-format json`."""
+    try:
+        e = json.loads(Path(out).read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        e = None
+    r = e.get("result") if isinstance(e, dict) and not e.get("is_error") else None
+    return _answer(r if isinstance(r, str) else "", md)
+
+
+def plain_result(src: str, md: str) -> int:
+    """A file that holds the answer as is (codex --output-last-message, muse stdout)."""
+    try:
+        r = Path(src).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        r = ""
+    return _answer(r, md)
+
+
+def _answer(r: str, md: str) -> int:
+    Path(md).write_text(r, encoding="utf-8")
+    print("response chars:", len(r))
+    if not r.strip():
+        print("merge-gate: the reviewer did not return a clean answer", file=sys.stderr)
+        return 1
+    return 0
 
 
 def main(argv: list[str]) -> int:
@@ -212,12 +278,15 @@ def main(argv: list[str]) -> int:
     if len(argv) == 3 and argv[0] == "merge":
         return merge(argv[1], argv[2])
     if len(argv) == 2 and argv[0] == "pick":
-        model, why = pick(argv[1])
-        if model is None:
+        picked, why = pick(argv[1])
+        if picked is None:
             print(why)
             return REFUSED
-        print(model)
+        print(json.dumps(picked))
         return 0
+    if len(argv) == 3 and argv[0] in ("cursor-result", "claude-result", "plain-result"):
+        return {"cursor-result": cursor_result, "claude-result": claude_result,
+                "plain-result": plain_result}[argv[0]](argv[1], argv[2])
     print(__doc__.split("\n\n")[1], file=sys.stderr)
     return 2
 
