@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 # Usage: scripts/stack-run.py --repo DIR --pr N --stack-id ID [--prs N,N,...]
-"""Run one whole-stack ballot, then resumable per-PR review ballots in capped waves, then reconcile findings at the stack top.
+"""Run one whole-stack ballot, then resumable per-PR review ballots with a capped number in flight, then reconcile findings at the stack top.
 
 Only chairs write review prose. The runner records each step, validates their
 receipts, and folds stack verdicts into existing decisions without posting.
-Each wave starts only after a seat-usage pre-check passes.
+A finished per-PR ballot frees its slot at once, and the next one starts.
+Each ballot starts only after a seat-usage pre-check passes. On a block no new
+ballot starts, and running ones finish.
 Fable at or above 95% weekly usage starts on Opus. An observed Fable overflow still moves later ballots to Cursor.
 """
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import hashlib
 import importlib.util
 import json
@@ -64,7 +67,7 @@ SEAT_TIMEOUT = 25
 
 
 def wave_cap(args: argparse.Namespace) -> tuple[int, str]:
-    """Ballots per wave and where that number came from.
+    """Most per-PR ballots in flight and where that number came from.
 
     --wave-cap, then the deprecated --jobs, then CONCLAVE_WAVE_CAP, then 2.
     """
@@ -1110,9 +1113,10 @@ class Runner:
             flags, _ = self.flags(refresh=False)
             lines = []
             if not self.args.reconcile_only:
-                lines.append(f'wave cap: {self.cap} ({self.cap_source})')
-                for number, wave in enumerate(self.wave_plan(whole), 1):
-                    lines.append(f"wave {number}: {', '.join(wave)}")
+                lines.append(f'in-flight cap: {self.cap} ({self.cap_source})')
+                first = f'{self.whole_ballot_name()} alone, then ' if whole else ''
+                lines.append(f"launch order: {first}{', '.join(r['ballot'] for r in self.record['prs'])} "
+                             'bottom up, refilled as slots free')
             if whole:
                 base, head = self.stack_refs(prs)
                 target = ['--base', base, '--head', head]
@@ -1155,7 +1159,7 @@ class Runner:
                 raise RuntimeError('context.md missing, empty, or contains a forbidden word')
             self.record['context'] = 'ready'
             self.save()
-            # The whole-stack ballot is wave 1 and finishes before any per-PR ballot.
+            # The whole-stack ballot is the first launch and finishes before any per-PR ballot.
             if whole:
                 stop = self.whole_stack_wave(prs)
             else:
@@ -1185,12 +1189,6 @@ class Runner:
         return int(any(r['outcome'].startswith('failed:') for r in self.record['prs'])
                    or self.record['reconcile'].startswith('failed:') or whole_status.startswith('failed:'))
 
-    def wave_plan(self, whole: bool) -> list[list[str]]:
-        """Ballot ids per wave: the whole-stack ballot alone, then per-PR ballots bottom up."""
-        rows = self.record['prs']
-        plan = [[self.whole_ballot_name()]] if whole else []
-        return plan + [[r['ballot'] for r in rows[i:i + self.cap]] for i in range(0, len(rows), self.cap)]
-
     def precheck(self) -> tuple[str, str]:
         """Ask the route conclave.sh seats from. A missing or failing binary is inconclusive."""
         if setting('WAVE_PRECHECK', '1') == '0':
@@ -1208,15 +1206,15 @@ class Runner:
             return 'inconclusive', f'seat-usage exited {proc.returncode}'
         return precheck_verdict(proc.stdout)
 
-    def wave_gate(self, rows: list[dict]) -> tuple[bool, str]:
-        """Record the next wave and pre-check it. False means do not launch it."""
+    def wave_gate(self, row: dict) -> tuple[bool, str]:
+        """Record one ballot launch and pre-check it. False means do not launch it."""
         number = len(self.record['waves']) + 1
-        names = [r['ballot'] for r in rows]
+        names = [row['ballot']]
         entry = {'wave': number, 'ballots': names, 'precheck': 'pending', 'message': ''}
         self.record['waves'].append(entry)
         # Only a ballot with no blind reports yet (new, needs legs) starts voters.
         # The rest are finished, blocked, or chair-only, and spend no seat.
-        if self.max_capped or all(r['state'] not in ('new', 'needs legs') for r in rows):
+        if self.max_capped or row['state'] not in ('new', 'needs legs'):
             status, message = 'not needed', 'no voters to launch'
         else:
             deadline = time.monotonic() + self.args.wave_wait
@@ -1272,7 +1270,7 @@ class Runner:
                'POSTED?': list(dict.fromkeys(previous.get('POSTED?', []))),
                'target': ['--base', base, '--head', head]}
         self.record['whole_stack_row'] = row
-        launch, message = self.wave_gate([row])
+        launch, message = self.wave_gate(row)
         if not launch:
             self.record['whole_stack'] = f'failed: not started; seats capped ({message})'
             self.not_started(self.record['prs'], f'failed: not started; seats capped ({message})')
@@ -1286,19 +1284,29 @@ class Runner:
         return self.whole_failed(outcome if outcome.startswith('failed:') else f'failed: {outcome}')
 
     def per_pr_waves(self) -> str:
-        """Per-PR ballots bottom up, at most self.cap at once. Return why the rest stopped, or ''."""
-        rows = self.record['prs']
-        # A wave finishes before the next starts, so an overflow seen in one
-        # wave is sticky for every later wave.
+        """Per-PR ballots bottom up, at most self.cap in flight. Return why the rest stopped, or ''.
+
+        A finished ballot frees its slot at once; the next row is pre-checked and starts.
+        An overflow seen in one ballot's phase 1 is sticky for any ballot whose phase 1 reads it later.
+        """
+        queue = deque(self.record['prs'])
+        running: set = set()
         with ThreadPoolExecutor(max_workers=self.cap) as pool:
-            for i in range(0, len(rows), self.cap):
-                wave = rows[i:i + self.cap]
-                launch, message = self.wave_gate(wave)
+            while queue:
+                if len(running) >= self.cap:
+                    done, running = wait(running, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        future.result()
+                launch, message = self.wave_gate(queue[0])
                 if not launch:
-                    self.not_started(rows[i:], f'failed: not started; seats capped ({message})')
+                    # Running ballots finish; only rows never started are closed.
+                    for future in running:
+                        future.result()
+                    self.not_started(list(queue), f'failed: not started; seats capped ({message})')
                     return 'failed: not started; seats capped'
-                for future in [pool.submit(self.ballot_run, row) for row in wave]:
-                    future.result()
+                running.add(pool.submit(self.ballot_run, queue.popleft()))
+            for future in running:
+                future.result()
         return ''
 
 
@@ -1363,11 +1371,11 @@ def main() -> int:
     parser.add_argument('--context')
     parser.add_argument('--ticket')
     parser.add_argument('--wave-cap', type=int, choices=(1, 2, 3),
-                        help='Per-PR ballots per wave. Default: CONCLAVE_WAVE_CAP, else 2')
+                        help='Most per-PR ballots in flight at once. Default: CONCLAVE_WAVE_CAP, else 2')
     parser.add_argument('--jobs', type=int, choices=(1, 2),
                         help='Deprecated alias for --wave-cap')
     parser.add_argument('--wave-wait', type=int, default=0,
-                        help='Seconds to keep re-checking a capped wave before stopping. Default 0')
+                        help='Seconds to keep re-checking capped seats before a ballot starts. Default 0')
     parser.add_argument('--chair-model')
     parser.add_argument('--chair-timeout', type=int, default=3600)
     parser.add_argument('--dry-run', action='store_true')
