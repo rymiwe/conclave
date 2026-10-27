@@ -669,6 +669,18 @@ check "old seat-usage error names the vendor and the flag" \
   grep -qx "conclave: refused: seat-usage did not report excluding vendor 'xai' named by ambiguous PR trailers (needs seat-usage with --exclude-vendor); stopping the review" "$work/ambiguous.err"
 rc="$(ambiguous_route "anthropic xai" "$work/excluded.json" 0 "")"
 check "seat-usage that reports the exclusion keeps the review" [ "$rc" -eq 0 ]
+# Ask mode would keep the fixed Fable and Astra default, which seats a named
+# vendor, so the review stops even when the exclusions are reported.
+printf '%s\n' '[{"role":"lineup","mode":"ask","reason":"need 2 review seat(s) outside Anthropic, xAI; 1 eligible: ask Ryan","lineup":null,"skipped":[{"family":"fable","vendor":"anthropic","code":"builder_vendor"},{"family":"grok","vendor":"xai","code":"excluded_vendor"}]}]' >"$work/excluded-ask.json"
+rc="$(ambiguous_route "anthropic xai" "$work/excluded-ask.json" 0 "")"
+check "ask after exclusion stops an ambiguous review" [ "$rc" -eq 3 ]
+check "ask after exclusion error says why" \
+  grep -qx "conclave: refused: seat-usage seated no lineup outside the vendors ambiguous PR trailers named (anthropic, xai): need 2 review seat(s) outside Anthropic, xAI; 1 eligible: ask Ryan; stopping the review" "$work/ambiguous.err"
+route_pr 'doc = {
+  "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss"},
+  "commits": [{"messageHeadline": "One", "messageBody": "Co-Authored-By: Grok <noreply@x.ai>\n"}],
+}' "$work/ask.json" 2>/dev/null
+check "ask without ambiguous trailers keeps the fixed default" source_is "ballot: fallback (seat-usage asked; fixed default)"
 # A seat-usage that fails or prints no JSON excluded nobody. The fixed
 # fallback would seat a named vendor, so the review stops.
 rc="$(ambiguous_route "anthropic xai" "$work/all.json" 1 "boom")"

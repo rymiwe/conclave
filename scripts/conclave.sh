@@ -1650,8 +1650,8 @@ lineup_parse_voters() {
 }
 
 load_lineup_ballot() {
-  # Stops the run (exit 3) only when ambiguous trailers named a vendor
-  # seat-usage did not show as excluded. The control plane already ran the lineup.
+  # Stops the run (exit 3) only when ambiguous trailers named a vendor and
+  # seat-usage did not show it excluded or seated no lineup without it. The control plane already ran the lineup.
   # A brief author: header naming a known family passes --author, and on
   # review also --builder-vendor for that family. With no header, review
   # passes --builder-vendor only when a PR commit trailer names one model.
@@ -1758,6 +1758,7 @@ load_lineup_ballot() {
       fi
       ;;
     ask)
+      review_refuse_fixed_default "$raw"
       BALLOT_SOURCE=fallback
       BALLOT_SOURCE_NOTE="seat-usage asked"
       ballot_use_fixed_default
@@ -1765,10 +1766,29 @@ load_lineup_ballot() {
       return 0
       ;;
   esac
+  review_refuse_fixed_default "$raw"
   BALLOT_SOURCE=fallback
   BALLOT_SOURCE_NOTE="seat-usage failed"
   ballot_use_fixed_default
   note_review_route_fallback
+}
+
+review_refuse_fixed_default() {
+  # $1 is seat-usage stdout. The fixed default is Fable and Astra, which can
+  # be a vendor ambiguous trailers named. Exit 3 instead of seating it.
+  [ -n "${REVIEW_EXCLUDED_VENDORS:-}" ] || return 0
+  local why
+  why="$(python3 -c '
+import json, sys
+try:
+    doc = json.loads(sys.argv[1])
+except ValueError:
+    sys.exit(0)
+row = doc[0] if isinstance(doc, list) and doc else doc
+print(row.get("reason") or "" if isinstance(row, dict) else "")
+' "$1" 2>/dev/null)" || why=""
+  echo "conclave: refused: seat-usage seated no lineup outside the vendors ambiguous PR trailers named (${REVIEW_EXCLUDED_VENDORS// /, })${why:+: $why}; stopping the review" >&2
+  exit 3
 }
 
 review_add_opus_leg() {
