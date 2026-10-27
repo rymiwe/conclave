@@ -153,7 +153,20 @@ with Path(os.environ['GH_LOG']).open('a') as log:
 if os.environ.get('GH_FAIL'):
     sys.stderr.write('HTTP 502 Bad Gateway\\n')
     sys.exit(1)
-m = re.fullmatch(r'repos/example/widgets/pulls/(\\d+)/files', args[1] if len(args) > 1 else '')
+target = args[1] if len(args) > 1 else ''
+if re.fullmatch(r'repos/example/widgets/pulls/\\d+', target):
+    print(json.dumps({'head': {'sha': '1' * 40}}))
+    sys.exit(0)
+if target.startswith('repos/example/widgets/contents/'):
+    import base64
+    from urllib.parse import unquote
+    blobs = json.loads(Path(os.environ['GH_BLOBS']).read_text()) if os.environ.get('GH_BLOBS') else {}
+    rel = unquote(target.split('/contents/', 1)[1].split('?')[0])
+    if rel not in blobs:
+        sys.exit('no blob ' + rel)
+    print(json.dumps({'encoding': 'base64', 'content': base64.b64encode(blobs[rel].encode()).decode()}))
+    sys.exit(0)
+m = re.fullmatch(r'repos/example/widgets/pulls/(\\d+)/files', target)
 if not m or '--paginate' not in args:
     sys.exit('unexpected gh call ' + ' '.join(args))
 print(Path(os.environ['GH_PATCHES'], m.group(1) + '.json').read_text())
@@ -200,7 +213,7 @@ def test_cli(tmp: Path) -> None:
     check(len(lines) == 2 and lines[0].startswith("f1 inline #3 app/svc.rb:126"),
           f"cli prints one line per finding ({lines})")
     calls = [json.loads(line) for line in log.read_text().splitlines()]
-    check([c[1] for c in calls] == [f"repos/example/widgets/pulls/{n}/files" for n in (1, 2, 3)],
+    check([c[1] for c in calls if c[1].endswith("/files")] == [f"repos/example/widgets/pulls/{n}/files" for n in (1, 2, 3)],
           f"cli fetches every stack PR bottom to top ({calls})")
 
     (ballot / "stack.json").unlink()
@@ -208,7 +221,7 @@ def test_cli(tmp: Path) -> None:
     proc = run()
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     anchors = json.loads((ballot / "anchors.json").read_text())
-    check(proc.returncode == 0 and [c[1] for c in calls] == ["repos/example/widgets/pulls/1/files"]
+    check(proc.returncode == 0 and [c[1] for c in calls if c[1].endswith("/files")] == ["repos/example/widgets/pulls/1/files"]
           and anchors["f1"]["post_as"] == "file",
           f"with no stack the stack is the target PR alone ({calls} {anchors['f1']})")
 
@@ -350,6 +363,60 @@ def test_fresh_ballot_has_no_judgment(tmp: Path) -> None:
           f"a fresh ballot with no judgment.md is anchored and re-anchored ({proc.returncode} {proc.stderr.strip()} {anchors})")
 
 
+TOTALS_P1 = "@@ -8,3 +8,4 @@\n def a\n+  x = 1\n   y\n end\n"
+TOTALS_P2 = "@@ -88,2 +88,4 @@\n def b\n+  t = 2\n+  return total\n end\n"
+
+
+def test_head_holds_the_cited_line(tmp: Path) -> None:
+    """The gate's ninth finding: a later PR that adds identical text is not where unchanged code came from."""
+    bin_dir = tmp / "bin-head"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(textwrap.dedent(GH), encoding="utf-8")
+    (bin_dir / "gh").chmod(0o755)
+    patches = tmp / "patches-head"
+    patches.mkdir()
+    (patches / "1.json").write_text(json.dumps([{"filename": "app/totals.py", "patch": TOTALS_P1}]))
+    (patches / "2.json").write_text(json.dumps([{"filename": "app/totals.py", "patch": TOTALS_P2}]))
+    head_file = [f"line {n}" for n in range(1, 70)] + ["    return total", "line 71"]
+    blobs = tmp / "blobs-head.json"
+    blobs.write_text(json.dumps({"app/totals.py": "\n".join(head_file) + "\n"}))
+    ballot = tmp / "ballot-head"
+    ballot.mkdir()
+    (ballot / "judgment.md").write_text(
+        "kind: review\npr: https://github.com/example/widgets/pull/1\n", encoding="utf-8")
+    (ballot / "findings.json").write_text(json.dumps({"findings": [
+        {"id": "f1", "file": "app/totals.py", "line": 70, "cited_code": "return total"},
+        {"id": "f2", "file": "app/totals.py", "line": 71, "cited_code": "return total"},
+    ]}), encoding="utf-8")
+    (ballot / "stack.json").write_text(json.dumps({"status": "stack", "prs": [{"number": 1}, {"number": 2}]}))
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "GH_LOG": str(tmp / "calls-head.jsonl"),
+           "GH_PATCHES": str(patches), "GH_BLOBS": str(blobs)}
+    env.pop("CONCLAVE_GH", None)
+    env.pop("COUNCIL_GH", None)
+    proc = subprocess.run([sys.executable, str(SCRIPTS / "finding_anchor.py"), str(ballot)],
+                          env=env, text=True, capture_output=True)
+    anchors = json.loads((ballot / "anchors.json").read_text()) if (ballot / "anchors.json").is_file() else {}
+    f1, f2 = anchors.get("f1", {}), anchors.get("f2", {})
+    check(proc.returncode == 0 and f1.get("post_as") == "file" and f1.get("pr") == 1
+          and "holds the cited code at this PR's head" in f1.get("reason", ""),
+          f"cli: line 70 holds `return total` at #1's head, so it stays on #1 as file-level and is not re-anchored to #2 ({f1})")
+    check(f2.get("post_as") == "inline" and f2.get("pr") == 2 and f2.get("line") == 90,
+          f"cli: line 71 does not hold it at the head, so the re-anchor to #2 stands ({f2})")
+
+    stack = [{"number": 1, "files": {"app/totals.py": TOTALS_P1}}, {"number": 2, "files": {"app/totals.py": TOTALS_P2}}]
+    finding = {"file": "app/totals.py", "line": 70, "cited_code": "return total"}
+    got = finding_anchor.resolve(finding, stack, 1, lambda path, line: head_file[line - 1])
+    check(got["post_as"] == "file" and got["pr"] == 1, f"resolve keeps the target when its head holds the line ({got})")
+    got = finding_anchor.resolve(finding, stack, 1, lambda path, line: "something else")
+    check(got["post_as"] == "inline" and got["pr"] == 2, f"resolve re-anchors when the head line differs ({got})")
+    got = finding_anchor.resolve(finding, stack, 1, lambda path, line: None)
+    check(got["post_as"] == "inline" and got["pr"] == 2, f"resolve falls back to the diffs when the head line is unreadable ({got})")
+    other_file = {"number": 1, "files": {"lib/other.py": "@@ -1,1 +1,2 @@\n a\n+b\n"}}
+    got = finding_anchor.resolve(finding, [other_file, stack[1]], 1, lambda path, line: head_file[line - 1])
+    check(got["post_as"] == "unverified" and got["pr"] == 1 and "not in this PR's diff" in got["reason"],
+          f"a file the target does not change is not re-anchored either ({got})")
+
+
 def test_paginated_files() -> None:
     """The gate's third-round finding: gh --paginate prints one array per page."""
     def page(*names: str) -> str:
@@ -387,6 +454,7 @@ def main() -> None:
         test_cli(Path(raw))
         test_target_missing_from_stack(Path(raw))
         test_fresh_ballot_has_no_judgment(Path(raw))
+        test_head_holds_the_cited_line(Path(raw))
     print("all finding-anchor checks passed")
 
 

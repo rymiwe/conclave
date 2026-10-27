@@ -1201,6 +1201,8 @@ On review kind with findings, `judgment.md` also ends with `## How each finding 
 - `flag`: only later PRs change the file, and the cited code did not match. The chair decides.
 - `unverified`: the file is in no PR's diff, or the patches could not be read. A `gh` failure marks every finding unverified, names the error, and exits 0.
 
+Before it looks for a later PR, the script reads the cited line from the target PR's head (`pulls/<n>` for the head sha, then `contents/<path>?ref=<sha>`). When a line outside the target's diff holds the cited code there (whole line, stripped), the finding stays on the target as `file`, or as `unverified` when the target does not change that file. A later PR that adds identical text elsewhere does not move it. When the head cannot be read, the script judges from the diffs alone.
+
 With no stack, the stack is the target PR alone.
 
 Rewrites:

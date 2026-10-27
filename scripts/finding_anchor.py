@@ -13,11 +13,14 @@ line on an earlier PR.
 """
 from __future__ import annotations
 
+import base64
 import json
 import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Callable
+from urllib.parse import quote
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
@@ -156,10 +159,19 @@ def _lines_added_as(patch: str, needle: str) -> list[int]:
     return [line for line, text in added_lines(patch) if text.strip() == needle]
 
 
-def resolve(finding: object, stack_patches: object, target_pr: int) -> dict:
+def resolve(
+    finding: object,
+    stack_patches: object,
+    target_pr: int,
+    head_line: Callable[[str, int], str | None] | None = None,
+) -> dict:
     """Where a finding posts, judged from each PR's own diff.
 
     stack_patches is bottom to top: [{"number", "files": {path: patch}}].
+    head_line(path, line), when given, reads that line of the target PR's head
+    file, or None when it cannot. A line outside the target's diff that holds
+    the cited code there stays on the target: a later PR that adds identical
+    text elsewhere did not introduce what the finding cites.
     post_as is inline, file, flag, or unverified. A match with no cited code
     sets weak. The line on an inline result is that PR's own right-side line.
     """
@@ -201,6 +213,26 @@ def resolve(finding: object, stack_patches: object, target_pr: int) -> dict:
                 target_pr,
                 line,
                 "line is in this PR's diff and the cited code matches",
+            )
+
+    # (a2) The line is outside the target's diff but holds the cited code at
+    # the target's head. The code predates this PR's changes to the file, so a
+    # later PR that adds the same text somewhere else is not its origin.
+    if path and needle and line is not None and line not in target_lines and head_line is not None:
+        held = head_line(path, line)
+        if held is not None and held.strip() == needle:
+            if target_patch is not None:
+                return result(
+                    "file",
+                    target_pr,
+                    None,
+                    f"line {line} holds the cited code at this PR's head, outside its diff",
+                )
+            return result(
+                "unverified",
+                target_pr,
+                line,
+                f"{path} is not in this PR's diff; line {line} holds the cited code at its head",
             )
 
     # (b) The earliest PR in stack order that adds the cited line. Only an
@@ -448,6 +480,47 @@ def fetch_files(repo: str, number: int) -> dict[str, str]:
     return files
 
 
+def _decode_blob(data: object) -> list[str] | None:
+    if not isinstance(data, dict) or data.get("encoding") != "base64" or not isinstance(data.get("content"), str):
+        return None
+    try:
+        return split_lines(base64.b64decode(data["content"]).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def head_line_reader(repo: str, target: int) -> Callable[[str, int], str | None]:
+    """head_line for resolve: a line of the target PR's head file, read once per file.
+
+    Any gh failure reads as None, so the finding is judged from the diffs alone.
+    """
+    state: dict[str, object] = {}
+    files: dict[str, list[str] | None] = {}
+
+    def run(args: list[str]) -> object:
+        proc = subprocess.run([GH, "api", *args], text=True, capture_output=True)
+        if proc.returncode != 0:
+            return None
+        try:
+            return json.loads(proc.stdout or "null")
+        except json.JSONDecodeError:
+            return None
+
+    def read(path: str, line: int) -> str | None:
+        if "sha" not in state:
+            pr = run([f"repos/{repo}/pulls/{target}"])
+            sha = ((pr or {}).get("head") or {}).get("sha") if isinstance(pr, dict) else None
+            state["sha"] = sha if isinstance(sha, str) and sha else None
+        if state["sha"] is None:
+            return None
+        if path not in files:
+            files[path] = _decode_blob(run([f"repos/{repo}/contents/{quote(path, safe='/')}?ref={state['sha']}"]))
+        lines = files[path]
+        return lines[line - 1] if lines is not None and 1 <= line <= len(lines) else None
+
+    return read
+
+
 def _unverified(finding: dict, target: int | None, reason: str) -> dict:
     path = finding.get("file")
     path = path.strip() if isinstance(path, str) and path.strip() else None
@@ -507,9 +580,10 @@ def anchor_ballot(ballot: Path) -> dict[str, dict]:
             anchors[fid] = _unverified(finding, target, reason)
             _print_anchor(fid, anchors[fid])
         return anchors
+    head_line = head_line_reader(repo, target)
     for finding in findings:
         fid = str(finding.get("id"))
-        anchors[fid] = resolve(finding, patches, target)
+        anchors[fid] = resolve(finding, patches, target, head_line)
         _print_anchor(fid, anchors[fid])
     return anchors
 
