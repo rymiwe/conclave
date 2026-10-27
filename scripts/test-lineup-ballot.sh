@@ -691,6 +691,32 @@ check "failed seat-usage error names the vendors and its stderr" \
 rc="$(ambiguous_route "anthropic xai" "$work/bad.json" 0 "")"
 check "non-json seat-usage stops an ambiguous review" [ "$rc" -eq 3 ]
 check "non-json seat-usage error names a vendor" grep -q "did not report excluding vendor 'anthropic'" "$work/ambiguous.err"
+# A malformed skipped list cannot show the exclusions, so the review stops
+# even when the lineup and the well-formed entries look right.
+malformed_skip() { # $1 name, $2 skipped JSON
+  printf '%s\n' '[{"role":"lineup","mode":"default","reason":"stub","lineup":{"voters":[{"family":"astra","seat":"chatgpt"},{"family":"muse","seat":"muse"}]},"skipped":'"$2"'}]' >"$work/$1.json"
+}
+malformed_skip skip-list-vendor '[{"vendor":[],"code":"excluded_vendor"},{"vendor":"anthropic","code":"builder_vendor"},{"vendor":"xai","code":"excluded_vendor"}]'
+malformed_skip skip-int '1'
+malformed_skip skip-non-object '["grok",{"vendor":"anthropic","code":"builder_vendor"},{"vendor":"xai","code":"excluded_vendor"}]'
+for bad in skip-list-vendor skip-int skip-non-object; do
+  rc="$(ambiguous_route "anthropic xai" "$work/$bad.json" 0 "")"
+  check "$bad skipped stops an ambiguous review" [ "$rc" -eq 3 ]
+  check "$bad skipped error is one refusal line" \
+    grep -qx "conclave: refused: seat-usage printed a malformed skipped list (need a list of objects with string vendor and code), so the exclusion of anthropic, xai named by ambiguous PR trailers is unverified; stopping the review" "$work/ambiguous.err"
+  check "$bad skipped error is one line" [ "$(wc -l <"$work/ambiguous.err")" -eq 1 ]
+done
+reroute_bad_rc=0
+(
+  review_pr_load_facts() { return 0; }
+  reset_pr_route
+  REVIEW_PR_FACT_VENDOR=ambiguous
+  REVIEW_PR_FACT_VENDORS="anthropic xai"
+  use_router "$work/skip-list-vendor.json" 0
+  review_route_json >/dev/null
+) 2>"$work/reroute.err" || reroute_bad_rc=$?
+check "malformed skipped re-route returns no lineup" [ "$reroute_bad_rc" -ne 0 ]
+check "malformed skipped re-route says why" grep -q "malformed skipped list" "$work/reroute.err"
 # A missing seat-usage excluded nobody either. Only an ambiguous review stops;
 # "missing review router" above keeps the fixed default.
 missing_rc=0

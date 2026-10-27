@@ -1545,7 +1545,7 @@ review_check_excluded_vendors() {
   # ignores the flag, so its lineup must report each vendor as skipped. No
   # lineup excluded nobody, and the fixed fallback could seat a named vendor.
   [ -n "${REVIEW_EXCLUDED_VENDORS:-}" ] || return 0
-  local unknown missing first
+  local unknown missing first why rc=0
   unknown="$(sed -n 's/^unknown vendor \([^;]*\);.*/\1/p' "$2" | head -n 1)"
   if [ -n "$unknown" ]; then
     echo "conclave: refused: seat-usage does not know vendor '$unknown' named by ambiguous PR trailers; stopping the review" >&2
@@ -1556,8 +1556,10 @@ review_check_excluded_vendors() {
     echo "conclave: refused: seat-usage gave no lineup while ambiguous PR trailers named ${REVIEW_EXCLUDED_VENDORS// /, }${first:+ ($first)}; stopping the review" >&2
     return 3
   fi
+  # Any failure of this check is a refusal: an unchecked substitution would
+  # leave missing empty and accept the lineup unverified.
   # shellcheck disable=SC2086
-  missing="$(python3 - "$1" $REVIEW_EXCLUDED_VENDORS <<'PY'
+  missing="$(python3 - "$1" $REVIEW_EXCLUDED_VENDORS 2>/dev/null <<'PY'
 import json, sys
 try:
     doc = json.loads(sys.argv[1])
@@ -1566,13 +1568,25 @@ except ValueError:
     sys.exit(0)
 row = doc[0] if isinstance(doc, list) and doc else doc
 skipped = row.get("skipped") if isinstance(row, dict) else None
-done = {(i.get("vendor"), i.get("code")) for i in skipped or [] if isinstance(i, dict)}
+if skipped is None:
+    skipped = []
+if not isinstance(skipped, list) or not all(
+        isinstance(i, dict) and isinstance(i.get("vendor"), str) and isinstance(i.get("code"), str)
+        for i in skipped):
+    sys.exit(4)
+done = {(i["vendor"], i["code"]) for i in skipped}
 for vendor in sys.argv[2:]:
     if (vendor, "excluded_vendor") not in done and (vendor, "builder_vendor") not in done:
         print(vendor)
         break
 PY
-)"
+)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    why="the exclusion check exited $rc"
+    [ "$rc" -eq 4 ] && why="seat-usage printed a malformed skipped list (need a list of objects with string vendor and code)"
+    echo "conclave: refused: $why, so the exclusion of ${REVIEW_EXCLUDED_VENDORS// /, } named by ambiguous PR trailers is unverified; stopping the review" >&2
+    return 3
+  fi
   if [ -n "$missing" ]; then
     echo "conclave: refused: seat-usage did not report excluding vendor '$missing' named by ambiguous PR trailers (needs seat-usage with --exclude-vendor); stopping the review" >&2
     return 3
