@@ -1129,6 +1129,16 @@ printf 'rc=%s\\n' "$rc"
           f'fix 3 same phrase with modelUsage is not a usage-limit failure ({proc.stdout.strip()} {proc.stderr.strip()})')
 
 
+def test_posting_prompt(mod) -> None:
+    text = mod.posting_prompt(Path('/tmp/ballot-posting-prompt'))
+    check('The verdict follows the labels' in text and 'any **Requested:** finding requests changes' in text,
+          'round B prompt says the verdict follows the labels')
+    check('APPROVE is never automatic' in text,
+          'round B prompt says APPROVE is never automatic')
+    check('only when 2 or more voters finished' in text,
+          'round B prompt offers APPROVE only when 2 or more voters finished')
+
+
 def test_prompt_words_ignore_repo_path(mod) -> None:
     repo = '/tmp/work/.claude/worktrees/council'
     prompt = f'Round A. Write only {repo}/tmp/council/p-1/brief.md and stop.'
@@ -2000,6 +2010,7 @@ def main() -> None:
         test_detach_resume(tmp)
         test_detach_abbrev(tmp)
         test_prompt_words_ignore_repo_path(mod)
+        test_posting_prompt(mod)
         test_cursor_leg(tmp)
         test_local_config_stays_in_worktree(tmp, mod)
     print('ok')

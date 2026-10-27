@@ -688,6 +688,103 @@ def test_leg_seconds(tmp: Path, judge) -> None:
     check("_seconds" not in design, "design carries no seconds")
 
 
+def test_how_it_posts(tmp: Path, judge) -> None:
+    ballot = tmp / "how-posts"
+    ballot.mkdir()
+    (ballot / "header.json").write_text(
+        json.dumps({"kind": "review", "stack": "none"}) + "\n",
+        encoding="utf-8",
+    )
+    doc = {"findings": [finding("f1")]}
+    raw = answers(["f1"])
+    judge.write_decide(ballot, doc, raw)
+    text = (ballot / "decide.md").read_text(encoding="utf-8")
+    check(
+        "**how it posts**: inline review comment on a.rb:1 by default" in text
+        and "a file-level comment on a.rb when that line is not in this PR's diff" in text,
+        "decide.md states the default how-it-posts line when anchors.json is absent",
+    )
+    judgment = judge.write_review_judgment(ballot, doc, raw, "table\n")
+    check(
+        "## How each finding posts" in judgment
+        and "- f1: inline review comment on a.rb:1 by default" in judgment,
+        "review judgment.md gets a How each finding posts section",
+    )
+
+    filled = text.replace("TODO(chair)", "chair filled this")
+    (ballot / "decide.md").write_text(filled, encoding="utf-8")
+    (ballot / "anchors.json").write_text(
+        json.dumps({
+            "f1": {
+                "post_as": "file",
+                "pr": 7,
+                "path": "a.rb",
+                "line": None,
+                "reason": "line 1 is not in this PR's diff",
+            }
+        }) + "\n",
+        encoding="utf-8",
+    )
+    judge.write_decide(ballot, doc, raw)
+    rewritten = (ballot / "decide.md").read_text(encoding="utf-8")
+    check(
+        "file-level comment on #7 a.rb" in rewritten and "by default" not in rewritten,
+        f"a re-judge with a changed anchors.json rewrites decide.md ({rewritten})",
+    )
+    resolved = judge.write_review_judgment(ballot, doc, raw, "table\n")
+    check(
+        "## How each finding posts" in resolved and "file-level comment on #7 a.rb" in resolved,
+        "judgment.md follows the resolved plan from anchors.json",
+    )
+
+    audit = tmp / "audit-posts"
+    audit.mkdir()
+    (audit / "header.json").write_text(
+        json.dumps({
+            "kind": "audit",
+            "target": "doc",
+            "target_type": "content",
+            "snapshot_sha256": "abc",
+            "target_drift": "none",
+            "redaction_kept": "0",
+            "gate": "findings",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    audit_doc = {"findings": [{
+        "id": "f1",
+        "claim": "claim",
+        "verdict": "false-claim",
+        "file": "a.rb",
+        "line": 1,
+        "repro_executed": False,
+        "legs": {"A": "found"},
+    }]}
+    audit_text = judge.write_audit_judgment(
+        audit, audit_doc, answers(["f1"]), "table\n", {"f1": "none"}
+    )
+    check(
+        "## How each finding posts" not in audit_text and "**how it posts**" not in audit_text,
+        "audit judgment is unchanged and has no how-it-posts section",
+    )
+    _header, design = judge.render_judgment(
+        council_id="design-1",
+        model="jev-canned",
+        decision="no automatic decision",
+        notes=[],
+        same=None,
+        minor=None,
+        conf=None,
+        probs={},
+        opinion_n=2,
+        header_meta={"kind": "design"},
+    )
+    check(
+        "## How each finding posts" not in design and "**how it posts**" not in design,
+        "design judgment is unchanged and has no how-it-posts section",
+    )
+
+
 def main() -> None:
     import tempfile
 
@@ -697,6 +794,7 @@ def main() -> None:
         test_resolver(tmp)
         test_usage(tmp)
         test_decide(tmp, judge)
+        test_how_it_posts(tmp, judge)
         test_later(judge)
         test_stack(tmp)
         test_leg_seconds(tmp, judge)
