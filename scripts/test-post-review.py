@@ -70,7 +70,10 @@ if '-X' in args:
         print(json.dumps({'id': 900, 'state': 'COMMENTED',
                           'html_url': 'https://github.com/example/widgets/pull/7#pullrequestreview-900'}))
 elif base == repo:
-    print(json.dumps({'head': {'sha': os.environ.get('GH_HEAD', '1' * 40)}}))
+    pr = {'head': {'sha': os.environ.get('GH_HEAD', '1' * 40)}}
+    if os.environ.get('GH_PR_AUTHOR'):
+        pr['user'] = {'login': os.environ['GH_PR_AUTHOR']}
+    print(json.dumps(pr))
 elif base == repo + '/files':
     print(json.dumps(json.loads(Path(os.environ['GH_FILES']).read_text()) if page == 1 else []))
 elif '/contents/' in base:
@@ -1279,6 +1282,101 @@ def test_file_level_and_reanchor(root: Path) -> None:
     check(proc.returncode == 0, f'an explicit expect still matches as a substring ({proc.returncode} {proc.stderr.strip()})')
 
 
+SELF_NOTE = ' (posted as a comment because this is your own PR)'
+
+
+def test_self_authored(root: Path) -> None:
+    """GitHub rejects REQUEST_CHANGES and APPROVE on your own PR; the stub's gh user is `me`."""
+    failed: list[str] = []
+
+    def soft(cond: bool, label: str) -> None:
+        print(('ok ' if cond else 'FAIL ') + label)
+        if not cond:
+            failed.append(label)
+
+    def first_line(text: str) -> str:
+        return text.splitlines()[0] if text else ''
+
+    mine, theirs = {'GH_PR_AUTHOR': 'me'}, {'GH_PR_AUTHOR': 'someone-else'}
+
+    f = Fixture(root / 'self-requested')
+    inline_only(f, [one_inline('**Requested:** size counts deleted items.')])
+    proc = f.post('--dry-run', env=mine)
+    req = request_of(f) if proc.returncode == 0 else {}
+    soft(proc.returncode == 0 and req.get('event') == 'COMMENT'
+         and first_line(req.get('body', '')) == 'Verdict: request changes' + SELF_NOTE
+         and (req.get('comments') or [{}])[0].get('body', '').startswith('**Requested:**')
+         and 'COMMENT' in proc.stdout and 'your own PR' in proc.stdout,
+         f'own PR, Requested finding: dry run reports COMMENT, the verdict first line, and keeps the label '
+         f'({proc.returncode} {proc.stderr.strip()} {req.get("event")!r} {req.get("body")!r})')
+    real = f.post(env=mine)
+    sent = json.loads((f.state / 'posted-request.json').read_text()) if (f.state / 'posted-request.json').is_file() else {}
+    soft(real.returncode == 0 and sent.get('event') == 'COMMENT'
+         and first_line(sent.get('body', '')) == 'Verdict: request changes' + SELF_NOTE
+         and sent.get('comments', [{}])[0].get('body', '').startswith('**Requested:**'),
+         f'own PR, Requested finding: the POST is a COMMENT with the verdict line ({real.returncode} {real.stderr.strip()} {sent.get("event")!r})')
+
+    f = Fixture(root / 'self-requested-comment')
+    inline_only(f, [one_inline('**Requested:** size counts deleted items.')])
+    proc = f.post('--dry-run', '--human-verdict', 'COMMENT', env=mine)
+    req = request_of(f) if proc.returncode == 0 else {}
+    soft(proc.returncode == 0 and req.get('event') == 'COMMENT'
+         and first_line(req.get('body', '')) == 'Verdict: request changes' + SELF_NOTE,
+         f'own PR: --human-verdict COMMENT is allowed with a Requested finding ({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'self-approve')
+    inline_only(f, [one_inline('**Advisory:** size counts deleted items.')])
+    write_voters(f, 2)
+    proc = f.post('--dry-run', '--human-verdict', 'APPROVE', env=mine)
+    req = request_of(f) if proc.returncode == 0 else {}
+    soft(proc.returncode == 0 and req.get('event') == 'COMMENT'
+         and first_line(req.get('body', '')) == 'Verdict: approve' + SELF_NOTE
+         and (req.get('comments') or [{}])[0].get('body', '').startswith('**Advisory:**'),
+         f'own PR, APPROVE chosen: posts as COMMENT with the approve verdict line and the label '
+         f'({proc.returncode} {proc.stderr.strip()} {req.get("event")!r} {req.get("body")!r})')
+    real = f.post('--human-verdict', 'APPROVE', env=mine)
+    sent = json.loads((f.state / 'posted-request.json').read_text()) if (f.state / 'posted-request.json').is_file() else {}
+    soft(real.returncode == 0 and sent.get('event') == 'COMMENT'
+         and first_line(sent.get('body', '')) == 'Verdict: approve' + SELF_NOTE,
+         f'own PR, APPROVE chosen: the POST is a COMMENT ({real.returncode} {real.stderr.strip()} {sent.get("event")!r})')
+
+    f = Fixture(root / 'self-comment')
+    inline_only(f, [one_inline('**Advisory:** size counts deleted items.')])
+    write_voters(f, 2)
+    proc = f.post('--dry-run', '--human-verdict', 'COMMENT', env=mine)
+    req = request_of(f) if proc.returncode == 0 else {}
+    soft(proc.returncode == 0 and req.get('event') == 'COMMENT' and req.get('body') == 'One note on the widget change.',
+         f'own PR, COMMENT chosen: no verdict line is added ({proc.returncode} {proc.stderr.strip()} {req.get("body")!r})')
+
+    f = Fixture(root / 'other-requested')
+    inline_only(f, [one_inline('**Requested:** size counts deleted items.')])
+    proc = f.post('--dry-run', env=theirs)
+    req = request_of(f) if proc.returncode == 0 else {}
+    soft(proc.returncode == 0 and req.get('event') == 'REQUEST_CHANGES'
+         and req.get('body') == 'One note on the widget change.' and 'own PR' not in proc.stdout
+         and 'own PR' not in json.dumps(req),
+         f'someone else\'s PR, Requested finding: still REQUEST_CHANGES with the body unchanged '
+         f'({proc.returncode} {proc.stderr.strip()} {req.get("event")!r} {req.get("body")!r})')
+
+    f = Fixture(root / 'other-approve')
+    inline_only(f, [one_inline('**Advisory:** size counts deleted items.')])
+    write_voters(f, 2)
+    proc = f.post('--dry-run', '--human-verdict', 'APPROVE', env=theirs)
+    req = request_of(f) if proc.returncode == 0 else {}
+    soft(proc.returncode == 0 and req.get('event') == 'APPROVE' and req.get('body') == 'One note on the widget change.',
+         f'someone else\'s PR, APPROVE chosen: still APPROVE with the body unchanged '
+         f'({proc.returncode} {proc.stderr.strip()} {req.get("event")!r} {req.get("body")!r})')
+
+    f = Fixture(root / 'no-author')
+    inline_only(f, [one_inline('**Requested:** size counts deleted items.')])
+    proc = f.post('--dry-run')
+    req = request_of(f) if proc.returncode == 0 else {}
+    soft(proc.returncode == 0 and req.get('event') == 'REQUEST_CHANGES' and req.get('body') == 'One note on the widget change.',
+         f'a PR response with no author is not treated as your own ({proc.returncode} {proc.stderr.strip()} {req.get("event")!r})')
+    if failed:
+        raise SystemExit(f'FAIL {len(failed)} self-authored check(s)')
+
+
 def test_verdict(root: Path) -> None:
     f = Fixture(root / 'requested')
     inline_only(f, [one_inline('**Requested:** size counts deleted items.')])
@@ -1471,6 +1569,7 @@ def main() -> None:
         test_severity_on_comments(root)
         test_file_level_and_reanchor(root)
         test_verdict(root)
+        test_self_authored(root)
     print('all post-review checks passed')
 
 

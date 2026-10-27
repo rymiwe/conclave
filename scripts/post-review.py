@@ -56,7 +56,12 @@ Steps, in order. Any failure stops before the POST.
    a real post needs --human-verdict. APPROVE is accepted there only when
    2 or more voters finished (blind/key.txt, else voters_finished). APPROVE
    is never chosen here. With no labeled finding the payload event is
-   kept, COMMENT by default, as before.
+   kept, COMMENT by default, as before. When the PR's author is the
+   posting account (gh api user), GitHub rejects REQUEST_CHANGES and
+   APPROVE, so the review posts as COMMENT, every label stays, and the
+   first body line reads "Verdict: request changes (posted as a comment
+   because this is your own PR)", or "approve". --human-verdict COMMENT
+   is accepted there. A dry run prints that plan.
 5. Every body must pass scripts/check-comment-links.py, and the payload must
    pass scripts/check-comment-labels.py. That check flags a summary that opens
    with a label, a labeled reply, and a new inline comment that does not
@@ -413,6 +418,7 @@ def main() -> int:
     if head_sha != commit:
         die(f"PR head is {head_sha}, payload commit_id is {commit}; re-verify the anchors")
 
+    pr_author = ((head or {}).get("user") or {}).get("login")
     file_rows = gh_pages(f"repos/{repo}/pulls/{args.pr}/files")
     patches_here = {f["filename"]: f.get("patch") or "" for f in file_rows}
     files = {name: right_lines(patch) for name, patch in patches_here.items()}
@@ -751,6 +757,15 @@ def main() -> int:
     # changes. With labeled findings and none Requested, the event is the
     # human's: APPROVE is only offered, with 2 or more voters finished, and
     # is never chosen here. COMMENT is never the default when findings exist.
+    own: list[bool] = []
+
+    def own_pr() -> bool:
+        """The PR's author is the account that posts. GitHub rejects REQUEST_CHANGES and APPROVE there."""
+        if not own:
+            own.append(bool(pr_author) and str((gh_json(["api", "user"]) or {}).get("login", "")).casefold()
+                       == str(pr_author).casefold())
+        return own[0]
+
     labeled = [p for p in plan if p["label"]]
     requested = sum(1 for p in labeled if p["label"] == REQUESTED)
     human = args.human_verdict
@@ -766,10 +781,10 @@ def main() -> int:
     elif requested:
         event = "REQUEST_CHANGES"
         plan_verdict = f"verdict: REQUEST_CHANGES ({requested} Requested)"
-        if payload_event not in (None, "REQUEST_CHANGES"):
+        if payload_event not in (None, "REQUEST_CHANGES", "COMMENT" if own_pr() else None):
             errors.append(f"payload event {payload_event} conflicts with {requested} Requested finding(s); "
                           "the event is REQUEST_CHANGES")
-        if human not in (None, "REQUEST_CHANGES"):
+        if human not in (None, "REQUEST_CHANGES", "COMMENT" if own_pr() else None):
             errors.append(f"--human-verdict {human} conflicts with {requested} Requested finding(s); "
                           "the event is REQUEST_CHANGES")
     else:
@@ -794,6 +809,15 @@ def main() -> int:
         elif not args.dry_run:
             errors.append(f"{plan_verdict}. A real post needs --human-verdict "
                           f"{'|'.join(HUMAN_VERDICTS)}")
+    if event in ("REQUEST_CHANGES", "APPROVE") and own_pr():
+        verdict_line = f"Verdict: {event.lower().replace('_', ' ')} (posted as a comment because this is your own PR)"
+        plan_verdict += (f"; your own PR (author {pr_author}): GitHub rejects {event}, so it posts as COMMENT "
+                         f"with {verdict_line!r} as the first body line")
+        event = "COMMENT"
+        body = f"{verdict_line}\n\n{body}" if body else verdict_line
+        if len(body) > comment_draft.GITHUB_COMMENT_LIMIT:
+            errors.append(f"review body is {len(body)} characters with the verdict line; "
+                          f"GitHub's limit is {comment_draft.GITHUB_COMMENT_LIMIT}")
     if errors:
         for e in errors:
             print(f"  {e}", file=sys.stderr)

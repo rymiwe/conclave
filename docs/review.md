@@ -1738,6 +1738,15 @@ script calls the posting helper. When the human says post:
 
    Nothing picks APPROVE on its own, and nothing defaults to COMMENT when
    there are findings.
+
+   On your own pull request (the PR's author login equals `gh api user`,
+   compared without case) GitHub rejects `REQUEST_CHANGES` and `APPROVE`.
+   The review then posts as `COMMENT`, every label stays, and the first body
+   line is `Verdict: request changes (posted as a comment because this is
+   your own PR)`, or `Verdict: approve (...)`. `--human-verdict COMMENT` is
+   accepted there. With a Requested finding the line still names the
+   would-be verdict. With none Requested it adds no line. The dry run prints the same plan in the
+   verdict line. A PR you did not author is unchanged.
 3. Read the plan, then run the same command without `--dry-run`. It posts
    one review (`side: RIGHT`, `commit_id`, line), writes
    `post-<pr>.pending.json` with the review id, then reads the comments back.
