@@ -415,8 +415,16 @@ hasnt "grok alias: seat-usage did not get grok" "$su_log" "--builder-vendor grok
 hasnt "grok alias: no note" "$review_out" "merge-gate: note:"
 has "grok alias: gh pr merge" "$gh_log" "pr merge"
 
+CLAUDE_COMMITS='{"commits":[{"messageHeadline":"c","messageBody":"Co-authored-by: Claude <noreply@anthropic.com>\n"}]}'
+FAKE_COMMITS="$CLAUDE_COMMITS" BUILDER=anthropic \
+  FAKE_ROUTE="$(BUILDER=anthropic route argon google gemini-4-argon-high '["agy","--model","gemini-4-argon-high"]')" \
+  run unknowntrailer "$ANSWER"
+[ "$review_rc" = 0 ] && ok "unknown trailer: review rc 0" || bad "unknown trailer: review rc $review_rc"
+has "unknown trailer: note names the co-author" "$review_out" "merge-gate: note: co-author claude names no known model family; builder vendor anthropic is the caller's"
+hasnt "unknown trailer: not the no-trailer note" "$review_out" "no model trailer"
+
 FAKE_COMMITS_FAIL=1 FAKE_ROUTE="$ROUTE_ARGON" run commitsfail "$ANSWER"
-refused "commits read failed" "merge-gate: refused: could not read the PR commits for $PR"
+refused "commits read failed" "merge-gate: refused: could not read the PR commits for $PR: HTTP 401"
 [ -z "$su_log" ] && ok "commits read failed: seat-usage not called" || bad "commits read failed: seat-usage ran: $su_log"
 hasnt "commits read failed: no note" "$review_out" "merge-gate: note:"
 [ -z "$run_log" ] && ok "commits read failed: no reviewer" || bad "commits read failed: reviewer launched"
@@ -505,6 +513,8 @@ check("opus 4", vendor_from_commits(doc("Co-authored-by: Opus 4 <a@b>\n")), "ant
 check("opus4 is not a family", vendor_from_commits(doc("Co-authored-by: opus4 <a@b>\n")), "")
 check("myopus is not a family", vendor_from_commits(doc("Co-authored-by: myopus <a@b>\n")), "")
 check("case", vendor_from_commits(doc("Co-Authored-By: FABLE <a@b>\n")), "anthropic")
+check("unknown claude", __import__("trailer_vendor").unmatched_names(doc("Co-authored-by: Claude <a@b>\n")), ["claude"])
+check("unknown skips cursor", __import__("trailer_vendor").unmatched_names(doc("Co-authored-by: Cursor <a@b>\n")), [])
 check("normalize grok", normalize_vendor("Grok"), "xai")
 check("normalize xai", normalize_vendor("XAI"), "xai")
 sys.exit(fail)

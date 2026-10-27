@@ -9,7 +9,7 @@
 # that, it reads the PR commits and checks V against Co-authored-by trailers.
 # One named vendor must match V (grok counts as xai). Several named vendors,
 # or a commits read that fails, refuse (exit 3, one line) before seat-usage
-# runs. No model trailer keeps V and prints one note. When the route asks,
+# runs. No model trailer, or one outside the known families, keeps V and prints one note. When the route asks,
 # fails, names none, returns no argv list (a seat-usage older than that
 # contract), or records a builder vendor and reviewer vendor that are missing
 # or the same, it refuses (exit 3, one line) before any reviewer runs.
@@ -56,9 +56,10 @@ review() {
   mkdir -p "$out" || exit 1
   # A refusal must not leave an earlier verdict for merge to read.
   rm -f "$out/gate.md" "$out/gate-verdict.json" "$out/gate-head.txt" "$out/gate-route.json"
-  vendor=$(python3 "$ROOT/scripts/trailer_vendor.py" normalize "$vendor") || exit 1
-  commits=$("$GH" pr view "$pr" --json commits 2>/dev/null) \
-    || refuse "could not read the PR commits for $pr"
+  vendor=$(python3 "$ROOT/scripts/trailer_vendor.py" normalize "$vendor") \
+    || refuse "could not normalize builder vendor $6"
+  commits=$("$GH" pr view "$pr" --json commits 2> "$out/gate-commits.err") \
+    || { why=$(head -n 1 "$out/gate-commits.err"); refuse "could not read the PR commits for $pr${why:+: $why}"; }
   derived=$(printf '%s' "$commits" | python3 "$ROOT/scripts/trailer_vendor.py" from-commits) \
     || refuse "could not read the PR commits for $pr"
   status=${derived%%$'\n'*}
@@ -67,6 +68,8 @@ review() {
   case "$status" in
     ambiguous)
       refuse "the PR commit trailers name several vendors ($listed), so no single builder vendor can be verified" ;;
+    unknown)
+      echo "merge-gate: note: co-author $listed names no known model family; builder vendor $vendor is the caller's" ;;
     "")
       echo "merge-gate: note: no model trailer on the PR commits; builder vendor $vendor is the caller's" ;;
     "$vendor") ;;

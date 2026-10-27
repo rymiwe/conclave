@@ -3,8 +3,10 @@
 
 vendor_from_commits takes the document from `gh pr view --json commits`
 (author may be present and is ignored) and returns one vendor, "ambiguous",
-or "". A display name of Cursor or Cursor Agent names no model. grok and xai
-are the same vendor.
+or "". The from-commits command prints "unknown" and the names when a trailer
+names someone but no known family (Claude Code's default "Claude", say). A
+display name of Cursor or Cursor Agent names no model. grok and xai are the
+same vendor.
 """
 from __future__ import annotations
 
@@ -39,6 +41,28 @@ def normalize_vendor(value: object) -> str:
     return text
 
 
+def trailers(doc: dict):
+    """Yield the lowercase display name of each Co-authored-by trailer."""
+    for commit in doc.get("commits") or []:
+        if not isinstance(commit, dict):
+            continue
+        text = (commit.get("messageHeadline") or "") + "\n" + (commit.get("messageBody") or "")
+        for match in TRAILER.finditer(text):
+            yield match.group(1).strip().split("<", 1)[0].strip().lower()
+
+
+def unmatched_names(doc: dict) -> list[str]:
+    """Co-author display names that are not Cursor and name no known family."""
+    out: set[str] = set()
+    for name in trailers(doc):
+        if name in CURSOR_NAMES or not name:
+            continue
+        if not any(re.search(r"(?<![a-z0-9])" + re.escape(fam) + r"(?![a-z0-9])", name)
+                   for fam, _ in FAMILIES):
+            out.add(name)
+    return sorted(out)
+
+
 def vendors_named(doc: dict) -> set[str]:
     vendors: set[str] = set()
     for commit in doc.get("commits") or []:
@@ -69,7 +93,9 @@ def vendor_from_commits(doc: dict) -> str:
 def _emit(doc: dict) -> str:
     status = vendor_from_commits(doc)
     if not status:
-        return ""
+        names = unmatched_names(doc)
+        # A trailer that names someone, but no family the council knows.
+        return "unknown\n" + ", ".join(names) + "\n" if names else ""
     listed = ", ".join(sorted(vendors_named(doc)))
     return status + "\n" + listed + "\n"
 
