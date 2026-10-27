@@ -20,6 +20,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 import audit_gate  # noqa: E402
+import finding_context  # noqa: E402
 from conclave_env import setting  # noqa: E402
 
 API_URL = os.environ.get("TYPESAFE_BASE_URL", "https://api.typesafe.ai").rstrip(
@@ -554,6 +555,11 @@ def load_findings(path: Path, *, audit: bool = False) -> dict:
     doc = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(doc, dict) or not isinstance(doc.get("findings"), list):
         raise SystemExit("findings.json needs an object with a findings array")
+    if "verified_at" in doc and (
+        not isinstance(doc["verified_at"], str)
+        or not re.fullmatch(r"[0-9a-fA-F]{7,40}", doc["verified_at"])
+    ):
+        raise SystemExit("verified_at must be the head commit the chair verified at")
     seen: set[str] = set()
     for f in doc["findings"]:
         if not isinstance(f, dict):
@@ -578,6 +584,12 @@ def load_findings(path: Path, *, audit: bool = False) -> dict:
         seen.add(fid)
         if not isinstance(f["repro_executed"], bool):
             raise SystemExit(f"{fid}: repro_executed must be a JSON boolean")
+        if f["repro_executed"] and re.sub(
+            r"[\s.]+$", "", str(f["evidence"]).strip().lower()
+        ) in ("", "no run was made"):
+            raise SystemExit(
+                f"{fid}: repro_executed is true but evidence holds no command or output"
+            )
         legs = f["legs"]
         if not isinstance(legs, dict) or not legs:
             raise SystemExit(f"{fid}: legs must be a non-empty object")
@@ -614,6 +626,59 @@ def load_findings(path: Path, *, audit: bool = False) -> dict:
     return doc
 
 
+# What cited_code holds (finding_context sets f["cited_context"]): how to name
+# it to Jev, and what reading it cannot show. A finding never expanded holds
+# the chair's quote only.
+CITED_CONTEXT = {
+    finding_context.FUNCTION_AND_CALLER: (
+        "the enclosing function and one caller, read from the repo",
+        "",
+    ),
+    finding_context.FUNCTION_ONLY: (
+        "the enclosing function, read from the repo; no caller is shown",
+        "any caller of the function",
+    ),
+    finding_context.WINDOW: (
+        "the lines around the cited line, read from the repo; no enclosing "
+        "function was found, so the rest of the function is not shown",
+        "the enclosing function beyond these lines",
+    ),
+    finding_context.CHAIR_QUOTE_KEPT: (
+        "the chair's own quote; it was not read from the repo",
+        "the repo code around the quote",
+    ),
+    finding_context.CHAIR_QUOTE_ONLY: (
+        "the chair's quote only; the code was not read from the repo",
+        "the repo code around the quote",
+    ),
+}
+
+
+def cited_context(f: dict) -> tuple[str, str]:
+    """(what cited_code holds, what it cannot show) for this finding."""
+    return CITED_CONTEXT.get(
+        f.get("cited_context"), CITED_CONTEXT[finding_context.CHAIR_QUOTE_ONLY]
+    )
+
+
+def verification_line(doc: dict, f: dict) -> str:
+    """What was done to check this finding at the reviewed head. Facts only."""
+    at = str(doc.get("verified_at") or "")[:8]
+    if f["repro_executed"]:
+        where = f" at head {at}" if at else ""
+        return (
+            f"executed{where}. The evidence is the command that was run and its "
+            "real output."
+        )
+    what, _ = cited_context(f)
+    if at:
+        return (
+            f"checked at head {at} by reading; no runnable repro was found. "
+            f"The cited code below is {what}."
+        )
+    return f"none: read-only, no run was made. The cited code below is {what}."
+
+
 def build_findings_state(doc: dict) -> str:
     """State for Jev. Claims and cited code only: no leg labels, vendors, or counts."""
     parts = ["# Findings under review\n"]
@@ -621,7 +686,9 @@ def build_findings_state(doc: dict) -> str:
     if target:
         parts.append(f"target: {target}\n")
     parts.append(
-        "\nJudge each finding from its claim, the cited code, and the evidence.\n"
+        "\nJudge each finding from its claim, the cited code, the verification, "
+        "and the evidence. A finding marked executed was run; its evidence is "
+        "the command output, not an opinion.\n"
     )
     for f in doc["findings"]:
         fid = f["id"]
@@ -629,6 +696,7 @@ def build_findings_state(doc: dict) -> str:
             f"\n## {fid}\n"
             f"claim: {f['claim']}\n"
             f"cited: {f['file']}:{f['line']}\n"
+            f"verification: {verification_line(doc, f)}\n"
             f"cited_code:\n{f['cited_code']}\n"
             f"evidence: {f['evidence']}\n"
         )
@@ -639,28 +707,62 @@ def findings_questions(doc: dict) -> dict:
     qs: dict = {}
     for f in doc["findings"]:
         fid = str(f["id"])
-        qs[fid] = {
-            "type": "choice",
-            "instructions": (
-                "Should this review finding be reported to the author?\n\n"
-                f"Finding {fid}: {f['claim']}. "
-                f"Cited code is the {fid} cited_code in state. "
-                f"Evidence is the {fid} evidence in state."
-            ),
-            "criteria": {
+        executed = bool(f["repro_executed"])
+        if executed:
+            where = f" at head {str(doc['verified_at'])[:8]}" if doc.get("verified_at") else ""
+            how = (
+                f"The verification for {fid} was executed{where}: its evidence in "
+                "state is the command that was run and its output. "
+            )
+            criteria = {
+                "post": (
+                    "The command output shows the stated failure, so the "
+                    "finding should be reported."
+                ),
+                "hold": (
+                    "The output is inconclusive: it does not show the stated "
+                    "failure, or it ran something other than the claimed trigger."
+                ),
+                "drop": (
+                    "The output contradicts the claim, or the failure it shows "
+                    "is not the one claimed."
+                ),
+            }
+        else:
+            what, missing = cited_context(f)
+            at = str(doc.get("verified_at") or "")[:8]
+            checked = (
+                f"{fid} was checked at head {at} by reading"
+                if at
+                else f"{fid} was not run and no verification was recorded"
+            )
+            how = f"{checked}. Its cited_code in state is {what}. "
+            not_shown = f" The cited code does not show {missing}." if missing else ""
+            criteria = {
                 "post": (
                     "The cited code shows the stated failure happens under "
                     "reachable inputs; the finding should be reported."
                 ),
                 "hold": (
-                    "Plausible but unproven: depends on behaviour outside the "
-                    "cited code or on a scenario nobody exercised."
+                    "Plausible but unproven: the failure depends on behaviour "
+                    "not shown in the cited code, or on input state that "
+                    f"reading cannot establish. Name what is missing.{not_shown}"
                 ),
                 "drop": (
                     "The cited code does not support the failure, the trigger "
                     "is unreachable, or the finding is a style opinion."
                 ),
-            },
+            }
+        qs[fid] = {
+            "type": "choice",
+            "instructions": (
+                "Should this review finding be reported to the author?\n\n"
+                f"Finding {fid}: {f['claim']}. "
+                + how
+                + f"Cited code is the {fid} cited_code in state. "
+                f"Evidence is the {fid} evidence in state."
+            ),
+            "criteria": criteria,
         }
     return qs
 
@@ -1403,19 +1505,67 @@ def _audit_gate(verified: dict[str, str]):
     return gate_of, repro_of
 
 
+def refuse_head_mismatch(header: dict, doc: dict) -> None:
+    """Refuse findings verified at another commit than the ballot reviewed.
+
+    cited_code is read at head_oid, and the verification line names
+    verified_at, so the two must be the same commit (case aside).
+    """
+    head = str(header.get("head_oid") or "")
+    at = str(doc.get("verified_at") or "")
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", head) or not at:
+        return
+    if head.casefold() != at.casefold():
+        raise SystemExit(
+            f"findings.json verified_at {at[:8]} is not header.json head_oid {head[:8]}; "
+            "verify the findings at the reviewed head"
+        )
+
+
+def _expand_cited_code(d: Path, doc: dict, header: dict, repo: str) -> None:
+    """Fill each short cited_code with the enclosing function and one caller.
+
+    The head is the commit the ballot reviewed (header.json head_oid), or the
+    commit the chair verified at. Without a repo or a head the quote stays as
+    the chair wrote it, and the note says so.
+    """
+    head = str(header.get("head_oid") or "")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", head):
+        head = str(doc.get("verified_at") or "")
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", head):
+            head = ""
+    if not repo or not head:
+        why = "no --repo" if not repo else "no head commit in header.json"
+        notes = [f"{f['id']}: not expanded ({why})" for f in doc["findings"]]
+        for f in doc["findings"]:
+            f["cited_context"] = finding_context.CHAIR_QUOTE_ONLY
+    else:
+        notes = finding_context.expand_findings(doc, repo, head)
+    (d / "cited-code-notes.txt").write_text("\n".join(notes) + "\n", encoding="utf-8")
+    for line in notes:
+        print(f"jev-judge: cited_code {line}", file=sys.stderr)
+
+
 def findings_main(argv: list[str]) -> None:
     if not argv or argv[0] in ("-h", "--help"):
         raise SystemExit(
-            "usage: jev-judge.py --findings <dir> [--canned response.json]"
+            "usage: jev-judge.py --findings <dir> [--canned response.json] [--repo <git dir>]"
         )
     d = Path(argv[0])
     canned: Path | None = None
+    repo = ""
     i = 1
     while i < len(argv):
         if argv[i] == "--canned":
             if i + 1 >= len(argv):
                 raise SystemExit("--canned requires a file")
             canned = Path(argv[i + 1])
+            i += 2
+            continue
+        if argv[i] == "--repo":
+            if i + 1 >= len(argv):
+                raise SystemExit("--repo requires a directory")
+            repo = argv[i + 1]
             i += 2
             continue
         raise SystemExit(f"unknown findings argument: {argv[i]}")
@@ -1425,7 +1575,10 @@ def findings_main(argv: list[str]) -> None:
     header = load_run_header(d)
     audit = header.get("kind") == "audit"
     doc = load_findings(findings_path, audit=audit)
+    refuse_head_mismatch(header, doc)
     leg_labels = load_leg_labels(d)
+    if not audit and doc["findings"]:
+        _expand_cited_code(d, doc, header, repo)
     verified: dict[str, str] = {}
     gate_of = None
     repro_of = None

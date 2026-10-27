@@ -106,10 +106,15 @@ if '--dry-run' in args:
             time.sleep(0.01)
     sys.exit(0)
 if '--findings' in args:
+    try: stamped = json.loads((d/'findings.json').read_text()).get('verified_at')
+    except Exception: stamped = None
+    with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['findings-gate', args[0], stamped])+'\\n')
     (d/'judgment.md').write_text('head_oid: ' + 'a'*40 + '\\n')
     (d/'decide.md').write_text('f1 — **what breaks, for whom**: TODO(chair)\\n**how sure**: read\\n**later PRs that change this file**: none\\n**recommend**: TODO(chair)\\n')
 else:
     (d/'blind').mkdir(exist_ok=True)
+    if os.environ.get('HEADER_OID'):
+        (d/'header.json').write_text(json.dumps({'kind': 'review', 'head_oid': os.environ['HEADER_OID']}))
     (d/'blind/leg-A.md').write_text('a blinded report')
     (d/'errors.md').write_text(os.environ.get('PHASE1_ERRORS', '(none)')+'\\n')
     if os.environ.get('PHASE1_HOLD'):
@@ -210,9 +215,17 @@ else:
         time.sleep(10)
     if ballot.name.endswith(os.environ.get('POST_PR','never')):
         print(json.dumps({'type':'tool_call','tool_call':{'shellToolCall':{'args':{'command':'gh pr comment 2 --body bad'}}}}))
+    if 'Round B1.' in prompt:
+        wt = pathlib.Path(args[args.index('--workspace')+1])
+        head = subprocess.run(['git', '-C', str(wt), 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
+        with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['verify-chair', ballot.name, str(wt), head, (wt/'.env').exists()])+'\\n')
+        oid = re.search(r'reviewed head ([0-9a-f]{40})', prompt)[1]
+        if not os.environ.get('VERIFY_NO_STAMP'): (ballot/'findings.json').write_text(json.dumps({'verified_at': oid, 'findings': [{'id': 'f1', 'claim': 'c', 'file': 'a.rb', 'line': 1,
+            'cited_code': 'one', 'evidence': '$ ruby repro/f1.rb\\nboom', 'repro_executed': True, 'legs': {'A': 'found'}}]}))
     if 'Round B.' in prompt:
         if 'phase 4 only' not in prompt:
-            (ballot/'findings.json').write_text(json.dumps({'findings':[]}))
+            if 'already written and verified' not in prompt:
+                (ballot/'findings.json').write_text(json.dumps({'findings':[]}))
             subprocess.run([os.environ['COUNCIL_SCRIPT'], ballot.name, '--findings'], check=True)
         path = ballot/'decide.md'
         path.write_text(path.read_text().replace('TODO(chair)','hold'))
@@ -229,7 +242,8 @@ class Fixture:
         self.repo.mkdir(parents=True)
         scripts = self.root / 'scripts'
         scripts.mkdir(parents=True)
-        for name in ('stack-run.py', 'review-stack.py', 'conclave_env.py', 'review-kind.sh', 'lineup.py'):
+        for name in ('stack-run.py', 'review-stack.py', 'conclave_env.py', 'review-kind.sh', 'lineup.py',
+                     'jev-judge.py', 'audit_gate.py', 'finding_context.py'):
             shutil.copyfile(SCRIPTS / name, scripts / name)
         self.bin = self.base / 'bin'
         write_exe(self.bin / 'gh', GH)
@@ -478,6 +492,92 @@ def test_reconcile(tmp: Path, mod) -> None:
     f.env['RECONCILE_FAIL'] = '1'
     got = f.invoke('--reconcile-only', context=False)
     check(got.returncode == 1 and git('worktree','list','--porcelain') == before, 'failed reconcile chair also cleans worktree')
+
+
+def test_verify_before_jev(tmp: Path, mod) -> None:
+    """The at-head verification runs before Jev, and Jev reads what it wrote."""
+    f = Fixture(tmp, 'verify')
+    oid = f.reconcile_repo()
+    f.env['HEADER_OID'] = oid
+    got = f.invoke(*PER_PR)
+    check(got.returncode == 0, f'verify run exits zero ({got.stderr})')
+    calls = f.calls()
+    index = {id(c): i for i, c in enumerate(calls)}
+    for n in (1, 2, 3):
+        v = next((c for c in calls if c[0] == 'verify-chair' and c[1] == f'p-{n}'), None)
+        g = next((c for c in calls if c[0] == 'council' and c[1] == [f'p-{n}', '--findings']), None)
+        stamp = next((c for c in calls if c[0] == 'findings-gate' and c[1] == f'p-{n}'), None)
+        check(v is not None and g is not None and index[id(v)] < index[id(g)], f'p-{n}: verify chair starts before the findings gate')
+        check(stamp is not None and stamp[2] == oid, f'p-{n}: the findings gate read findings.json stamped verified_at {oid[:8]}')
+        check(v is not None and v[3] == oid, f'p-{n}: the verify chair ran in a worktree at the reviewed head')
+        check(v is not None and v[4] is True, f'p-{n}: the verify worktree has the ignored local config')
+        check(v is not None and not Path(v[2]).exists(), f'p-{n}: the verify worktree is removed')
+    prompts = [c[1][-1] for c in calls if c[0] == 'cursor']
+    b1 = [p for p in prompts if 'Round B1.' in p]
+    b2 = [p for p in prompts if 'Round B.' in p]
+    check(len(b1) == 3 and len(b2) == 3, 'one verify prompt and one round B prompt per ballot')
+    check(all('before anything judges it' in p and 'Do not run the findings command' in p for p in b1),
+          'the verify prompt forbids running the gate and asks for command plus output')
+    check(all('already written and verified' in p and 'Do not rewrite it' in p for p in b2),
+          'round B reuses the verified findings.json')
+    check(all(r.get('verify') == 'ok' for r in f.record()['prs']), 'run.json records verify ok per ballot')
+    shallow = 'Do not pass --depth, --shallow-*, or --unshallow to git.'
+    check(all(shallow in p for p in b1), 'verify prompt forbids shallow fetches')
+
+    # A rerun after the verify pass reuses it: no second verify chair.
+    f2 = Fixture(tmp, 'verify-reuse')
+    oid = f2.reconcile_repo()
+    f2.env['HEADER_OID'] = oid
+    b = f2.ballot(2)
+    (b / 'blind').mkdir()
+    (b / 'blind/leg-A.md').write_text('report')
+    (b / 'errors.md').write_text('(none)\n')
+    (b / 'header.json').write_text(json.dumps({'kind': 'review', 'head_oid': oid}))
+    (b / 'brief.md').write_text('kind: review\ndifficulty: high\n')
+    receipt(b)
+    (b / 'findings.json').write_text(json.dumps({'verified_at': oid, 'findings': []}))
+    got = f2.invoke('--pr', '2', *PER_PR)
+    check(got.returncode == 0, f'resume with a verified findings.json exits zero ({got.stderr})')
+    check(not any(c[0] == 'verify-chair' and c[1] == 'p-2' for c in f2.calls()), 'a verified findings.json is not verified again')
+
+    # A stamped findings.json the findings command rejects is not reused: round B rewrites it.
+    f5 = Fixture(tmp, 'verify-rejected')
+    oid = f5.reconcile_repo()
+    f5.env['HEADER_OID'] = oid
+    b = f5.ballot(2)
+    (b / 'blind').mkdir()
+    (b / 'blind/leg-A.md').write_text('report')
+    (b / 'errors.md').write_text('(none)\n')
+    (b / 'header.json').write_text(json.dumps({'kind': 'review', 'head_oid': oid}))
+    (b / 'brief.md').write_text('kind: review\ndifficulty: high\n')
+    receipt(b)
+    (b / 'findings.json').write_text(json.dumps({'verified_at': oid, 'findings': [{'id': 'f1', 'claim': 'c', 'file': 'a.rb',
+        'line': 1, 'cited_code': 'one', 'evidence': 'no run was made', 'repro_executed': True, 'legs': {'A': 'found'}}]}))
+    got = f5.invoke('--pr', '2', *PER_PR)
+    b2 = [c[1][-1] for c in f5.calls() if c[0] == 'cursor' and f'Round B. Ballot directory: {b}.' in c[1][-1]]
+    row = next(r for r in f5.record()['prs'] if r.get('ballot', '').endswith('p-2') or r.get('number') == 2)
+    check(len(b2) == 1 and 'already written and verified' not in b2[0] and 'Rewrite findings.json' in b2[0]
+          and 'holds no command or output' in b2[0], f'round B is told to rewrite a stamped file the gate rejects ({len(b2)} prompts)')
+    check(row.get('verify') != 'reused', f'a rejected stamp is not recorded as reused ({row.get("verify")})')
+    check(got.returncode == 0, f'the rerun recovers once round B rewrites findings.json ({got.stderr[-200:]})')
+
+    # A verify chair that writes no stamp fails the ballot before any gate call.
+    f3 = Fixture(tmp, 'verify-nostamp')
+    oid = f3.reconcile_repo()
+    f3.env['HEADER_OID'] = oid
+    f3.env['VERIFY_NO_STAMP'] = '1'
+    got = f3.invoke(*PER_PR)
+    rows = f3.record()['prs']
+    check(any('verify pass did not write findings.json with verified_at' in r['outcome'] for r in rows),
+          f'no stamp fails the ballot ({[r["outcome"] for r in rows]})')
+    check(not any(c[0] == 'council' and '--findings' in c[1] for c in f3.calls()), 'no findings gate runs after a failed verify pass')
+
+    # No head commit in header.json: the pass is skipped and round B works as before.
+    f4 = Fixture(tmp, 'verify-nohead')
+    got = f4.invoke(*PER_PR)
+    check(got.returncode == 0 and not any(c[0] == 'verify-chair' for c in f4.calls()), 'no head_oid skips the verify pass')
+    check(all(str(r.get('verify', '')).startswith('skipped: no head_oid') for r in f4.record()['prs'] if r['outcome'] == 'ok'),
+          'the skip and its reason are in run.json')
 
 
 def test_blocked_resume(tmp: Path, mod) -> None:
@@ -2002,6 +2102,7 @@ def main() -> None:
         test_prompt_words_ignore_repo_path(mod)
         test_cursor_leg(tmp)
         test_local_config_stays_in_worktree(tmp, mod)
+        test_verify_before_jev(tmp, mod)
     print('ok')
 
 

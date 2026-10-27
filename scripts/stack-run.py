@@ -193,6 +193,51 @@ def brief_hash(ballot: Path) -> str:
     return hashlib.sha256((ballot / 'brief.md').read_bytes()).hexdigest()
 
 
+_jev_judge = None
+_jev_judge_lock = threading.Lock()
+
+
+def findings_rejection(ballot: Path) -> str:
+    """Why `--findings` would reject findings.json, or '' when it accepts it."""
+    global _jev_judge
+    with _jev_judge_lock:
+        if _jev_judge is None:
+            spec = importlib.util.spec_from_file_location('jev_judge', ROOT / 'scripts/jev-judge.py')
+            assert spec and spec.loader
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _jev_judge = mod
+    try:
+        header = json.loads(read(ballot / 'header.json') or '{}')
+    except ValueError:
+        header = {}
+    audit = isinstance(header, dict) and header.get('kind') == 'audit'
+    try:
+        _jev_judge.load_findings(ballot / 'findings.json', audit=audit)
+    except SystemExit as exc:
+        return str(exc.code) or 'rejected'
+    except (OSError, ValueError) as exc:
+        return f'unreadable: {exc}'
+    return ''
+
+
+def findings_stamp(ballot: Path, oid: str) -> str:
+    """'verified', 'rejected: <why>', or 'absent' for findings.json at oid.
+
+    The stamp counts only when the findings command would accept the file, so
+    a stamped file it rejects is rewritten rather than reused forever.
+    """
+    try:
+        doc = json.loads(read(ballot / 'findings.json') or 'null')
+    except ValueError:
+        return 'absent'
+    if not (isinstance(doc, dict) and isinstance(doc.get('findings'), list)
+            and str(doc.get('verified_at') or '').lower() == oid.lower()):
+        return 'absent'
+    why = findings_rejection(ballot)
+    return f'rejected: {why}' if why else 'verified'
+
+
 def state(ballot: Path) -> str:
     if (ballot / 'judgment.md').exists():
         decide = read(ballot / 'decide.md')
@@ -964,11 +1009,22 @@ class Runner:
                     self.save()
                 if not list((ballot / 'blind').glob('leg-*.md')):
                     raise RuntimeError('phase 1 produced no blinded reports')
+            session = self.verify_pass(row, ballot, session)
             self.mark_step(row, 'chair B')
             self.save()
-            instructions = ('judgment.md already exists: skip findings.json and the findings command; do phase 4 only. '
-                            if (ballot / 'judgment.md').exists() else
-                            f'Write findings.json in the Findings file schema, then run {shlex.join([self.council, row["ballot"], "--findings"])}. ')
+            head = self.ballot_head(ballot)
+            findings_cmd = shlex.join([self.council, row["ballot"], "--findings"])
+            if (ballot / 'judgment.md').exists():
+                instructions = 'judgment.md already exists: skip findings.json and the findings command; do phase 4 only. '
+            elif head and (stamp := findings_stamp(ballot, head)) == 'verified':
+                instructions = ('findings.json is already written and verified at the reviewed head (Round B1). '
+                                f'Do not rewrite it or rerun a repro. Run {findings_cmd}. ')
+            elif head and stamp.startswith('rejected: '):
+                instructions = (f'findings.json is stamped verified_at {head[:8]} but the findings command rejects it '
+                                f'({stamp[len("rejected: "):]}). Rewrite findings.json in the Findings file schema, '
+                                f'keeping each verified result that is valid, then run {findings_cmd}. ')
+            else:
+                instructions = f'Write findings.json in the Findings file schema, then run {findings_cmd}. '
             span = ''
             if row.get('target'):
                 span = ('For each finding, name the PR that introduced the line (git log on the stack branches). '
@@ -1053,6 +1109,72 @@ class Runner:
                 print(f'stack-run: note: {name} not copied; it resolves outside the worktree', file=sys.stderr)
                 continue
             shutil.copyfile(source, target)
+
+    def ballot_head(self, ballot: Path) -> str:
+        """The commit the ballot reviewed, from header.json, or ''."""
+        try:
+            header = json.loads(read(ballot / 'header.json') or '{}')
+        except ValueError:
+            return ''
+        oid = str(header.get('head_oid') or '') if isinstance(header, dict) else ''
+        return oid.lower() if re.fullmatch(r'[0-9a-fA-F]{40}', oid) else ''
+
+    def verify_pass(self, row: dict, ballot: Path, session: str | None) -> str | None:
+        """Round B1: write findings.json and verify each finding at the ballot head.
+
+        Runs before Jev. Round B is the only step that runs `--findings`, so the
+        gate always reads results that exist. No head commit, or no worktree at
+        it, skips this pass and round B writes findings.json as before.
+        """
+        if (ballot / 'judgment.md').exists():
+            return session
+        oid = self.ballot_head(ballot)
+        if not oid:
+            row['verify'] = 'skipped: no head_oid in header.json'
+            return session
+        stamp = findings_stamp(ballot, oid)
+        if stamp == 'verified':
+            row['verify'] = 'reused'
+            return session
+        if stamp.startswith('rejected: '):
+            row.pop('verify', None)
+            return session
+        repo = str(self.repo)
+        if not commit_exists(repo, oid):
+            row['verify'] = f'skipped: head {oid[:8]} is not in the repo'
+            return session
+        scratch = Path(tempfile.mkdtemp(prefix='council-verify-'))
+        wt = scratch / 'head'
+        try:
+            if scratch.is_relative_to(self.repo) or scratch.is_relative_to(ROOT):
+                raise RuntimeError('temporary worktree must be outside both repositories; set TMPDIR')
+            self.command(['git', '-C', repo, 'worktree', 'add', '--detach', str(wt), oid])
+            self.copy_local_config(wt)
+            self.mark_step(row, 'verify at head')
+            self.save()
+            prompt = (f'Round B1. Ballot directory: {ballot}. Follow {ROOT / "docs/review.md"} phase 2 and '
+                      '"Verify before Jev". Read only blind/leg-*.md for reports; never voter-* files; never blind/key.txt. '
+                      f'Write {ballot / "findings.json"} in the Findings file schema. This worktree is the reviewed head {oid}. '
+                      'Verify every finding here before anything judges it: run the repro (a spec, a runner script, a one-line command) '
+                      'and edit nothing tracked. A finding you ran gets repro_executed true and evidence that starts with the exact command '
+                      'then its real output, including output that contradicts the finding. A finding you cannot run keeps repro_executed false '
+                      'and the evidence "no run was made". Save each repro script as '
+                      f'{ballot / "repro"}/<finding-id>.<ext>. Set the top-level "verified_at" to {oid}. '
+                      f'Do not run the findings command, do not write judgment.md, decide.md, or comments.md. ' + NO_SHALLOW)
+            sid = self.chair(row['ballot'] + '-chair-v', prompt, wt, row, 'chair_verify', session)
+        finally:
+            try:
+                if wt.exists():
+                    self.command(['git', '-C', repo, 'worktree', 'remove', '--force', str(wt)], cleanup=True)
+            finally:
+                self.command(['git', '-C', repo, 'worktree', 'prune'], cleanup=True)
+                shutil.rmtree(scratch, ignore_errors=True)
+        stamp = findings_stamp(ballot, oid)
+        if stamp == 'absent':
+            raise RuntimeError(f'verify pass did not write findings.json with verified_at {oid[:8]}')
+        if stamp == 'verified':
+            row['verify'] = 'ok'
+        return sid or session
 
     def reconcile(self, prs: list[dict]) -> None:
         repo = str(self.repo)

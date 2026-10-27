@@ -27,7 +27,7 @@ copies and `PROMPT.md` under `preview/` only.
 |---|---|---|
 | 0 | `scripts/conclave.sh <id> --dry-run` | Lineup, target, diff shape. Writes only `tmp/council/<id>/preview/`. Local listings only: no voter prompt, no Jev call. |
 | 1 | `scripts/conclave.sh <id>` | One worktree per voter, read-only baseline. The default ballot is the lineup. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, excluding a named author or a caller-passed builder or --builder-vendor and nobody when none of those is set, and falls back to Fable and Astra when that route is missing, fails, or asks.<!-- ballot-rule:end --> Fable is on the reviewer brief. The other seated legs run their own methods, in parallel; Grok is on `cursor-agent` unless `CONCLAVE_GROK_NATIVE=1`. Opus native is a coverage leg on review kind; its agreement with Fable is one vote. Then model check, baseline compare, `scripts/blind.sh`, stop. |
-| 2 | Chair | Read only `blind/leg-*.md`. Write `findings.json`. Do not read `blind/key.txt` yet. |
+| 2 | Chair | Read only `blind/leg-*.md`. Write `findings.json`, and verify each finding at the reviewed head before phase 3 ("Verify before Jev"). Do not read `blind/key.txt` yet. |
 | 3 | `scripts/conclave.sh <id> --findings` | One Jev `choice` per finding, or no call when there are no findings. Writes `judgment.md` (fixed header, then the convergence table) and `decide.md` beside it. `convergence.md` is the same table without the header. |
 | 4 | Chair | Fill `decide.md`: replace every `TODO(chair)`. The what-breaks line says what breaks and for whom, with no code identifiers. Then draft comments. When the pull request has an automated risk rating, the summary states it. Above low, the summary names what drives it and suggests concrete changes that would bring it to low. Save a throwaway repro script as `repro/<finding-id>.<ext>` in the ballot directory. `scripts/check-comment-links.py` checks citations. `scripts/check-comment-labels.py` checks labels on a post payload, and fails the draft when a detected rating is missing from the summary. The script writes no comment prose and posts nothing. |
 
@@ -691,6 +691,8 @@ After the last ballot, the runner builds a detached worktree at the head of the 
 
 The verdict is `still present at the top`, `fixed in #N`, `changed in #N`, or `not checked`. A finding the chair skipped, or an entry that fails validation, is `not checked`, and `run.json` lists the reason. When the chair writes no valid `reconcile.json`, the pass fails and folds nothing, so earlier lines stay. Rerunning the pass replaces the line. A re-judge (`--findings`) that keeps `decide.md` keeps the line. A re-judge that rewrites it leaves the line in `decide.md.prev`; rerun `--reconcile-only`.
 
+It runs after Jev and does not feed it. The check that does feed Jev is the per-ballot verification at the reviewed head ("Verify before Jev").
+
 This replaces the manual check that found 3 of 6 findings from one work pull request fixed in a later pull request. The file-level later-PRs line stays; it misses a fix in a different file.
 
 ### Whole-stack ballot
@@ -1000,6 +1002,7 @@ The chair writes `tmp/council/<id>/findings.json`:
 ```json
 {
   "target": "what was reviewed",
+  "verified_at": "<40-hex head commit the verification ran at>",
   "findings": [
     {
       "id": "f1",
@@ -1023,6 +1026,44 @@ chair ran, then that run's output. A script written for the repro is saved as
 output alone is not enough: on one stack the commands lived only in chair
 transcripts, and a posted comment could not be traced back to its run
 (2026-10-05).
+
+### Verify before Jev
+
+The at-head verification runs before Jev, never after. Jev reads `evidence`; a
+finding it only sees as one quoted line and "no run was made" comes back `hold`
+even when the defect is real (2026-10: 60 of 63 read-only findings held at
+0.06 to 0.11, including ones later confirmed).
+
+1. Check out the reviewed head (`head_oid` in `header.json`) in a detached
+   worktree. The stack runner makes one outside both repos, with the ignored
+   `.env` and `config/database.yml` copied in. A file whose directory resolves
+   outside that worktree (a committed `config` symlink to `/tmp`, say) is not
+   copied, and stack-run prints a `note:` line on stderr.
+2. For every finding, run the repro there (a spec, a runner script, a one-line
+   command). Edit nothing tracked.
+3. A finding you ran gets `repro_executed: true` and `evidence` that starts with
+   the exact command, then its real output, including output that contradicts
+   the finding. Jev then judges the output, and a contradicting output is a
+   `drop` (`second look`), not a post. A finding you could not run keeps
+   `repro_executed: false` and the evidence `no run was made`. The file refuses
+   `repro_executed: true` with no command or output.
+4. Set the top-level `verified_at` to the head commit. Jev's state then says
+   "executed at head <8 chars>", or "checked at head <8 chars> by reading" for a
+   finding with no runnable repro. Without `verified_at` the state says "none:
+   read-only, no run was made."
+5. Only then run `--findings`.
+
+In a stack run this is Round B1, a chair resumed from Round A that writes
+`findings.json` in that worktree and does not run the gate. The runner checks
+that `findings.json` carries `verified_at` equal to the ballot's `head_oid` and
+fails the ballot when it does not. Round B then runs `--findings` and does phase
+4. A rerun with a verified `findings.json` does not verify again. The stamp
+counts only when `jev-judge.py`'s findings check accepts the file: a stamped file
+it rejects is not reused, and Round B is told the reason and rewrites it. With no
+`head_oid` in `header.json`, or a head that is not in the repo, the runner skips
+B1 (`verify: skipped: <reason>` in `run.json`) and Round B writes `findings.json`
+as before. The stack-top reconciliation below is a separate, later question:
+what a later PR changed.
 
 Before Jev, run every read-only finding that a repro script already in the
 ballot directory can execute with changed inputs. Mark it executed when it
@@ -1054,8 +1095,8 @@ silence as a coverage gap.
 ## Jev gate
 
 `scripts/jev-judge.py --findings` asks one `choice` question per finding:
-`post`, `hold`, or `drop`. `state` is the claim, the cited code, and the
-evidence. The default floor is 0.7 (`CONCLAVE_JEV_FINDING_POST_MIN`). The
+`post`, `hold`, or `drop`. `state` is the claim, the cited code, a verification
+line (executed at head, checked by reading, or none), and the evidence. The default floor is 0.7 (`CONCLAVE_JEV_FINDING_POST_MIN`). The
 script binds it the way the Decision mode binds its rules:
 
 | Case | Gate |
@@ -1065,6 +1106,41 @@ script binds it the way the Decision mode binds its rules:
 | Read-only, Jev `post`, confidence at or above 0.7 | `post` |
 | Read-only, Jev `drop` | `second look` (not discarded) |
 | Anything else | `hold` |
+
+The question depends on what was done. An executed finding is judged on the
+command output: `post` when the output shows the failure, `hold` when it is
+inconclusive, `drop` when it contradicts the claim. A read finding is judged on
+its cited code, and `hold` means the failure depends on something the code shown
+does not include; Jev names what is missing. No question calls a scenario "not
+exercised".
+
+`cited_code` is filled by the script, not trusted from the chair. For each
+finding whose quote is under 20 lines, `jev-judge.py` reads `file` at `head_oid`
+from the repo (`--repo`, or the current directory when `conclave.sh --findings` is
+run inside it) and replaces the quote with the enclosing function, padded to at
+least 20 lines and windowed to at most about 80, plus one caller found with
+`git grep` (a non-test caller first; pytest's `test_*.py` counts as a test).
+A caller is a use of the name itself: `save!`, `save?` and `save=` are not
+callers of `save`, and a `?.` optional call is. A definition with a receiver
+(`def self.refund`, `def Payments.refund`) is named `refund`. A multi-line
+signature ends at a line back at the definition's indent unless that line
+closes it (`)`, `]` or `}`).
+The chair's quote stays at the top. The whole text, quote included, is capped at
+6000 characters in pieces: the caller is dropped first (the text then says so and
+counts as the function with no caller), then the window narrows around the
+marked cited line, then the chair's quote is shortened, so the `>` line stays.
+A chair quote of 20 lines or more is capped too. When the repo or
+head is missing, or the cited line is outside the file, the quote is left as
+written. `cited-code-notes.txt` in the ballot says what each finding got.
+
+When `header.json` has a `head_oid` and `findings.json` has a `verified_at`
+that differ (case aside), `--findings` refuses the file before any Jev call:
+the code would be read at one commit and called checked at another.
+
+The question and the `verification:` line name what `cited_code` holds: the
+function and one caller, the function with no caller, the lines around the cited
+line when no enclosing function was found, or the chair's quote when nothing was
+read. The `hold` criterion names the piece that is not shown.
 
 `post` means eligible for a drafted comment. The chair still withholds a
 read-only `post` they do not agree with, and shows both verdicts. Where Jev

@@ -438,6 +438,8 @@ Options:
                          (never the default; a brief 'pr:' header or --pr is the usual target)
   --keep-worktrees       Review or audit: leave voter worktrees in place
   --findings             Review or audit phase 3: judge findings.json (no voters)
+  --repo DIR             With --findings on review: the repo whose commit at head_oid cited_code is read from
+                         (default: the current directory)
   --verdicts             Audit proposal: Jev choice per change (no voters)
   --target URL-OR-FILE   Audit: page URL or file path (flag wins over the header)
   --target-type TYPE     Audit: content | claims | proposal (required; never inferred)
@@ -3249,12 +3251,27 @@ run_jev_judge() {
   [ -s "$DIR/judgment.md" ]
 }
 
+findings_repo_dir() {
+  # The git work tree the findings were reviewed in, or nothing. jev-judge.py
+  # reads cited code from it at the ballot's head commit.
+  local dir top
+  dir="${FLAG_REPO:-$INVOKE_CWD}"
+  case "$dir" in
+    /*) ;;
+    *) dir="$INVOKE_CWD/$dir" ;;
+  esac
+  top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  printf '%s\n' "$top"
+}
+
 run_findings_mode() {
   # A failed rerun must not leave the previous gate's judgment in place.
   rm -f "$DIR/judgment.md" "$DIR/convergence.md"
-  local key
+  local key repo_dir
   local -a cmd
   cmd=(python3 "$ROOT/scripts/jev-judge.py" --findings "$DIR")
+  repo_dir="$(findings_repo_dir)"
+  [ -z "$repo_dir" ] || cmd+=(--repo "$repo_dir")
   # Zero findings is a clean review. Do not call Jev and do not read the key.
   if python3 - "$DIR/findings.json" <<'PY'
 import json, sys
