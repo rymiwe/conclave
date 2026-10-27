@@ -10,7 +10,8 @@
 # and the newest Muse Wonder full model. Plain Wonder is not this pin.
 # The chair is not resolved here: the Bot launches the newest Grok at high,
 # Fast variant (bot-standing-instruction.md appendix).
-# Exits 1 when CODEX or CODEX_REVIEW_MODEL is empty.
+# Exits 1 when CODEX or CODEX_REVIEW_MODEL is empty. Warns on stderr, exit
+# unchanged, when CURSOR_GROK is empty or a newer grok-N-xhigh has no fast id.
 # CONCLAVE_CODEX_BIN, when set, replaces Codex discovery (tests).
 # COUNCIL_CODEX_BIN is the deprecated name and still works. The new name
 # wins when both are set. A real run leaves both unset.
@@ -125,7 +126,21 @@ emit MUSE_WONDER_MODEL "$muse_model"
 # and the stuck-builder are Fast too. The chair is Fast (2026-10-02),
 # picked by the Bot's launch command, not here.
 emit CURSOR_FABLE "$(newest '^claude-fable-([0-9-]+)-thinking-xhigh$' <<<"$cursor_ids")"
-emit CURSOR_GROK "$(newest '^grok-([0-9.]+)-xhigh-fast$' <<<"$cursor_ids")"
+grok_fast=$(newest '^grok-([0-9.]+)-xhigh-fast$' <<<"$cursor_ids")
+grok_plain=$(newest '^grok-([0-9.]+)-xhigh$' <<<"$cursor_ids")
+emit CURSOR_GROK "$grok_fast"
+# Warn, keep exit 0: an empty id makes the voter refuse to launch, and a fast
+# id older than the newest plain xhigh id leaves the voter behind the builder.
+if [ -z "$grok_fast" ]; then
+  echo "resolve-models: no grok-N-xhigh-fast id in cursor-agent models; CURSOR_GROK is empty and the Cursor Grok voter will refuse to launch" >&2
+else
+  fast_ver=${grok_fast#grok-}; fast_ver=${fast_ver%-xhigh-fast}
+  plain_ver=${grok_plain#grok-}; plain_ver=${plain_ver%-xhigh}
+  if [ -n "$grok_plain" ] &&
+    [ "$(printf '%s\n%s\n' "$fast_ver" "$plain_ver" | sort -V | tail -1)" != "$fast_ver" ]; then
+    echo "resolve-models: $grok_plain has no -fast variant; CURSOR_GROK stays on $grok_fast" >&2
+  fi
+fi
 emit CURSOR_BUILDER "$(newest '^grok-([0-9.]+)-high-fast$' <<<"$cursor_ids")"
 
 if [ -z "$codex_bin" ] || [ -z "$codex_model" ]; then
