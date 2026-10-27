@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1008,6 +1009,74 @@ def test_url_real_launch(tmp: Path) -> None:
     finally:
         server.shutdown()
 
+
+def test_url_whitespace(tmp: Path) -> None:
+    """A url with whitespace or a control character is a bad declaration, even for a warning check."""
+    bin_dir, _ = marker_bin(tmp, 'url-space')
+    env = base_env(bin_dir, CONCLAVE_WAVE_PRECHECK='0')
+    for label, url in (('space', 'http://127.0.0.1/health check'), ('tab', 'http://127.0.0.1/a\tb'),
+                       ('newline', 'http://127.0.0.1/a\nb'), ('control', 'http://127.0.0.1/a\x01b'),
+                       ('space in host', 'http://local host/')):
+        checks, reason = preflight.parse_declaration(json.dumps({'version': 1, 'checks': [
+            {'name': 'x', 'url': url, 'needs': 'n'}]}))
+        check(checks is None and 'whitespace or control characters' in reason,
+              f'url whitespace: a {label} url is rejected at declaration time ({reason!r})')
+    repo = make_repo(tmp / 'url-space')
+    declare(repo, [{'name': 'health', 'url': 'http://localhost/health check', 'needs': 'n', 'severity': 'warning'}])
+    got = preflight_cli(env, repo, tmp / 'url-space-out', '--base', 'main')
+    check(got.returncode == preflight.BLOCKED and got.stdout.count('bad .conclave/preflight.json') == 1
+          and 'whitespace or control characters' in got.stdout and 'Traceback' not in got.stderr,
+          f'url whitespace: a warning check with a whitespace url blocks with exit 3, no crash '
+          f'({got.returncode} {got.stdout!r} {got.stderr[-300:]!r})')
+
+
+def malformed_status_server() -> tuple[socket.socket, threading.Thread]:
+    """Answers every connection with a status line http.client cannot parse."""
+    sock = socket.socket()
+    sock.bind(('127.0.0.1', 0))
+    sock.listen()
+
+    def serve() -> None:
+        while True:
+            try:
+                conn, _ = sock.accept()
+            except OSError:
+                return
+            with conn:
+                conn.recv(4096)
+                conn.sendall(b'HTTP/1.1 NOPE garbage\r\n\r\n')
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return sock, thread
+
+
+def test_url_http_exception(tmp: Path) -> None:
+    """An http.client.HTTPException from the fetch is a listed failure, not a crash."""
+    sock, _ = malformed_status_server()
+    url = f'http://127.0.0.1:{sock.getsockname()[1]}/health'
+    try:
+        bin_dir = tmp / 'url-httpexc-bin'
+        bin_dir.mkdir()
+        env = base_env(bin_dir, CONCLAVE_WAVE_PRECHECK='0')
+        repo = make_repo(tmp / 'url-httpexc')
+        declare(repo, [{'name': 'garbled', 'url': url, 'needs': 'fix the server', 'severity': 'warning'}])
+        got = preflight_cli(env, repo, tmp / 'url-httpexc-out', '--base', 'main')
+        check(got.returncode == 0 and f'1. garbled (GET {url}): connection failed. Do: fix the server' in got.stdout
+              and '## Blocking\n\n(none)' in got.stdout and 'Traceback' not in got.stderr,
+              f'url http exception: a malformed status line is a listed warning, not a crash '
+              f'({got.returncode} {got.stdout!r} {got.stderr[-300:]!r})')
+        repo = make_repo(tmp / 'url-httpexc-block')
+        declare(repo, [{'name': 'garbled', 'url': url, 'needs': 'fix the server'}])
+        got = preflight_cli(env, repo, tmp / 'url-httpexc-block-out', '--base', 'main')
+        check(got.returncode == preflight.BLOCKED and f'1. garbled (GET {url}): connection failed' in got.stdout
+              and 'Traceback' not in got.stderr,
+              f'url http exception: a blocking check with a malformed status line exits 3, no crash '
+              f'({got.returncode} {got.stdout!r} {got.stderr[-300:]!r})')
+    finally:
+        sock.close()
+
+
 def main() -> None:
     (ROOT / 'tmp').mkdir(exist_ok=True)
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Status)
@@ -1035,6 +1104,8 @@ def main() -> None:
             test_plan_url_cli(tmp)
             test_plan_url_dry_run(tmp)
             test_url_real_launch(tmp)
+            test_url_whitespace(tmp)
+            test_url_http_exception(tmp)
     finally:
         server.shutdown()
     print('ok')

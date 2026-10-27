@@ -20,6 +20,7 @@ See docs/preflight.md.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 from pathlib import Path
@@ -406,6 +407,8 @@ def parse_declaration(text: str) -> tuple[list[dict] | None, str]:
                 parts, bad_port = None, False
             if parts is None or parts.scheme not in ('http', 'https') or not parts.hostname:
                 return None, f'{where}: url must be an http or https URL'
+            if any(c.isspace() or ord(c) < 32 or 127 <= ord(c) <= 159 for c in url):
+                return None, f'{where}: url must not contain whitespace or control characters'
             if bad_port:
                 return None, f'{where}: url port is not valid'
             if '@' in parts.netloc:
@@ -484,7 +487,7 @@ def fetch_status(url: str, expect: int, timeout: float) -> str:
         if isinstance(exc.reason, TimeoutError):
             return f'timeout after {timeout:g}s'
         return 'connection failed'
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
         return 'connection failed'
     return '' if status == expect else f'status {status}, wanted {expect}'
 
