@@ -949,6 +949,7 @@ class Runner:
                     with (self.logs / f"{row['ballot']}-phase1.out").open('w') as out, (self.logs / f"{row['ballot']}-phase1.err").open('w') as err:
                         env = dict(os.environ, **self.target_env(row))
                         for args in self.phase_commands(row['ballot'], row['pr'], flags, row.get('target')):
+                            # Remaining window: at most the ballots already in flight, bounded by the cap and the same as the old batch join; intentionally not made atomic.
                             self.refuse_if_capped()
                             rc = self.process(args, cwd=self.repo, stdout=out, stderr=err, env=env).returncode
                             if rc:
