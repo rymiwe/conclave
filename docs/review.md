@@ -1036,7 +1036,9 @@ even when the defect is real (2026-10: 60 of 63 read-only findings held at
 
 1. Check out the reviewed head (`head_oid` in `header.json`) in a detached
    worktree. The stack runner makes one outside both repos, with the ignored
-   `.env` and `config/database.yml` copied in.
+   `.env` and `config/database.yml` copied in. A file whose directory resolves
+   outside that worktree (a committed `config` symlink to `/tmp`, say) is not
+   copied, and stack-run prints a `note:` line on stderr.
 2. For every finding, run the repro there (a spec, a runner script, a one-line
    command). Edit nothing tracked.
 3. A finding you ran gets `repro_executed: true` and `evidence` that starts with
