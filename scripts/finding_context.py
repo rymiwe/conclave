@@ -112,10 +112,50 @@ def _def_end(lines: list[str], start: int) -> int:
     return end
 
 
+# Outside a string, a one-line '...' or "..." literal is skipped whole, so a
+# quote token inside it (as in this pattern) does not open a string.
+_OPENER = re.compile(r'"""|\'\'\'|`|"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'')
+_HEREDOC = re.compile(r"<<[-~]?(?:'([A-Za-z_]\w*)'|\"([A-Za-z_]\w*)\"|([A-Z_][A-Z0-9_]*))")
+
+
+def _in_string(lines: list[str]) -> list[bool]:
+    """For each line, whether it starts inside a triple-quoted string, a template
+    string, or a heredoc. A definition on such a line is text, not code."""
+    inside, state = [], None
+    for line in lines:
+        inside.append(state is not None)
+        if isinstance(state, tuple):
+            if line.strip() == state[0]:
+                state = None
+            continue
+        text, pos = re.sub(r"\\.", "", line), 0
+        while pos < len(text):
+            if state is None:
+                m = _OPENER.search(text, pos)
+                if not m:
+                    break
+                if m.group(0) in ('"""', "'''", "`"):
+                    state = m.group(0)
+                pos = m.end()
+            else:
+                close = text.find(state, pos)
+                if close < 0:
+                    break
+                state, pos = None, close + len(state)
+        if state is None and "<<<" not in line:
+            h = _HEREDOC.search(line)
+            if h:
+                state = (next(g for g in h.groups() if g),)
+    return inside
+
+
 def enclosing_def(lines: list[str], line_no: int) -> tuple[int, int, str] | None:
     """(start, end, name), zero based and inclusive, or None at top level."""
     at = min(max(line_no - 1, 0), len(lines) - 1)
+    quoted = _in_string(lines)
     for i in range(at, -1, -1):
+        if quoted[i]:
+            continue
         name = _def_name(lines[i])
         if name is None:
             continue

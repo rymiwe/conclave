@@ -566,6 +566,33 @@ def test_unsure_name_is_unknown(tmp: Path) -> None:
         check(status == "expanded" and ok, f"{label}: right name ({right!r}) or unknown, never a wrong name ({got})")
 
 
+B5_CASES = (
+    ("app/load.py", "def inside a triple-quoted string",
+     'def load(path):\n    sample = """\\\ndef helper():\n    return 1\n    """\n    return open(path).read()\n', 6, "load"),
+    ("app/load.js", "function inside a template string",
+     "function load(path) {\n  const sample = `\nfunction helper() {\n  return 1;\n  }`;\n  return read(path);\n}\n",
+     6, "load"),
+    ("app/load.sh", "def inside a heredoc",
+     "load() {\n  python3 - <<'PY'\ndef helper():\n    return 1\nPY\n  cat \"$1\"\n}\n", 6, "load"),
+)
+
+
+def test_def_inside_string_is_not_a_name(tmp: Path) -> None:
+    """Gate B5 repro: a definition inside a string or heredoc never names the cited line."""
+    fc = load("finding_context12", "finding_context.py")
+    head = small_repo(tmp, {path: text for path, _, text, _, _ in B5_CASES})
+    for path, label, _, line, right in B5_CASES:
+        text, status, kind = fc.expand(str(tmp), head, path, line, "")
+        named = re.search(r"\(enclosing `([^`]+)`", text)
+        if named:
+            ok = named.group(1) == right and kind in (fc.FUNCTION_ONLY, fc.FUNCTION_AND_CALLER)
+            got = f"enclosing {named.group(1)!r}, {kind}"
+        else:
+            ok = "function: unknown" in text and kind == fc.WINDOW
+            got = f"{'unknown' if 'function: unknown' in text else 'no label'}, {kind}"
+        check(status == "expanded" and ok, f"{label}: right name ({right!r}) or unknown, never helper ({got})")
+
+
 def test_head_and_verified_at_must_agree(tmp: Path) -> None:
     judge = load("jev_judge_heads", "jev-judge.py")
     repo, head = fixture_repo(tmp)
@@ -614,6 +641,8 @@ def main() -> None:
         test_head_and_verified_at_must_agree(tmp / "k")
         (tmp / "l").mkdir()
         test_unsure_name_is_unknown(tmp / "l")
+        (tmp / "m").mkdir()
+        test_def_inside_string_is_not_a_name(tmp / "m")
     print(f"{'FAILED' if FAILED else 'all passed'}: {FAILED} failed")
     sys.exit(1 if FAILED else 0)
 
