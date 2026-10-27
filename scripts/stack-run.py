@@ -1237,13 +1237,16 @@ class Runner:
                 time.sleep(min(self.poll, left))
         entry.update(precheck=status, message=message)
         self.save()
-        if status == 'inconclusive':
-            print(f'stack-run: warning: wave {number} pre-check inconclusive ({message}); launching anyway',
-                  file=sys.stderr)
-        elif status == 'blocked':
+        if status == 'blocked':
             print(f"stack-run: wave {number} ({', '.join(names)}) not launched: seats capped ({message}); "
                   'rerun the same command to resume', file=sys.stderr)
         return status != 'blocked', message
+
+    def warn_if_inconclusive(self, entry: dict) -> None:
+        """Print the inconclusive pre-check warning once its ballot has actually launched."""
+        if entry['precheck'] == 'inconclusive':
+            print(f"stack-run: warning: wave {entry['wave']} pre-check inconclusive ({entry['message']}); launching anyway",
+                  file=sys.stderr)
 
     def not_started(self, rows: list[dict], outcome: str) -> None:
         """Close per-PR rows that will not run. A finished ballot stays reusable."""
@@ -1284,6 +1287,7 @@ class Runner:
             self.record['whole_stack'] = f'failed: not started; seats capped ({message})'
             self.not_started(self.record['prs'], f'failed: not started; seats capped ({message})')
             return 'failed: not started; seats capped'
+        self.warn_if_inconclusive(self.record['waves'][-1])
         self.ballot_run(row)
         self.record['whole_stack'] = row['outcome']
         if row['outcome'] in ('ok', 'reused') and state(ballot) == 'done':
@@ -1318,10 +1322,13 @@ class Runner:
                     self.not_started(list(queue), f'failed: not started; seats capped ({message})')
                     return 'failed: not started; seats capped'
                 # The pre-check can wait for seats, and a phase 1 can cap the subscription meanwhile.
+                entry = self.record['waves'][-1]
                 with self.lock:
                     if self.max_capped:
+                        entry.update(precheck='not started', message=MAX_CAPPED)
                         break
                     running.add(pool.submit(self.ballot_run, queue.popleft()))
+                self.warn_if_inconclusive(entry)
             for future in running:
                 future.result()
         for row in queue:

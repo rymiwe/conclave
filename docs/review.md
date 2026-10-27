@@ -646,7 +646,7 @@ A missing `seat-usage`, a nonzero exit, empty output, or no answer within 25 sec
 
 When the pre-check blocks, no new ballot starts. Ballots already running finish; they are not stopped. With `--wave-wait S`, the runner checks again every 60 seconds until the route passes or S seconds pass. Each per-PR row that did not start reads `failed: not started; seats capped (<reason>)`. The reconciliation reads `failed: not started; seats capped`. One line on stderr names the ballot that did not start and the reason. The runner exits 1. Rerun the same command to resume. Finished ballots are reused. A failed ballot does not stop the others; it is that row's outcome.
 
-`run.json` keeps a `waves` list. Each entry is now one launch, not one batch: a number, the ballot it gated, the pre-check result (`ok`, `blocked`, `inconclusive`, `skipped`, or `not needed`), and the message. `run.md` shows the same list. The flag and setting names keep the word wave.
+`run.json` keeps a `waves` list. Each entry is now one launch, not one batch: a number, the ballot it gated, the pre-check result (`ok`, `blocked`, `inconclusive`, `skipped`, `not needed`, or `not started` when a usage limit stopped the launch after the pre-check), and the message. `run.md` shows the same list. The flag and setting names keep the word wave.
 
 `CONCLAVE_WAVE_PRECHECK=0` skips the pre-check. It is for tests and for an escape when the route is wrong. `CONCLAVE_WAVE_POLL` sets the seconds between checks; tests use it.
 

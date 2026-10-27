@@ -1707,6 +1707,52 @@ def test_rolling_cap_closes_queue(mod) -> None:
           f"rolling cap: no ballot launches after the cap and the rest are not started ({result}, {started}, {r.record['prs']})")
 
 
+def test_rolling_cap_after_inconclusive_precheck(mod) -> None:
+    """The cap lands while p-3's pre-check runs and comes back inconclusive: p-3 does not launch and says so."""
+    reason = f'failed: {mod.MAX_CAPPED}'
+    release, capped, entered = threading.Event(), threading.Event(), threading.Event()
+    calls, started = [0], []
+
+    def precheck() -> tuple[str, str]:
+        calls[0] += 1
+        if calls[0] < 3:
+            return 'ok', 'two voters'
+        entered.set()
+        capped.wait(10)
+        return 'inconclusive', 'seat-usage timed out after 25s'
+
+    def ballot(row: dict) -> None:
+        started.append(row['ballot'])
+        if row['ballot'] == 'p-1':
+            release.wait(10)
+            with r.lock:
+                r.max_capped = True
+            capped.set()
+        row['outcome'] = 'ok'
+
+    r = bare_runner(mod, 2, 3, ballot, precheck)
+    err = io.StringIO()
+    with redirect_stderr(err):
+        thread, result = run_in_thread(r)
+        saw = entered.wait(5)
+        release.set()
+        thread.join(10)
+    third = r.record['waves'][2]
+    check(saw and result == [''] and started == ['p-1', 'p-2'] and 'launching anyway' not in err.getvalue()
+          and third['precheck'] == 'not started' and third['message'] == mod.MAX_CAPPED
+          and r.record['prs'][2]['outcome'] == reason,
+          f"inconclusive cap: a declined ballot is recorded not started and prints no launch warning ({started}, {third}, {err.getvalue()!r})")
+
+    calls[0], started[:] = 0, []
+    r = bare_runner(mod, 2, 3, lambda row: row.update(outcome='ok'),
+                    lambda: ('inconclusive', 'seat-usage timed out after 25s'))
+    err = io.StringIO()
+    with redirect_stderr(err):
+        r.per_pr_waves()
+    check(err.getvalue().count('launching anyway') == 3 and [w['precheck'] for w in r.record['waves']] == ['inconclusive'] * 3,
+          f'inconclusive cap: a launched ballot keeps the warning and the inconclusive record ({err.getvalue()!r})')
+
+
 def test_stale_head(tmp: Path) -> None:
     """f2: the whole-stack head is the fetched PR oid, not origin/<branch>."""
     f = Fixture(tmp, 'stale-head')
@@ -1914,6 +1960,7 @@ def main() -> None:
         test_rolling(mod)
         test_max_cap_rolling(tmp, mod)
         test_rolling_cap_closes_queue(mod)
+        test_rolling_cap_after_inconclusive_precheck(mod)
         test_stale_head(tmp)
         test_stack_ballot_name(tmp)
         test_detach(tmp)
