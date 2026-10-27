@@ -245,7 +245,7 @@ python3 -c 'print("\n".join("line %05d %s" % (i, "x" * 50) for i in range(3000))
 git -C "$R" add big.txt; git -C "$R" commit -qm big
 git -C "$R" checkout -q feat
 big() { # $1 case, $2 runner argv JSON, $3 family, $4 vendor, $5 model
-  local d="$T/$1"; mkdir -p "$d"; printf '%s\n' "$ANSWER" > "$FAKE_REPLY"
+  local d="$T/big-$1"; mkdir -p "$d"; printf '%s\n' "$ANSWER" > "$FAKE_REPLY"
   : > "$FAKE_RUN_LOG"; : > "$FAKE_STDIN"; : > "$FAKE_PROMPT_ARG"
   FAKE_ROUTE="$(route "$3" "$4" "$5" "$2")" "$ROOT/scripts/merge-gate.sh" review "$R" main big "$PR" "$d/out" xai \
     > "$d/review.out" 2>&1; review_rc=$?
@@ -255,6 +255,8 @@ big() { # $1 case, $2 runner argv JSON, $3 family, $4 vendor, $5 model
   # agy takes the prompt as the content of one stream-json user event.
   { [ "$1" = agy ] && jq -j '.message.content' "$FAKE_STDIN" || cat "$FAKE_STDIN"; } | cmp -s "$d/out/gate-prompt.md" - && ok "big $1: reviewer received the whole prompt" || bad "big $1: reviewer got $(wc -c < "$FAKE_STDIN") bytes, not the whole prompt"
   has "big $1: verdict" "$(cat "$d/out/gate-verdict.json" 2>/dev/null)" '"one_way": "no"'
+  # logargv logs any multi-line argument, which the prompt always is, as PROMPT.
+  if grep -qE ' PROMPT( |$)' "$FAKE_RUN_LOG"; then bad "big $1: a multi-line argument was passed"; else ok "big $1: no multi-line argument"; fi
   [ "$(awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }' "$FAKE_RUN_LOG")" -lt 4096 ] \
     && ok "big $1: no argument carries the prompt" || bad "big $1: long argv logged"
 }
