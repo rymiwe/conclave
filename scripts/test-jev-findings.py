@@ -435,6 +435,123 @@ def test_cap_after_quote(tmp: Path) -> None:
     check(got <= fc.MAX_CHARS, f"a kept quote of 20+ lines is capped too ({got} chars)")
 
 
+def small_repo(repo: Path, files: dict[str, str]) -> str:
+    for rel, text in files.items():
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(text)
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "add", ".")
+    git(repo, "-c", "user.email=t@e", "-c", "user.name=T", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "f")
+    return git(repo, "rev-parse", "HEAD")
+
+
+def test_caller_suffix_is_another_method(tmp: Path) -> None:
+    """save! and save? are other methods than save; a ?. optional call is still a call."""
+    fc = load("finding_context7", "finding_context.py")
+    head = small_repo(tmp, {
+        "app/orders.rb": "class Orders\n  def save(order)\n    order\n  end\nend\n",
+        "app/a_bang.rb": "orders.save!(order)\n",
+        "app/b_pred.rb": "orders.save?(order)\n",
+        "app/c_set.rb": "orders.save=(order)\n",
+        "app/d_call.rb": "orders.save(order)\n",
+    })
+    doc = {"findings": [finding(file="app/orders.rb", line=3, cited_code="order")]}
+    fc.expand_findings(doc, str(tmp), head)
+    callers = re.findall(r"caller of .*", doc["findings"][0]["cited_code"])
+    check(callers == ["caller of `save`: app/d_call.rb:1-1"],
+          f"save!, save? and save= are not callers of save ({callers})")
+    other = tmp / "other"
+    other.mkdir()
+    head = small_repo(other, {
+        "lib/defs.rb": "def flush!(x)\n  x\nend\ndef empty?(x)\n  x\nend\ndef refund(x)\n  x\nend\n",
+        "lib/a.rb": "q.flush(x)\nitems.empty(x)\n",
+        "lib/b.rb": "q.flush!(x)\nitems.empty?(x)\npayments.refund?.(x)\n",
+    })
+    got = []
+    for line in (2, 5, 8):
+        doc = {"findings": [finding(file="lib/defs.rb", line=line, cited_code="x")]}
+        fc.expand_findings(doc, str(other), head)
+        got += re.findall(r"caller of `[^`]+`: \S+", doc["findings"][0]["cited_code"])
+    check(got == ["caller of `flush!`: lib/b.rb:1-3", "caller of `empty?`: lib/b.rb:1-3",
+                  "caller of `refund`: lib/b.rb:1-3"],
+          f"a name ending in ! or ? matches itself only, and ?. is a call ({got})")
+
+
+def test_signature_walk_stops_at_dedent() -> None:
+    fc = load("finding_context8", "finding_context.py")
+    src = 'def format_token(prefix="("):\n    return prefix + "x"\nLIMIT = 2\ndef innocent():\n    return 1\n'.splitlines()
+    check(fc.enclosing_def(src, 3) is None, f"a top-level line after an unbalanced signature is outside ({fc.enclosing_def(src, 3)})")
+    got = fc.enclosing_def(src, 2)
+    check(got is not None and got[2] == "format_token" and got[1] == 1, f"the return line is still in format_token ({got})")
+    cls = 'class C:\n    def format_token(self, prefix="("):\n        return prefix\n    LIMIT = 2\n'.splitlines()
+    check(fc.enclosing_def(cls, 4) is None, f"a class attribute after the method is not in it ({fc.enclosing_def(cls, 4)})")
+    black = "def build(\n    name: str,\n) -> dict:\n    return {}\nKEEP = 1\n".splitlines()
+    check(fc.enclosing_def(black, 4)[2] == "build" and fc.enclosing_def(black, 5) is None,
+          "a Black-style signature closing with ) still continues")
+    body = 'def f(prefix="("):\n    return (\n        1\n    )\n'.splitlines()
+    check(fc.enclosing_def(body, 3) is not None and fc.enclosing_def(body, 3)[2] == "f", "an indented body stays in f")
+
+
+def long_with_caller(tmp: Path, payload: int) -> tuple[Path, str]:
+    body = "".join(f"  step_{i} = {'w' * payload}\n" for i in range(150))
+    head = small_repo(tmp, {
+        "app/long.rb": "def long_one\n" + body + "end\n",
+        "app/use.rb": "".join(f"x{i} = {i}\n" for i in range(6)) + "long_one\n" + "".join(f"y{i} = {i}\n" for i in range(6)),
+    })
+    return tmp, head
+
+
+def test_cap_keeps_mark_and_says_caller_dropped(tmp: Path) -> None:
+    fc = load("finding_context9", "finding_context.py")
+    for payload in (72, 60):
+        repo, head = long_with_caller(tmp / str(payload), payload)
+        doc = {"findings": [finding(file="app/long.rb", line=141, cited_code="  step_139 = w")]}
+        fc.expand_findings(doc, str(repo), head)
+        f = doc["findings"][0]
+        text = f["cited_code"]
+        has_caller = "caller of `long_one`" in text
+        check(len(text) <= fc.MAX_CHARS and ">141| " in text,
+              f"payload {payload}: the cited line keeps its > mark under the cap ({len(text)} chars)")
+        check(has_caller == (f["cited_context"] == fc.FUNCTION_AND_CALLER) and f["cited_context"] == fc.FUNCTION_ONLY,
+              f"payload {payload}: a caller cut at the cap is not claimed ({f['cited_context']}, caller shown {has_caller})")
+    quote = "".join(f"  q{i} {'q' * 400}\n" for i in range(19))
+    doc = {"findings": [finding(file="app/long.rb", line=141, cited_code=quote)]}
+    fc.expand_findings(doc, str(repo), head)
+    text = doc["findings"][0]["cited_code"]
+    check(len(text) <= fc.MAX_CHARS and ">141| " in text and "quoted by the chair" in text,
+          f"a long chair quote is shortened before the marked line is lost ({len(text)} chars)")
+
+
+def test_def_any_receiver() -> None:
+    fc = load("finding_context10", "finding_context.py")
+    got = [fc._def_name(l) for l in ("def Payments.refund(order)", "def self.refund(order)", "def refund(order)",
+                                     "async def refund(order)", "def refund?(order)", "def save!(order)")]
+    check(got == ["refund", "refund", "refund", "refund", "refund?", "save!"], f"a constant receiver is not the name ({got})")
+
+
+def test_head_and_verified_at_must_agree(tmp: Path) -> None:
+    judge = load("jev_judge_heads", "jev-judge.py")
+    repo, head = fixture_repo(tmp)
+    seen: list = []
+    stub_jev(judge, seen)
+    d = ballot(tmp, "mismatch", "a" * 40, [finding()], "b" * 40)
+    import contextlib, io
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            judge.findings_main([str(d), "--repo", str(repo)])
+        refused = ""
+    except SystemExit as exc:
+        refused = str(exc.code)
+    check("aaaaaaaa" in refused and "bbbbbbbb" in refused and not seen
+          and not (d / "jev-findings-request.json").exists(),
+          f"head_oid and verified_at that differ are refused before the API call ({refused!r})")
+    d = ballot(tmp, "case", head.upper(), [finding()], head)
+    run_gate(judge, d, repo)
+    state = seen[-1]["state"] if seen else ""
+    check(f"checked at head {head[:8]} by reading" in state and f"at head {head[:8]}" in state,
+          "a head_oid that differs only in case is the same commit, and the line names it")
+
+
 def main() -> None:
     os.environ.setdefault("CONCLAVE_JEV_OP", "/bin/false")
     with tempfile.TemporaryDirectory(prefix="jev-findings-") as raw:
@@ -451,6 +568,13 @@ def main() -> None:
         test_pytest_caller_ranks_last(tmp / "f")
         test_line_outside_file(tmp / "g")
         test_cap_after_quote(tmp / "h")
+        for name in ("i", "j", "k"):
+            (tmp / name).mkdir()
+        test_caller_suffix_is_another_method(tmp / "i")
+        test_signature_walk_stops_at_dedent()
+        test_cap_keeps_mark_and_says_caller_dropped(tmp / "j")
+        test_def_any_receiver()
+        test_head_and_verified_at_must_agree(tmp / "k")
     print(f"{'FAILED' if FAILED else 'all passed'}: {FAILED} failed")
     sys.exit(1 if FAILED else 0)
 

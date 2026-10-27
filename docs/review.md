@@ -1118,10 +1118,22 @@ from the repo (`--repo`, or the current directory when `conclave.sh --findings` 
 run inside it) and replaces the quote with the enclosing function, padded to at
 least 20 lines and windowed to at most about 80, plus one caller found with
 `git grep` (a non-test caller first; pytest's `test_*.py` counts as a test).
+A caller is a use of the name itself: `save!`, `save?` and `save=` are not
+callers of `save`, and a `?.` optional call is. A definition with a receiver
+(`def self.refund`, `def Payments.refund`) is named `refund`. A multi-line
+signature ends at a line back at the definition's indent unless that line
+closes it (`)`, `]` or `}`).
 The chair's quote stays at the top. The whole text, quote included, is capped at
-6000 characters, and so is a chair quote of 20 lines or more. When the repo or
+6000 characters in pieces: the caller is dropped first (the text then says so and
+counts as the function with no caller), then the window narrows around the
+marked cited line, then the chair's quote is shortened, so the `>` line stays.
+A chair quote of 20 lines or more is capped too. When the repo or
 head is missing, or the cited line is outside the file, the quote is left as
 written. `cited-code-notes.txt` in the ballot says what each finding got.
+
+When `header.json` has a `head_oid` and `findings.json` has a `verified_at`
+that differ (case aside), `--findings` refuses the file before any Jev call:
+the code would be read at one commit and called checked at another.
 
 The question and the `verification:` line name what `cited_code` holds: the
 function and one caller, the function with no caller, the lines around the cited

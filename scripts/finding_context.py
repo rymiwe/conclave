@@ -19,7 +19,7 @@ MAX_CHARS = 6000
 MAX_FILE_BYTES = 400_000
 
 _DEF_PATTERNS = [
-    re.compile(r"^\s*(?:async\s+)?def\s+(?:self\.)?([A-Za-z_]\w*[?!=]?)"),
+    re.compile(r"^\s*(?:async\s+)?def\s+(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*[?!=]?)"),
     re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)"),
     re.compile(
         r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
@@ -80,9 +80,13 @@ def _def_end(lines: list[str], start: int) -> int:
     depth = lines[start].count("(") - lines[start].count(")")
     sig = start
     # A multi-line signature: the body starts after the parens close. Parens
-    # inside strings are counted too, so never walk into the next definition.
+    # inside strings are counted too, so stop at the next definition, and at a
+    # line back at the def's indent that does not close the signature.
     while depth > 0 and sig + 1 < len(lines) and sig - start < 40:
-        if _def_name(lines[sig + 1]) is not None:
+        nxt = lines[sig + 1]
+        if _def_name(nxt) is not None:
+            break
+        if nxt.strip() and _indent(nxt) <= base and not nxt.strip().startswith((")", "]", "}")):
             break
         sig += 1
         depth += lines[sig].count("(") - lines[sig].count(")")
@@ -121,6 +125,18 @@ def _numbered(lines: list[str], lo: int, hi: int, mark: int | None) -> str:
     return "\n".join(out)
 
 
+def _around(lines: list[str], lo: int, hi: int, at: int, radius: int) -> str:
+    """Numbered lo..hi narrowed to radius lines each side of the marked line."""
+    wlo, whi = max(lo, at - radius), min(hi, at + radius)
+    parts = []
+    if wlo > lo:
+        parts.append(f"  ... {wlo - lo} lines not shown ...")
+    parts.append(_numbered(lines, wlo, whi, at))
+    if whi < hi:
+        parts.append(f"  ... {hi - whi} lines not shown ...")
+    return "\n".join(parts)
+
+
 def _function_window(lines: list[str], start: int, end: int, at: int) -> tuple[str, int, int]:
     """Numbered text for the function, at least MIN_LINES, at most MAX_FUNCTION_LINES."""
     lo, hi = start, end
@@ -153,6 +169,20 @@ def _read_at(repo: str, head: str, path: str) -> list[str] | None:
     return blob.splitlines()
 
 
+def _calls(name: str, text: str) -> bool:
+    """Whether text uses name itself, not a longer name such as save! for save.
+
+    A ?, ! or = right after the name makes another Ruby method, unless the
+    name ends that way. A ?. optional call is still a use.
+    """
+    for m in re.finditer(rf"(?<![A-Za-z0-9_$]){re.escape(name)}(?![A-Za-z0-9_$])", text):
+        after = text[m.end():]
+        if after[:1] in ("?", "!", "=") and not after.startswith("?."):
+            continue
+        return True
+    return False
+
+
 def _find_caller(repo: str, head: str, name: str, path: str, def_line: int) -> tuple[str, int] | None:
     pat = rf"(^|[^A-Za-z0-9_$]){re.escape(name)}([^A-Za-z0-9_$]|$)"
     # --no-color too: a color.grep=always setting outranks color.ui=never.
@@ -170,6 +200,8 @@ def _find_caller(repo: str, head: str, name: str, path: str, def_line: int) -> t
         if p == path and n == def_line:
             continue
         if text.lstrip().startswith(("#", "//", "*", "--")):
+            continue
+        if not _calls(name, text):
             continue
         rank = 1 if _TEST_PATH.search(p) else 0
         if best is None or (rank, p, n) < (best[0], best[1], best[2]):
@@ -204,18 +236,17 @@ def expand(repo: str, head: str, path: str, line: int, quoted: str) -> tuple[str
     at = line - 1
     found = enclosing_def(lines, line)
     kind = WINDOW
-    blocks = []
+    caller = ""
     caller_note = ""
+    caller_cut_note = ""
     if found is None:
         lo, hi = max(0, at - MIN_LINES // 2), min(len(lines) - 1, at + MIN_LINES // 2)
-        blocks.append(
-            f"{path}:{lo + 1}-{hi + 1} (no enclosing function found; lines around the cited line, at head {head[:8]})\n"
-            + _numbered(lines, lo, hi, at)
-        )
+        title = f"{path}:{lo + 1}-{hi + 1} (no enclosing function found; lines around the cited line, at head {head[:8]})"
+        body = _numbered(lines, lo, hi, at)
     else:
         start, end, name = found
         body, lo, hi = _function_window(lines, start, end, at)
-        blocks.append(f"{path}:{lo + 1}-{hi + 1} (enclosing `{name}`, at head {head[:8]})\n{body}")
+        title = f"{path}:{lo + 1}-{hi + 1} (enclosing `{name}`, at head {head[:8]})"
         kind = FUNCTION_ONLY
         hit = _find_caller(repo, head, name, path, start + 1)
         if hit is None:
@@ -228,15 +259,34 @@ def expand(repo: str, head: str, path: str, line: int, quoted: str) -> tuple[str
             else:
                 c_at = min(max(cline - 1, 0), len(clines) - 1)
                 clo, chi = max(0, c_at - CALLER_RADIUS), min(len(clines) - 1, c_at + CALLER_RADIUS)
-                blocks.append(
-                    f"caller of `{name}`: {cpath}:{clo + 1}-{chi + 1}\n" + _numbered(clines, clo, chi, c_at)
-                )
+                caller = f"caller of `{name}`: {cpath}:{clo + 1}-{chi + 1}\n" + _numbered(clines, clo, chi, c_at)
                 kind = FUNCTION_AND_CALLER
-    if caller_note:
-        blocks.append(caller_note)
-    text = "\n\n".join(blocks)
-    if quoted.strip():
-        text = f"quoted by the chair:\n{quoted.strip()}\n\nread from the repo:\n{text}"
+                caller_cut_note = f"caller: `{name}` at {cpath}:{cline} left out at the size limit"
+
+    quote = quoted.strip()
+
+    def render(body: str, caller: str, note: str) -> str:
+        text = "\n\n".join(b for b in (f"{title}\n{body}", caller, note) if b)
+        if quote:
+            text = f"quoted by the chair:\n{quote}\n\nread from the repo:\n{text}"
+        return text
+
+    # Over the cap, cut in pieces so the text still matches kind and keeps the
+    # marked line: the caller goes first, then the window narrows around that
+    # line, then the chair quote is shortened.
+    text = render(body, caller, caller_note)
+    if len(text) > MAX_CHARS and caller:
+        caller_note, kind = caller_cut_note, FUNCTION_ONLY
+        text = render(body, "", caller_note)
+    for radius in (30, 20, 12, 8, 4, 2, 1, 0):
+        if len(text) <= MAX_CHARS:
+            break
+        body = _around(lines, lo, hi, at, radius)
+        text = render(body, "", caller_note)
+    if len(text) > MAX_CHARS and quote:
+        tail = " ... quote cut at the size limit"
+        quote = quote[: max(0, len(quote) - (len(text) - MAX_CHARS) - len(tail))] + tail
+        text = render(body, "", caller_note)
     return _cap(text), "expanded", kind
 
 

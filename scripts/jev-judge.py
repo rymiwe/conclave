@@ -1505,6 +1505,23 @@ def _audit_gate(verified: dict[str, str]):
     return gate_of, repro_of
 
 
+def refuse_head_mismatch(header: dict, doc: dict) -> None:
+    """Refuse findings verified at another commit than the ballot reviewed.
+
+    cited_code is read at head_oid, and the verification line names
+    verified_at, so the two must be the same commit (case aside).
+    """
+    head = str(header.get("head_oid") or "")
+    at = str(doc.get("verified_at") or "")
+    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", head) or not at:
+        return
+    if head.casefold() != at.casefold():
+        raise SystemExit(
+            f"findings.json verified_at {at[:8]} is not header.json head_oid {head[:8]}; "
+            "verify the findings at the reviewed head"
+        )
+
+
 def _expand_cited_code(d: Path, doc: dict, header: dict, repo: str) -> None:
     """Fill each short cited_code with the enclosing function and one caller.
 
@@ -1558,6 +1575,7 @@ def findings_main(argv: list[str]) -> None:
     header = load_run_header(d)
     audit = header.get("kind") == "audit"
     doc = load_findings(findings_path, audit=audit)
+    refuse_head_mismatch(header, doc)
     leg_labels = load_leg_labels(d)
     if not audit and doc["findings"]:
         _expand_cited_code(d, doc, header, repo)
