@@ -1940,6 +1940,39 @@ def test_detach_resume(tmp: Path) -> None:
     check(not marker.is_file(), f'f6 no step marker is written for the inherited row ({marker.read_text() if marker.is_file() else ""})')
 
 
+def test_local_config_stays_in_worktree(tmp: Path, mod) -> None:
+    """A reviewed commit may make config/ a symlink out of the worktree; the copy must not follow it."""
+    scratch = tmp / 'local-config'
+    repo, wt, outside = scratch / 'repo', scratch / 'wt', scratch / 'outside-tmp'
+    for d in (repo / 'config', wt, outside):
+        d.mkdir(parents=True)
+    run(['git', 'init', '-q', str(repo)])
+    (repo / '.gitignore').write_text('.env\nconfig/database.yml\n')
+    (repo / 'config/database.yml').write_text('password: s3cret\n')
+    (repo / '.env').write_text('private local env\n')
+    (wt / 'config').symlink_to(outside, target_is_directory=True)
+    runner = object.__new__(mod.Runner)
+    runner.repo, runner.lock, runner.children = repo, threading.RLock(), set()
+    runner.interrupted, runner.launching_on_main, runner.deferred_signal = None, False, None
+    err = io.StringIO()
+    with redirect_stderr(err):
+        runner.copy_local_config(wt)
+    check(not (outside / 'database.yml').exists(),
+          f'a config/ symlink out of the worktree gets no database.yml ({sorted(p.name for p in outside.iterdir())})')
+    check('config/database.yml' in err.getvalue() and 'outside' in err.getvalue(),
+          f'the skipped copy is noted on stderr ({err.getvalue().strip()!r})')
+    check((wt / '.env').read_text() == 'private local env\n' and not (wt / '.env').is_symlink(),
+          'a file whose parent is inside the worktree is still copied')
+    (wt / 'config').unlink()
+    (wt / 'config').mkdir()
+    (wt / 'config/database.yml').symlink_to(outside / 'db.yml')
+    with redirect_stderr(io.StringIO()):
+        runner.copy_local_config(wt)
+    check((wt / 'config/database.yml').read_text() == 'password: s3cret\n'
+          and not (wt / 'config/database.yml').is_symlink() and not (outside / 'db.yml').exists(),
+          'a final-component symlink is replaced by the copy, inside the worktree')
+
+
 def main() -> None:
     (ROOT / 'tmp').mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='stack-tests-', dir=ROOT / 'tmp') as raw:
@@ -1968,6 +2001,7 @@ def main() -> None:
         test_detach_abbrev(tmp)
         test_prompt_words_ignore_repo_path(mod)
         test_cursor_leg(tmp)
+        test_local_config_stays_in_worktree(tmp, mod)
     print('ok')
 
 

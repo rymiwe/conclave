@@ -1090,6 +1090,18 @@ $(printf '%s\n' "$refs" | sort -u)
 EOF
 }
 
+# 0 when $2 resolves inside $1. Missing components resolve lexically, so this
+# never creates anything.
+review_resolves_inside() {
+  python3 - "$1" "$2" <<'PY'
+import os
+import sys
+root = os.path.realpath(sys.argv[1])
+path = os.path.realpath(sys.argv[2])
+sys.exit(0 if path == root or path.startswith(root.rstrip(os.sep) + os.sep) else 1)
+PY
+}
+
 review_copy_ignored_config() {
   local wt="$1" main rel
   main="$(git -C "$REPO" worktree list --porcelain | sed -n '1s/^worktree //p')"
@@ -1098,7 +1110,17 @@ review_copy_ignored_config() {
     [ -e "$main/$rel" ] || continue
     [ -e "$wt/$rel" ] && continue
     if git -C "$REPO" check-ignore -q -- "$rel"; then
+      # The reviewed commit controls the leg: a committed symlink such as
+      # config -> /tmp would carry the operator's secrets out of it.
+      if ! review_resolves_inside "$wt" "$(dirname "$wt/$rel")"; then
+        printf 'note: %s not copied; its directory resolves outside the leg worktree\n' "$rel" >&2
+        continue
+      fi
       mkdir -p "$(dirname "$wt/$rel")"
+      if ! review_resolves_inside "$wt" "$wt/$rel"; then
+        printf 'note: %s not copied; it resolves outside the leg worktree\n' "$rel" >&2
+        continue
+      fi
       cp -- "$main/$rel" "$wt/$rel"
     fi
   done

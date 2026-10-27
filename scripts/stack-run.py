@@ -1030,6 +1030,30 @@ class Runner:
         (self.dest / 'reconcile-input.md').write_text('\n'.join(lines), encoding='utf-8')
         return inputs
 
+    def copy_local_config(self, wt: Path) -> None:
+        """Copy the ignored local files a repro needs into a detached worktree."""
+        repo = str(self.repo)
+        for name in ('config/database.yml', '.env'):
+            source = self.repo / name
+            ignored = self.process(['git', '-C', repo, 'check-ignore', '-q', '--', name]).returncode == 0
+            if not (source.is_file() and ignored):
+                continue
+            # The reviewed commit controls the worktree: a symlinked parent such as
+            # config -> /tmp would carry the operator's secrets out of it.
+            root = wt.resolve()
+            target = wt / name
+            if not target.parent.resolve().is_relative_to(root):
+                print(f'stack-run: note: {name} not copied; its directory resolves outside the worktree',
+                      file=sys.stderr)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_symlink():
+                target.unlink()
+            if not target.resolve().is_relative_to(root):
+                print(f'stack-run: note: {name} not copied; it resolves outside the worktree', file=sys.stderr)
+                continue
+            shutil.copyfile(source, target)
+
     def reconcile(self, prs: list[dict]) -> None:
         repo = str(self.repo)
         meta = {p['number']: json.loads(self.command(['gh', 'pr', 'view', str(p['number']), '--json', 'headRefOid,baseRefName'], self.repo)) for p in prs}
@@ -1047,15 +1071,7 @@ class Runner:
             if scratch.is_relative_to(self.repo) or scratch.is_relative_to(ROOT):
                 raise RuntimeError('temporary worktree must be outside both repositories; set TMPDIR')
             self.command(['git', '-C', repo, 'worktree', 'add', '--detach', str(wt), oid])
-            for name in ('config/database.yml', '.env'):
-                source = self.repo / name
-                ignored = self.process(['git', '-C', repo, 'check-ignore', '-q', '--', name]).returncode == 0
-                if source.is_file() and ignored:
-                    target = wt / name
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    if target.is_symlink():
-                        target.unlink()
-                    shutil.copyfile(source, target)
+            self.copy_local_config(wt)
             output = self.dest / 'reconcile.json'
             output.unlink(missing_ok=True)
             prompt = (f'Reconcile every finding in {self.dest / "reconcile-input.md"} against the stack top #{top} at {oid} in this worktree. '
