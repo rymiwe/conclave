@@ -204,21 +204,25 @@ def short(path: str) -> str:
     return path if len(path) <= 120 else "..." + path[-117:]
 
 
-def cut_lines(cut: list[Section]) -> list[str]:
+class PacketOverCap(ValueError):
+    """No packet fits under the cap; sending one over it would be cut by agy in silence."""
+
+
+def cut_lines(cut: list[Section], cap: int = LIST_CAP) -> list[str]:
     lines = []
-    for sec in cut[:LIST_CAP]:
+    for sec in cut[:cap]:
         if sec.truncated:
             what = f"truncated, {len(sec.shown)} of {sec.size} bytes shown"
         else:
             what = f"not shown, {sec.size} bytes"
         lines.append(f"- {short(sec.path)} ({CLASS_LABEL[sec.kind]}; {what})")
-    if len(cut) > LIST_CAP:
-        rest = cut[LIST_CAP:]
+    if len(cut) > cap:
+        rest = cut[cap:]
         lines.append(f"- and {len(rest)} more files, {sum(s.size for s in rest)} bytes")
     return lines
 
 
-def notice(max_bytes: int, cut: list[Section], other: str, label: str) -> bytes:
+def notice(max_bytes: int, cut: list[Section], other: str, label: str, cap: int = LIST_CAP) -> bytes:
     parts = ["## Packet coverage"]
     if label:
         parts.append(f"This is {label}.")
@@ -230,7 +234,7 @@ def notice(max_bytes: int, cut: list[Section], other: str, label: str) -> bytes:
             "Files are kept in this priority: source, then specs and tests, then generated "
             "files (schema, migrations, lockfiles). These were cut:"
         )
-        parts.append("\n".join(cut_lines(cut)))
+        parts.append("\n".join(cut_lines(cut, cap)))
         parts.append(
             "Do not draw conclusions about the cut files. Say in your report that your "
             "review did not cover them."
@@ -245,7 +249,11 @@ def assemble(brief: bytes, secs: list[Section], note: bytes) -> bytes:
 
 
 def build_packet(brief, groups, max_bytes, other, label):
-    """Fill the groups in order into one packet that fits. Groups are lists of sections."""
+    """Fill the groups in order into one packet that fits. Groups are lists of sections.
+
+    Raises PacketOverCap when no packet fits, even with every file cut and the
+    coverage list shortened to its count line.
+    """
     reserve = 0
     for _ in range(6):
         for sec in (s for g in groups for s in g):
@@ -258,10 +266,19 @@ def build_packet(brief, groups, max_bytes, other, label):
         note = notice(max_bytes, cut, other, label) if (cut or other or label) else b""
         data = assemble(brief, [s for g in groups for s in g], note)
         over = len(data) - max_bytes
-        if over <= 0 or max_bytes - len(brief) - FENCE_OVERHEAD <= 0:
+        if over <= 0:
             return data, cut
+        if max_bytes - len(brief) - FENCE_OVERHEAD <= 0:
+            break
         reserve += over + 64
-    return data, cut
+    for cap in range(min(len(cut), LIST_CAP) - 1, -1, -1):
+        data = assemble(brief, [s for g in groups for s in g], notice(max_bytes, cut, other, label, cap))
+        if len(data) <= max_bytes:
+            return data, cut
+    raise PacketOverCap(
+        f"argon packet is {len(data)} bytes, over the cap of {max_bytes} "
+        f"(brief {len(brief)} bytes); no packet fits"
+    )
 
 
 def entry(n, name, data, secs, cut, label):
@@ -301,7 +318,6 @@ def plan(brief: bytes, diff: bytes, max_bytes: int, out_dir: Path) -> dict:
         "packets": [],
         "cut": [],
         "warning": "",
-        "brief_exceeds_max": len(brief) + FENCE_OVERHEAD > max_bytes,
     }
     packets = []
     if full <= max_bytes:
@@ -332,7 +348,7 @@ def plan(brief: bytes, diff: bytes, max_bytes: int, out_dir: Path) -> dict:
     result["cut"] = [
         {"path": s.path, "class": s.kind, "bytes": s.size} for s in cut_final
     ]
-    if cut_final or result["brief_exceeds_max"]:
+    if cut_final:
         result["warning"] = warning(result, cut_final)
     result["split_clean"] = result["mode"] == "split" and not cut_final
     (out_dir / "plan.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
@@ -345,10 +361,6 @@ def warning(result: dict, cut: list[Section]) -> str:
         f"bytes and the cap is {result['max_bytes']} (CONCLAVE_ARGON_MAX_BYTES); agy silently "
         "stops reading near 190 KB, so Argon's review does not cover what was cut."
     ]
-    if result["brief_exceeds_max"]:
-        lines.append(
-            f"The brief alone is {result['brief_bytes']} bytes, over the cap. No diff fit."
-        )
     if result["mode"] == "split":
         sizes = ", ".join(str(p["bytes"]) for p in result["packets"])
         lines.append(f"Split into 2 packets ({sizes} bytes), and files were still cut:")
@@ -397,8 +409,12 @@ def main(argv=None) -> int:
     f.add_argument("--report", action="append", default=[], help="N=FILE or N=!reason")
     args = ap.parse_args(argv)
     if args.cmd == "plan":
-        res = plan(Path(args.brief).read_bytes(), Path(args.diff).read_bytes(),
-                   args.max_bytes, Path(args.out_dir))
+        try:
+            res = plan(Path(args.brief).read_bytes(), Path(args.diff).read_bytes(),
+                       args.max_bytes, Path(args.out_dir))
+        except PacketOverCap as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 1
         sys.stdout.write(json.dumps({k: res[k] for k in ("mode", "full_bytes", "max_bytes")}) + "\n")
         return 0
     reports = {}

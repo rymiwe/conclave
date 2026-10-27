@@ -550,7 +550,10 @@ it. The script does not write into `~/.grok`.
 ## Argon packet size
 
 The review Argon leg is packet-first. `review_run_argon` sends the reviewer
-brief and `git diff HEAD` to `agy` as one stream-json message. `agy` stops
+brief and `git diff HEAD` to `agy` as one stream-json message. The diff is run
+with `a/` and `b/` prefixes, no color, and `diff.mnemonicPrefix` and
+`diff.noprefix` off, so user or repo settings cannot change the headers the
+packet script parses. `agy` stops
 reading near 190 KB (about 80K input tokens) and reports no error: prompts
 from 211 KB to 989 KB all plateau at 60-80K input tokens. The diff is
 path-ordered, so a long packet silently loses the specs and tests.
@@ -591,6 +594,14 @@ and the number of files cut.
   lines (a partial packet does not fail the ballot), to the top of
   `voter-argon.md`, and to the phase-1 summary. Argon is told it did not see the
   cut files.
+- No packet goes out over the cap. When every file is already cut, the
+  coverage list is shortened, ending in an `and N more files` count line. If
+  the brief, the packet label, and that count still do not fit, the leg fails
+  with `argon: cannot write packet prompt: argon packet is N bytes, over the
+  cap ...` in `voter-argon.fail`, and no packet is sent.
+- `voter-argon.skipped` from an earlier run is removed with the other Argon
+  files at the start of the review and of the leg, and again before each
+  packet. A packet counts as failed only when its own `run_argon` wrote it.
 
 Design and mixed Argon packets are not changed by this.
 

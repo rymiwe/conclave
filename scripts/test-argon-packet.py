@@ -94,10 +94,15 @@ run_argon() {
 '''
 
 
-def run_leg(work: Path, files: dict[str, int], extra_env=None, fail_packet=0, brief_bytes=6000):
+def run_leg(work: Path, files: dict[str, int], extra_env=None, fail_packet=0, brief_bytes=6000,
+            seed=None, git_config=None):
     repo = make_repo(work, files)
+    for key, value in (git_config or {}).items():
+        subprocess.run(["git", "-C", str(repo), "config", key, value], check=True)
     ballot = work / "ballot"
     ballot.mkdir()
+    for name, text in (seed or {}).items():
+        (ballot / name).write_text(text, encoding="utf-8")
     (ballot / "voter-argon.brief.md").write_text("Review brief. " + "x" * brief_bytes + "\n", encoding="utf-8")
     tmp = work / "tmp"
     tmp.mkdir()
@@ -336,8 +341,89 @@ review_write_muse_brief {work}/muse.md || echo REJECT
 
 def test_brief_floor(work: Path):
     ballot, proc = run_leg(work, synthetic(50_000), {"CONCLAVE_ARGON_MAX_BYTES": "3000"}, brief_bytes=6000)
-    partial = read(ballot / "voter-argon.partial")
-    check("The brief alone is" in partial and "No diff fit" in partial, "a brief over the cap is reported, not hidden")
+    fail = read(ballot / "voter-argon.fail")
+    check("over the cap" in fail and "3000" in fail and not prompts(ballot) and not (ballot / "sizes").exists(),
+          f"a brief over the cap fails the leg loud and sends nothing ({fail.strip()!r})")
+
+
+STALE_SKIP = {"voter-argon.skipped": "argon: skipped\nagy: not found: /usr/bin/agy\n"}
+
+
+def test_stale_skip_split(work: Path):
+    """A skip file left by an earlier run in a reused ballot dir is not this run's failure."""
+    ballot, proc = run_leg(work, synthetic(200_000), seed=STALE_SKIP)
+    merged = read(ballot / "voter-argon.md")
+    check("FINDING-FROM-CALL-1" in merged and "FINDING-FROM-CALL-2" in merged and "NOT REVIEWED" not in merged
+          and "/usr/bin/agy" not in merged,
+          f"a stale voter-argon.skipped does not fail packet 1 of a split ({merged[:120]!r})")
+    check(not (ballot / "voter-argon.skipped").exists() and read(ballot / "voter-argon.model.txt").startswith("argon: ok"),
+          "after a clean split no skip file is left and the model proof is kept")
+
+
+def test_stale_skip_cut(work: Path):
+    ballot, proc = run_leg(work, {f"app/lib/mod_{i:02d}.rb": 20_000 for i in range(10)}, seed=STALE_SKIP)
+    report = read(ballot / "voter-argon.md")
+    check(report.startswith("> WARNING: argon saw a PARTIAL review packet") and "FINDING-FROM-CALL-1" in report
+          and not (ballot / "voter-argon.skipped").exists(),
+          f"a stale voter-argon.skipped does not stop the cut packet's partial banner ({report[:80]!r})")
+
+
+def test_stale_skip_this_run_fails(work: Path):
+    ballot, proc = run_leg(work, synthetic(200_000), fail_packet=1, seed=STALE_SKIP)
+    merged = read(ballot / "voter-argon.md")
+    check("NOT REVIEWED: packet 1 failed (agy: stub failure on packet 1)" in merged and "FINDING-FROM-CALL-2" in merged,
+          "a packet this run skipped is still NOT REVIEWED, with this run's reason")
+
+
+def test_diff_config_pinned(work: Path):
+    """User or repo diff settings must not change the headers argon_packet.py parses."""
+    for i, cfg in enumerate(({"diff.mnemonicPrefix": "true"}, {"diff.noprefix": "true"},
+                             {"color.ui": "always", "color.diff": "always"})):
+        (work / str(i)).mkdir()
+        ballot, proc = run_leg(work / str(i), synthetic(200_000), git_config=cfg)
+        ps = prompts(ballot)
+        spec_names = [f"spec/models/model_{n:02d}_spec.rb" for n in range(10)]
+        check(len(ps) == 2 and all(f"+++ b/{n}" in ps[1] for n in spec_names)
+              and "unparsed" not in "".join(ps) and "\x1b[" not in "".join(ps),
+              f"{cfg}: the diff splits with a/ b/ headers and every spec in packet 2")
+
+
+def gate_a3_files():
+    files = {f"app/models/{'x' * 68}/model_{i:02d}.rb": 3000 for i in range(60)}
+    files.update({f"spec/models/{'x' * 68}/model_{i:02d}_spec.rb": 3000 for i in range(40)})
+    return files
+
+
+def test_packet_never_over_cap(work: Path):
+    """The coverage list must shrink to fit; gate-A3 measured 153519 and 192519 bytes."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import argon_packet
+    for cap, brief in ((150_000, b"B" * 145_000 + b"\n"), (189_000, b"B" * 184_000 + b"\n")):
+        out = work / f"plan-{cap}"
+        res = argon_packet.plan(brief, fake_diff(gate_a3_files()), cap, out)
+        sizes = [p["bytes"] for p in res["packets"]]
+        on_disk = [(out / p["path"]).stat().st_size for p in res["packets"]]
+        check(res["mode"] == "split" and sizes == on_disk and all(s <= cap for s in on_disk),
+              f"cap {cap}, brief {len(brief)}: every packet is at or under the cap ({on_disk})")
+        texts = [(out / p["path"]).read_text(encoding="utf-8") for p in res["packets"]]
+        check(all("## Packet coverage" in t and re.search(r"^- and \d+ more files, \d+ bytes$", t, re.M) for t in texts),
+              f"cap {cap}: the shortened coverage list still counts the files it no longer names")
+
+
+def test_packet_cannot_fit_fails(work: Path):
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import argon_packet
+    cap = 150_000
+    brief = b"B" * (cap - argon_packet.FENCE_OVERHEAD - 20) + b"\n"
+    for name, brief_bytes in (("label does not fit", brief), ("brief over the cap", b"B" * 160_000 + b"\n")):
+        out = work / name.replace(" ", "-")
+        try:
+            argon_packet.plan(brief_bytes, fake_diff(gate_a3_files()), cap, out)
+            raised = ""
+        except argon_packet.PacketOverCap as exc:
+            raised = str(exc)
+        check("over the cap" in raised and not list(out.glob("packet-*.md")),
+              f"{name}: plan fails loud and writes no packet ({raised!r})")
 
 
 def test_quoted_paths(work: Path):
@@ -377,7 +463,7 @@ def test_stale_partial_cleared(work: Path):
     ballot = work / "ballot"
     ballot.mkdir()
     stale = ["voter-argon.partial", "voter-argon.packet.txt", "voter-argon.packet-1.err",
-             "voter-argon.packet-2.stream.jsonl"]
+             "voter-argon.packet-2.stream.jsonl", "voter-argon.skipped"]
     for name in stale:
         (ballot / name).write_text("stale\n", encoding="utf-8")
     (ballot / "voter-argon.brief.md").write_text("brief\n", encoding="utf-8")
@@ -484,7 +570,9 @@ TESTS = [test_small, test_split_clean, test_split_with_generated, test_large, te
          test_oversize_file, test_setting, test_second_packet_fails, test_both_fail,
          test_pr_context, test_brief_floor, test_quoted_paths, test_stale_partial_cleared,
          test_graphql_schema_is_source, test_test_prefix_only_for_runner_files, test_b_slash_in_dir_name,
-         test_cut_path_cannot_forge_coverage]
+         test_cut_path_cannot_forge_coverage, test_stale_skip_split, test_stale_skip_cut,
+         test_stale_skip_this_run_fails, test_diff_config_pinned, test_packet_never_over_cap,
+         test_packet_cannot_fit_fails]
 
 
 def main():

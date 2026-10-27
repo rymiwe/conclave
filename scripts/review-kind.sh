@@ -2272,16 +2272,21 @@ review_run_argon() {
     echo "argon: reviewer brief missing" >"$DIR/voter-argon.fail"
     return 1
   fi
-  rm -f "$DIR/voter-argon.partial" "$DIR/voter-argon.packet.txt"
+  rm -f "$DIR/voter-argon.partial" "$DIR/voter-argon.packet.txt" "$DIR/voter-argon.skipped"
   stage="$(alloc_packet_tmpdir)" || {
     echo "argon: cannot create packet temp dir" >"$DIR/voter-argon.fail"
     return 1
   }
   max="$(argon_max_bytes)"
-  if ! git -C "$wt" diff HEAD >"$stage/change.diff" \
-    || ! python3 "$ROOT/scripts/argon_packet.py" plan --brief "$brief" --diff "$stage/change.diff" \
-      --max-bytes "$max" --out-dir "$stage" >/dev/null; then
+  # Pinned so user or repo diff settings cannot change the headers argon_packet.py parses.
+  if ! git -c diff.mnemonicPrefix=false -c diff.noprefix=false -c color.ui=never \
+    -C "$wt" diff --no-color --src-prefix=a/ --dst-prefix=b/ HEAD >"$stage/change.diff"; then
     echo "argon: cannot write packet prompt" >"$DIR/voter-argon.fail"
+    return 1
+  fi
+  if ! python3 "$ROOT/scripts/argon_packet.py" plan --brief "$brief" --diff "$stage/change.diff" \
+    --max-bytes "$max" --out-dir "$stage" >/dev/null 2>"$stage/plan.err"; then
+    echo "argon: cannot write packet prompt: $(tail -n 1 "$stage/plan.err")" >"$DIR/voter-argon.fail"
     return 1
   fi
   plan="$stage/plan.json"
@@ -2300,8 +2305,9 @@ review_run_argon() {
       cp "$packet/PROMPT.md" "$DIR/voter-argon.prompt.md"
     else
       cp "$packet/PROMPT.md" "$DIR/voter-argon.prompt.$i.md"
-      rm -f "$DIR/voter-argon.skipped"
     fi
+    # A skip file present after run_argon is then this packet's own failure.
+    rm -f "$DIR/voter-argon.skipped"
     PACKET="$packet"
     if [ "$n" -gt 1 ]; then
       ERRORS_FILE="$stage/errors.$i" run_argon
@@ -3407,7 +3413,7 @@ review_run() {
     "$DIR"/voter-*.json "$DIR"/voter-*.model.txt "$DIR"/voter-*.turn.txt \
     "$DIR"/voter-*.stdout.md "$DIR"/voter-*.seconds \
     "$DIR"/voter-argon.partial "$DIR"/voter-argon.packet.txt \
-    "$DIR"/voter-argon.packet-* \
+    "$DIR"/voter-argon.packet-* "$DIR"/voter-argon.skipped \
     "$DIR"/lineup.md "$DIR"/diffshape.txt "$DIR"/readonly.txt \
     "$DIR"/model-check.md "$DIR"/worktrees-kept.txt \
     "$DIR"/findings.json "$DIR"/judgment.md "$DIR"/convergence.md \
