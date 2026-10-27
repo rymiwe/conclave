@@ -539,11 +539,14 @@ def main() -> int:
         if c.get("expect") and (text is None or c["expect"] not in text):
             errors.append(f"comment {i} ({key}): {c['path']}:{c['line']} reads {text!r}, expected {c['expect']!r}")
         where = f"comment {i} ({key}) {c['path']}:{c['line']}"
-        if in_diff is not None:
+        needle = c.get("expect") or (cited_code(ballot, fid) if stack_dir is not None else None)
+        # In a stack the line number may be the stack tip's. A line in this
+        # PR's diff is trusted only when it holds the cited text, or when
+        # there is no cited text to check.
+        if in_diff is not None and (needle is None or needle in in_diff):
             post_as = "inline"
         else:
             if stack_dir is not None:
-                needle = c.get("expect") or cited_code(ballot, fid)
                 if text is None and needle:
                     lines = blob_lines(c["path"], soft=True)
                     if lines is not None and 1 <= c["line"] <= len(lines):

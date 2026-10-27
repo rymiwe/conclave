@@ -1151,16 +1151,17 @@ def test_file_level_and_reanchor(root: Path) -> None:
           f'a rerun does not post the file-level comment again ({again.returncode} {again.stderr.strip()} posts={f.posts()})')
 
     def stack_run(name: str, comments: list, findings: list,
-                  listed: tuple = (1, 2, 3), extra: tuple = ()) -> tuple[subprocess.CompletedProcess, list]:
+                  listed: tuple = (1, 2, 3), extra: tuple = (),
+                  svc: tuple = (PR1_SVC, PR3_SVC)) -> tuple[subprocess.CompletedProcess, list]:
         council = root / name / 'council'
         ballot = council / 'reanchor'
         ballot.mkdir(parents=True)
         patches = root / name / 'patches'
         patches.mkdir()
         for number, rows in (
-            ('1', [{'filename': 'app/svc.rb', 'patch': PR1_SVC}]),
+            ('1', [{'filename': 'app/svc.rb', 'patch': svc[0]}]),
             ('2', [{'filename': 'lib/x.rb', 'patch': PR2_X}]),
-            ('3', [{'filename': 'app/svc.rb', 'patch': PR3_SVC}]),
+            ('3', [{'filename': 'app/svc.rb', 'patch': svc[1]}]),
         ):
             (patches / f'{number}.json').write_text(json.dumps(rows))
         (ballot / 'stack.json').write_text(json.dumps({
@@ -1225,6 +1226,42 @@ def test_file_level_and_reanchor(root: Path) -> None:
           and plan[0].get('post_as') == 'file' and req.get('comments') == []
           and not any('-X' in call for call in calls),
           f'a target stack.json does not list falls back to a file-level comment, with a warning, and posts nothing '
+          f'({proc.returncode} {proc.stderr.strip()} {plan})')
+
+    # Both PRs put different code on commentable line 2 of app/svc.rb. The
+    # cited code is first added by #3, so the stack tip's line number lands on
+    # unrelated code in #1 and must not post there.
+    same_line = (PR1_SVC, '@@ -1,2 +1,5 @@\n class Svc\n+  def stale_total\n+    rows.sum\n+  end\n end\n')
+    clash = [{'finding': 'f1', 'path': 'app/svc.rb', 'line': 2,
+              'body': '**Requested:** the total is first added on a later pull request.'}]
+    cited = [{'id': 'f1', 'file': 'app/svc.rb', 'line': 2, 'cited_code': 'def stale_total'}]
+    proc, calls = stack_run('same-line', clash, cited, svc=same_line, extra=('--dry-run',))
+    request = root / 'same-line' / 'council' / 'reanchor' / 'post-1.request.json'
+    check(proc.returncode != 0 and 're-anchor to #3 app/svc.rb:2' in proc.stderr
+          and not any('-X' in call for call in calls) and not request.exists(),
+          f'a stack-tip line that is also commentable on #1 with other code is refused, not posted inline '
+          f'({proc.returncode} {proc.stderr.strip()})')
+
+    proc, calls = stack_run('same-line-ok', clash, [{**cited[0], 'cited_code': 'def a'}], svc=same_line,
+                            extra=('--dry-run',))
+    request = root / 'same-line-ok' / 'council' / 'reanchor' / 'post-1.request.json'
+    plan = (json.loads(request.read_text()) if request.exists() else {}).get('plan') or [{}]
+    check(proc.returncode == 0 and plan[0].get('post_as') == 'inline',
+          f'cited code that matches the line on #1 still posts inline ({proc.returncode} {proc.stderr.strip()} {plan})')
+
+    proc, calls = stack_run('same-line-nocite', clash, [{**cited[0], 'cited_code': None}], svc=same_line,
+                            extra=('--dry-run',))
+    request = root / 'same-line-nocite' / 'council' / 'reanchor' / 'post-1.request.json'
+    plan = (json.loads(request.read_text()) if request.exists() else {}).get('plan') or [{}]
+    check(proc.returncode == 0 and plan[0].get('post_as') == 'inline',
+          f'a finding with no cited code and a line in the diff still posts inline ({proc.returncode} {proc.stderr.strip()} {plan})')
+
+    proc, calls = stack_run('same-line-nowhere', clash, [{**cited[0], 'cited_code': 'def nowhere'}], svc=same_line,
+                            extra=('--dry-run',))
+    request = root / 'same-line-nowhere' / 'council' / 'reanchor' / 'post-1.request.json'
+    plan = (json.loads(request.read_text()) if request.exists() else {}).get('plan') or [{}]
+    check(proc.returncode == 0 and plan[0].get('post_as') == 'file',
+          f'cited code that no PR adds falls back to a file-level comment, not inline on unrelated code '
           f'({proc.returncode} {proc.stderr.strip()} {plan})')
 
 
