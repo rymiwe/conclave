@@ -11,7 +11,11 @@
 # It dispatches on the argv's first element (agy, cursor-agent, codex, claude,
 # muse) and runs that reviewer read-only from an empty temp dir, with the PR
 # description and the diff in the prompt, never the repo as a workspace. Any
-# other runner refuses. It writes gate-prompt.md, gate.stream.jsonl (the
+# other runner refuses. The prompt never rides in argv: one argument over 128KB
+# (MAX_ARG_STRLEN) makes execve fail with "Argument list too long", and a
+# diff with 40 lines of context passes that. agy and codex read it on stdin,
+# cursor-agent and claude read it on stdin when given no prompt argument, and
+# muse reads --prompt-file. It writes gate-prompt.md, gate.stream.jsonl (the
 # reviewer's raw output), gate.err, gate.md (the reviewer's answer),
 # gate-head.txt (the reviewed head sha), and gate-verdict.json (the parsed
 # one_way line) under <out_dir>.
@@ -143,7 +147,7 @@ A
       python3 "$ROOT/scripts/merge_gate.py" extract "$raw" "$out/gate.md" || ec=1 ;;
     cursor-agent)
       ( cd "$W" && "${noenv[@]}" "$bin" -p --sandbox enabled --trust --output-format stream-json \
-          --workspace "$W" --model "$model" "$(cat "$P/PROMPT.md")" < /dev/null ) > "$raw" 2> "$err"
+          --workspace "$W" --model "$model" < "$P/PROMPT.md" ) > "$raw" 2> "$err"
       ec=$?
       echo "$name exit=$ec"
       python3 "$ROOT/scripts/merge_gate.py" cursor-result "$raw" "$out/gate.md" || ec=1 ;;
@@ -156,7 +160,7 @@ A
       python3 "$ROOT/scripts/merge_gate.py" plain-result "$P/answer.md" "$out/gate.md" || ec=1 ;;
     claude)
       ( cd "$W" && "${noenv[@]}" "$bin" -p --permission-mode dontAsk --tools "" --output-format json \
-          --model "$model" "$(cat "$P/PROMPT.md")" < /dev/null ) > "$raw" 2> "$err"
+          --model "$model" < "$P/PROMPT.md" ) > "$raw" 2> "$err"
       ec=$?
       echo "$name exit=$ec"
       python3 "$ROOT/scripts/merge_gate.py" claude-result "$raw" "$out/gate.md" || ec=1 ;;

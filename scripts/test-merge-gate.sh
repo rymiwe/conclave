@@ -49,6 +49,7 @@ fi
 "$(dirname "$0")/logargv" cursor-agent "$@"
 for a in "$@"; do last=$a; done
 printf '%s\n' "$last" > "$FAKE_PROMPT_ARG"
+cat > "$FAKE_STDIN"
 jq -cn --rawfile r "$FAKE_REPLY" '{type:"system"},{type:"result",is_error:true,result:"partial"},{type:"result",is_error:false,result:$r},{type:"result",is_error:false,result:""}'
 A
 cat > "$T/bin/codex" <<'A'
@@ -61,11 +62,15 @@ A
 cat > "$T/bin/claude" <<'A'
 #!/usr/bin/env bash
 "$(dirname "$0")/logargv" claude "$@"
+for a in "$@"; do last=$a; done
+printf '%s\n' "$last" > "$FAKE_PROMPT_ARG"
+cat > "$FAKE_STDIN"
 jq -cn --rawfile r "$FAKE_REPLY" '{type:"result",is_error:false,result:$r}'
 A
 cat > "$T/bin/muse" <<'A'
 #!/usr/bin/env bash
 "$(dirname "$0")/logargv" muse "$@"
+while [ "$#" -gt 0 ]; do [ "$1" = --prompt-file ] && cp "$2" "$FAKE_STDIN"; shift; done
 # muse exec --json is JSONL. The answer is joined run.output.delta text.
 if [ -n "${FAKE_MUSE_TERMINAL:-}" ]; then
   jq -cn --rawfile r "$FAKE_REPLY" '{payload_type:"run.terminal.done",payload:{text:$r}}'
@@ -196,24 +201,29 @@ FAKE_ROUTE="$(route grok xai grok-4.7-xhigh-fast '["cursor-agent","--model","gro
 passes cursor cursor-agent
 has "cursor: sandbox enabled" "$run_log" "--sandbox enabled"
 hasnt "cursor: no --force" "$run_log" "--force"
-has "cursor: slug used as given" "$run_log" "--model grok-4.7-xhigh-fast "
+has "cursor: slug used as given" "$run_log" "--model grok-4.7-xhigh-fast"
 hasnt "cursor: no model listing for a slug" "$run_log" "cursor-agent models"
 hasnt "cursor: workspace is not the repo" "$run_log" "--workspace $R"
-has "cursor: prompt argument carries the diff" "$(cat "$FAKE_PROMPT_ARG")" '+b'
+has "cursor: prompt on stdin carries the diff" "$(cat "$FAKE_STDIN")" '+b'
+has "cursor: prompt on stdin has the one_way line" "$(cat "$FAKE_STDIN")" 'exactly `one_way: yes` or `one_way: no`'
+hasnt "cursor: prompt is not an argument" "$(cat "$FAKE_PROMPT_ARG")" '+b'
 FAKE_ROUTE="$(route fable anthropic fable '["cursor-agent","--model","fable"]')" \
   FAKE_CURSOR_MODELS=$'claude-fable-8-thinking-xhigh - Fable 8\nclaude-fable-9-thinking-xhigh - Fable 9\nclaude-fable-9-thinking-high\ngrok-4.7-xhigh' \
   run cursorfable "$ANSWER"
 passes cursorfable cursor-agent
-has "cursor fable: resolved to the newest id" "$run_log" "--model claude-fable-9-thinking-xhigh "
+has "cursor fable: resolved to the newest id" "$run_log" "--model claude-fable-9-thinking-xhigh"
 FAKE_ROUTE="$(route grok xai grok '["cursor-agent","--model","grok"]')" \
   FAKE_CURSOR_MODELS=$'grok-4.7-xhigh\ngrok-4.7-xhigh-fast\ngrok-4.6-xhigh-fast\ngrok-4.7-high-fast' \
   run cursorgrok "$ANSWER"
 passes cursorgrok cursor-agent
-has "cursor grok: resolved to the newest xhigh Fast id" "$run_log" "--model grok-4.7-xhigh-fast "
+has "cursor grok: resolved to the newest xhigh Fast id" "$run_log" "--model grok-4.7-xhigh-fast"
 FAKE_ROUTE="$(route fable anthropic fable-5 '["claude","--model","fable-5"]')" run claude "$ANSWER"
 passes claude claude
 has "claude: dontAsk" "$run_log" "--permission-mode dontAsk"
-has "claude: model" "$run_log" "--model fable-5 "
+has "claude: model" "$run_log" "--model fable-5"
+has "claude: prompt on stdin carries the diff" "$(cat "$FAKE_STDIN")" '+b'
+has "claude: prompt on stdin has the one_way line" "$(cat "$FAKE_STDIN")" 'exactly `one_way: yes` or `one_way: no`'
+hasnt "claude: prompt is not an argument" "$(cat "$FAKE_PROMPT_ARG")" '+b'
 FAKE_ROUTE="$(route muse meta muse-wonder-2 '["muse","exec","--model","muse-wonder-2"]')" run muse "$ANSWER"
 passes muse muse
 has "muse: --disable-shell" "$run_log" "--disable-shell"
@@ -226,6 +236,35 @@ FAKE_MUSE_TERMINAL=1 FAKE_ROUTE="$(route muse meta muse-wonder-2 '["muse","exec"
 passes museterm muse
 has "muse terminal: answer comes from run.terminal" "$(cat "$T/museterm/out/gate.md")" "one_way: no"
 hasnt "muse terminal: gate.md is not a JSON line" "$(cat "$T/museterm/out/gate.md")" "payload_type"
+
+# A prompt over 128KB (MAX_ARG_STRLEN) cannot be one argv string: execve fails
+# with "Argument list too long". The stubs are real executables, so an argv
+# prompt would fail the launch here too. Every runner must get it by file or stdin.
+git -C "$R" checkout -q -b big main
+python3 -c 'print("\n".join("line %05d %s" % (i, "x" * 50) for i in range(3000)))' > "$R/big.txt"
+git -C "$R" add big.txt; git -C "$R" commit -qm big
+git -C "$R" checkout -q feat
+big() { # $1 case, $2 runner argv JSON, $3 family, $4 vendor, $5 model
+  local d="$T/big-$1"; mkdir -p "$d"; printf '%s\n' "$ANSWER" > "$FAKE_REPLY"
+  : > "$FAKE_RUN_LOG"; : > "$FAKE_STDIN"; : > "$FAKE_PROMPT_ARG"
+  FAKE_ROUTE="$(route "$3" "$4" "$5" "$2")" "$ROOT/scripts/merge-gate.sh" review "$R" main big "$PR" "$d/out" xai \
+    > "$d/review.out" 2>&1; review_rc=$?
+  review_out="$(cat "$d/review.out")"; run_log="$(cat "$FAKE_RUN_LOG")"
+  [ "$review_rc" = 0 ] && ok "big $1: review rc 0" || bad "big $1: review rc $review_rc: $review_out"
+  [ "$(wc -c < "$d/out/gate-prompt.md")" -gt 131072 ] && ok "big $1: prompt is over 128KB" || bad "big $1: prompt only $(wc -c < "$d/out/gate-prompt.md") bytes"
+  # agy takes the prompt as the content of one stream-json user event.
+  { [ "$1" = agy ] && jq -j '.message.content' "$FAKE_STDIN" || cat "$FAKE_STDIN"; } | cmp -s "$d/out/gate-prompt.md" - && ok "big $1: reviewer received the whole prompt" || bad "big $1: reviewer got $(wc -c < "$FAKE_STDIN") bytes, not the whole prompt"
+  has "big $1: verdict" "$(cat "$d/out/gate-verdict.json" 2>/dev/null)" '"one_way": "no"'
+  # logargv logs any multi-line argument, which the prompt always is, as PROMPT.
+  if grep -qE ' PROMPT( |$)' "$FAKE_RUN_LOG"; then bad "big $1: a multi-line argument was passed"; else ok "big $1: no multi-line argument"; fi
+  [ "$(awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }' "$FAKE_RUN_LOG")" -lt 4096 ] \
+    && ok "big $1: no argument carries the prompt" || bad "big $1: long argv logged"
+}
+big cursor '["cursor-agent","--model","grok-4.7-xhigh-fast"]' grok xai grok-4.7-xhigh-fast
+big claude '["claude","--model","fable-5"]' fable anthropic fable-5
+big codex '["codex","exec","-m","gpt-6-astra"]' astra openai gpt-6-astra
+big agy '["agy","--model","gemini-4-argon-high"]' argon google gemini-4-argon-high
+big muse '["muse","exec","--model","muse-wonder-2"]' muse meta muse-wonder-2
 
 # 2. one_way: yes -> refused, names the reason and the file:line, no merge.
 run yes $'approve\n\nFindings:\nNone.\n\n**one_way: yes**\none_way_at: db/migrate/002_drop.sql:3 drops column users.email'
