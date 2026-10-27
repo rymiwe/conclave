@@ -849,6 +849,60 @@ def test_nul_run_command(tmp: Path) -> None:
     check(got == 'could not run', f'nul: run_command reports a Popen ValueError as could not run ({got!r})')
 
 
+def test_plan_cli(tmp: Path) -> None:
+    """preflight.py --plan lists each declared command with its argv and source ref, and runs none."""
+    bin_dir = tmp / 'plan-bin'
+    bin_dir.mkdir()
+    write_exe(bin_dir / 'gh', GH)
+    marker = tmp / 'plan-cli-ran'
+    env = base_env(bin_dir, CONCLAVE_WAVE_PRECHECK='0', DEFAULT_BRANCH='main')
+    repo = make_repo(tmp / 'plan-cli')
+    declare(repo, [{'name': 'makes marker', 'command': ['touch', str(marker)], 'needs': 'n'},
+                   {'name': 'would block', 'command': ['false'], 'needs': 'n'}])
+    git(repo, 'update-ref', 'refs/remotes/origin/main', 'main')
+    dest = tmp / 'plan-cli-out'
+    got = preflight_cli(env, repo, dest, '--pr', '12', '--plan')
+    detail = f'{got.returncode} stdout={got.stdout!r} stderr={got.stderr[-300:]!r}'
+    check(not marker.exists(), f'plan: preflight.py --plan does not run a declared command ({detail})')
+    check(got.returncode == 0 and 'would stop' not in got.stderr,
+          f'plan: a declared command that would fail does not block a dry run ({detail})')
+    argv = json.dumps(['touch', str(marker)])
+    check(f'makes marker: {argv} from origin/main. not run (dry run)' in got.stdout
+          and 'would block: ["false"] from origin/main. not run (dry run)' in got.stdout,
+          f'plan: each declared command is listed with its argv and default-branch ref ({detail})')
+    check(not (dest / 'needs-human.md').exists(), 'plan: a listed command is not a needs-human item')
+
+    # The declaration is still parsed and validated: a NUL argv still blocks the dry run.
+    declare(repo, json.dumps({'version': 1, 'checks': [{'name': 'nul', 'command': ['true', '\u0000'], 'needs': 'n'}]}))
+    git(repo, 'update-ref', 'refs/remotes/origin/main', 'main')
+    got = preflight_cli(env, repo, dest, '--pr', '12', '--plan')
+    check(got.returncode == preflight.BLOCKED and 'bad .conclave/preflight.json' in got.stdout and 'NUL' in got.stdout,
+          f'plan: a malformed declaration still blocks the dry run ({got.returncode} {got.stdout!r})')
+
+    # The control: a real launch runs it.
+    declare(repo, [{'name': 'makes marker', 'command': ['touch', str(marker)], 'needs': 'n'}])
+    git(repo, 'update-ref', 'refs/remotes/origin/main', 'main')
+    got = preflight_cli(env, repo, dest, '--pr', '12')
+    check(got.returncode == 0 and marker.exists(), f'plan: without --plan the declared command runs ({got.returncode})')
+
+
+def test_plan_dry_run(tmp: Path) -> None:
+    """conclave.sh --dry-run lists the declared commands and runs none."""
+    c = Conclave(tmp, 'plan')
+    marker = tmp / 'plan-dry-run-ran'
+    try:
+        declare(c.repo, [{'name': 'makes marker', 'command': ['touch', str(marker)], 'needs': 'n'}])
+        got = c.run('--dry-run', '--repo', str(c.repo), '--base', 'main', '--head', 'main')
+        detail = f'{got.returncode} stdout={got.stdout[-500:]!r} stderr={got.stderr[-300:]!r}'
+        check(not marker.exists(), f'plan: conclave.sh --dry-run does not run a declared command ({detail})')
+        argv = json.dumps(['touch', str(marker)])
+        check(got.returncode == 0 and f'makes marker: {argv} from main. not run (dry run)' in got.stdout
+              and not c.launched() and not hook_calls(c.hook_log),
+              f'plan: the dry run lists the command, its argv and its source ref ({detail})')
+    finally:
+        c.close()
+
+
 def main() -> None:
     (ROOT / 'tmp').mkdir(exist_ok=True)
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Status)
@@ -869,6 +923,8 @@ def main() -> None:
             test_seats_and_targets(tmp)
             test_conclave(tmp)
             test_post_plan_ready(tmp)
+            test_plan_cli(tmp)
+            test_plan_dry_run(tmp)
     finally:
         server.shutdown()
     print('ok')

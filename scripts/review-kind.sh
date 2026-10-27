@@ -3433,8 +3433,9 @@ review_preflight() {
   # .conclave/preflight.json. Exit 3 when anything blocks. The parse lives
   # in scripts/preflight.py. CONCLAVE_PREFLIGHT=0 skips it. Under stack-run
   # (CONCLAVE_PREFLIGHT_DONE=1) only the target is checked. docs/preflight.md.
-  # "plan" is the dry run: the same checks and exit code, written under
-  # preview/ and with no stage event, so the preview matches a real launch.
+  # "plan" is the dry run: written under preview/, no stage event, and the
+  # repo's declared commands are listed, not run. The other checks and their
+  # exit code match a real launch.
   [ "$(conclave_env PREFLIGHT 1)" != 0 ] || return 0
   local rc=0 where="$DIR"
   local -a args=("--repo=$REPO" "--ballot=$ID")

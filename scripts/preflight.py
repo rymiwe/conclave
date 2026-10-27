@@ -6,6 +6,8 @@ Checks the review target, the seat-usage route, and the target repo's
 optional .conclave/preflight.json. Every check runs even when one fails.
 Blocking items exit 3 (BLOCKED) before anything launches. Warnings alone do
 not block. The list goes to stdout and to needs-human.md in the run dir.
+--plan (the dry run) runs no declared command: it lists each one with its
+argv and source ref instead.
 
 CONCLAVE_PREFLIGHT=0 skips every check. CONCLAVE_PREFLIGHT_DONE=1 means
 stack-run already ran the seat and repo checks, so only the target is checked.
@@ -225,14 +227,14 @@ def default_branch_ref(repo: str | Path) -> str:
     return ''
 
 
-def check_declared_default(repo: str | Path) -> list[dict]:
+def check_declared_default(repo: str | Path, plan: list[str] | None = None) -> list[dict]:
     """check_declared on the default branch. Unresolved, nothing runs and one warning says so."""
     ref = default_branch_ref(repo)
     if not ref:
         return [item('warning', f"{DECLARATION} was not read: the repo's default branch could not be resolved",
                      'check gh auth status, or run git remote set-head origin --auto; '
                      'the file is only read from origin/<default branch>')]
-    return check_declared(repo, ref)
+    return check_declared(repo, ref, plan)
 
 
 def valid_ref(ref: str) -> bool:
@@ -480,11 +482,12 @@ def fetch_status(url: str, expect: int, timeout: float) -> str:
     return '' if status == expect else f'status {status}, wanted {expect}'
 
 
-def check_declared(repo: str | Path, ref: str = '') -> list[dict]:
+def check_declared(repo: str | Path, ref: str = '', plan: list[str] | None = None) -> list[dict]:
     """Run the checks the commit at ref declares. No ref, no read: the working tree is never a source.
 
     A repo that has the file in its working tree but no commit to read it from
-    gets one warning, so the skip is not silent.
+    gets one warning, so the skip is not silent. plan: a dry run. Each declared
+    command is appended to it (name, argv, ref) and not run.
     """
     sha = commit_of(repo, ref) if ref else ''
     if not sha:
@@ -497,6 +500,9 @@ def check_declared(repo: str | Path, ref: str = '') -> list[dict]:
         return [item('blocking', f'bad {DECLARATION}: {reason}', f'fix {DECLARATION} on {ref} (see docs/preflight.md)')]
     found = []
     for check in checks:
+        if check['command'] is not None and plan is not None:
+            plan.append(f"{check['name']}: {json.dumps(check['command'])} from {ref}. not run (dry run)")
+            continue
         if check['command'] is not None:
             failure = run_command(check['command'], repo, check['timeout'])
             label = check['name']
@@ -520,11 +526,17 @@ def render(items: list[dict]) -> str:
     return '\n'.join(lines)
 
 
-def report(items: list[dict], dest: str | Path, context: dict | None = None, plan: bool = False) -> int:
+def report(items: list[dict], dest: str | Path, context: dict | None = None, plan: bool = False,
+           planned: list[str] | None = None) -> int:
     """Print one list, write or clear needs-human.md, fire preflight_failed. 0 or BLOCKED.
 
-    plan: a dry run. The same list and the same exit code, but no stage event.
+    plan: a dry run. The same list and exit code for the checks it ran, but no
+    stage event. planned: the declared commands it did not run, printed first.
     """
+    if planned:
+        lines = ['# Declared checks not run (dry run)', '']
+        lines += [f'{n}. {line}' for n, line in enumerate(planned, 1)]
+        print('\n'.join(lines) + '\n', flush=True)
     dest = Path(dest)
     path = dest / NEEDS_FILE
     if not items:
@@ -558,11 +570,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument('--head')
     parser.add_argument('--no-seats', action='store_true', help='skip the seat check (--voters was given)')
     parser.add_argument('--plan', action='store_true',
-                        help='dry run: the same checks and exit code, no stage event; --dir is the preview dir')
+                        help='dry run: declared commands are listed, not run; no stage event; --dir is the preview dir')
     args = parser.parse_args(argv)
     if not enabled():
         return 0
     items: list[dict] = []
+    planned: list[str] | None = [] if args.plan else None
     if args.pr:
         items += check_pr(args.repo, args.pr)
     if args.base:
@@ -572,11 +585,11 @@ def main(argv: list[str]) -> int:
             items += check_seats()
         if args.pr:
             # Never the PR's base: on a stacked PR that is the lower PR's head.
-            items += check_declared_default(args.repo)
+            items += check_declared_default(args.repo, planned)
         else:
-            items += check_declared(args.repo, args.base or '')
+            items += check_declared(args.repo, args.base or '', planned)
     context = {'ballot': args.ballot} if args.ballot else {}
-    return report(items, args.dir, context, plan=args.plan)
+    return report(items, args.dir, context, plan=args.plan, planned=planned)
 
 
 if __name__ == '__main__':
