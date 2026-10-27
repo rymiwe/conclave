@@ -1102,7 +1102,8 @@ class Runner:
         """Launch checks before any chair or ballot. The stack's PRs, or None when blocked.
 
         PRs first, then the stack walk, then the whole-stack refs, seats and
-        the repo's declared checks. Every check runs so the list is complete.
+        the repo's declared checks. Every check runs so the list is complete,
+        except seats when no scheduled ballot needs voters.
         A stack the walk rejects is a blocking item; the checks that need the
         stack's PRs are skipped.
         """
@@ -1136,7 +1137,15 @@ class Runner:
                         'check gh auth status and git fetch origin, or pass --no-whole-stack'))
                 else:
                     items += preflight.check_refs(self.repo, [base, head])
-        items += preflight.check_seats(self.process, waiting=self.args.wave_wait > 0, caller='stack')
+        # Seats only matter when a scheduled ballot starts voters: the per-wave gate's rule
+        # (new or needs legs). A resume of finished, chair-only or blocked ballots spends no
+        # seat, so a capped route must not stop its reuse, chair steps or reconcile.
+        # With no stack (the walk failed) the ballots are unknown, so seats are still checked.
+        scheduled = [self.ballot(pr['number']) for pr in prs]
+        if prs and not self.args.no_whole_stack:
+            scheduled.append(ROOT / 'tmp/council' / self.whole_ballot_name())
+        if not prs or any(state(b) in ('new', 'needs legs') for b in scheduled):
+            items += preflight.check_seats(self.process, waiting=self.args.wave_wait > 0, caller='stack')
         # The declaration is read from the default branch only: never the checkout, and never
         # a PR base, which is the lower PR's head when --prs starts above the bottom.
         items += preflight.check_declared_default(self.repo)

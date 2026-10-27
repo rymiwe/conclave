@@ -1936,6 +1936,43 @@ def test_preflight_stack(tmp: Path, mod) -> None:
           f'preflight stack-run: a capped seat route blocks before any chair ({got.returncode} {text!r})')
     check([c[1] for c in f.calls() if c[0] == 'seat'] == [['--route', 'lineup', '--json', '--kind', 'review']],
           'preflight stack-run: one seat-usage call, the same route the wave gate asks')
+    # (9) A resume that launches no voters is not stopped by a capped route: every scheduled
+    # ballot is done or needs decide, so the seat check is skipped, as the per-wave gate does.
+    # One ballot that still needs voters keeps the block.
+    def resume_states(f: Fixture, fresh: int | None) -> None:
+        for n in (1, 2, 3):
+            if n == fresh:
+                continue
+            b = f.ballot(n)
+            (b / 'judgment.md').write_text('head_oid: ' + 'a' * 40 + '\n')
+            (b / 'findings.json').write_text(json.dumps({'findings': []}))
+            if n == 2:
+                (b / 'decide.md').write_text('f1 \u2014 **what breaks, for whom**: TODO(chair)\n**recommend**: TODO(chair)\n')
+            else:
+                (b / 'decide.md').write_text('Already filled.\n')
+                (b / 'comments.md').write_text('Draft only.\n')
+    f = Fixture(tmp, 'preflight-resume-no-voters')
+    seat_route(f, SEAT_ASK)
+    f.env.pop('CONCLAVE_PREFLIGHT')
+    resume_states(f, None)
+    got = f.invoke(*PER_PR)
+    text = needs(f).read_text() if needs(f).is_file() else ''
+    rec = f.record() if (f.root / 'tmp/council/stack/run.json').is_file() else {}
+    check(got.returncode == 0 and 'seats capped' not in text and not any(c[0] == 'seat' for c in f.calls())
+          and [r['state'] for r in rec.get('prs', [])] == ['done', 'needs decide', 'done']
+          and [w['precheck'] for w in rec.get('waves', [])] == ['not needed'] * 3
+          and not any(c[0] == 'council' and '--findings' not in c[1] for c in f.calls()),
+          f'preflight stack-run: a --no-whole-stack resume with every ballot done or needs decide skips the seat check '
+          f'and runs despite an ask route ({got.returncode} {text!r} {got.stderr.strip()})')
+    f = Fixture(tmp, 'preflight-resume-one-new')
+    seat_route(f, SEAT_ASK)
+    f.env.pop('CONCLAVE_PREFLIGHT')
+    resume_states(f, 3)
+    got = f.invoke(*PER_PR)
+    text = needs(f).read_text() if needs(f).is_file() else ''
+    check(got.returncode == 3 and not any(c[0] in ('council', 'cursor') for c in f.calls())
+          and 'seats capped' in text and 'every pool capped' in text,
+          f'preflight stack-run: a resume with one ballot needing voters still blocks on an ask route ({got.returncode} {text!r})')
     f = Fixture(tmp, 'preflight-seats-wait')
     seat_route(f, SEAT_ASK)
     f.env.pop('CONCLAVE_PREFLIGHT')

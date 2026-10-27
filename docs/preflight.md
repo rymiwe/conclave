@@ -26,6 +26,7 @@ Every check runs, even when an earlier one fails, so the list is complete. Each 
 - Warning: `seat-usage` is missing, exits nonzero, prints nothing, or does not answer within 25 seconds. The launch goes on.
 - `CONCLAVE_WAVE_PRECHECK=0` skips this check, here and before each wave.
 - `conclave.sh` skips it when `--voters` is given, because `--voters` wins over the route.
+- stack-run skips it when no scheduled ballot needs voters: every one is done, needs decide, needs findings, or blocked. A resume that only reuses ballots, runs chair steps, or reconciles is not stopped by a capped route. The per-wave pre-check exempts the same ballots.
 - stack-run with `--wave-wait S` turns capped seats into a warning. The first wave then waits for seats as before.
 - A blocked seat item lists the options and a default. `conclave.sh`: wait for the capped seat to reset and rerun (the default), pass `--voters` with seats that have quota, or set `CONCLAVE_PREFLIGHT=0` to run the old fixed default pair. stack-run: wait for the reset and rerun (the default), pass `--wave-wait SECONDS` so the run waits for seats before the first wave, or set `CONCLAVE_PREFLIGHT=0` (the per-wave pre-check still stops a capped wave).
 
