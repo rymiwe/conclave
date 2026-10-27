@@ -10,8 +10,9 @@ not block. The list goes to stdout and to needs-human.md in the run dir.
 CONCLAVE_PREFLIGHT=0 skips every check. CONCLAVE_PREFLIGHT_DONE=1 means
 stack-run already ran the seat and repo checks, so only the target is checked.
 Command output, env values, headers, URL queries and credentials are never
-printed. The repo's declared checks are read from the base commit with git
-show, never from the working tree, and run with a scrubbed environment.
+printed. The repo's declared checks are read with git show from the default
+branch (--pr, stack-run) or --base, never from the working tree or a PR's
+base branch, and run with a scrubbed environment.
 See docs/preflight.md.
 """
 from __future__ import annotations
@@ -166,45 +167,72 @@ def check_seats(run=subprocess.run, waiting: bool = False, caller: str = 'concla
 
 def check_pr(repo: str | Path, number: int | str) -> list[dict]:
     """The PR must resolve in repo. A closed or merged PR only warns."""
-    return view_pr(repo, number)[0]
-
-
-def view_pr(repo: str | Path, number: int | str) -> tuple[list[dict], str]:
-    """(items, base branch name or ''). A PR review reads the declaration from that base."""
-    argv = ['gh', 'pr', 'view', str(number), '--json', 'number,state,url,baseRefName']
+    argv = ['gh', 'pr', 'view', str(number), '--json', 'number,state,url']
     try:
         proc = subprocess.run(argv, cwd=str(repo), stdin=subprocess.DEVNULL, capture_output=True,
                               text=True, timeout=GH_TIMEOUT)
     except FileNotFoundError:
-        return [item('blocking', f'PR #{number}: gh not found', 'install gh and run gh auth login')], ''
+        return [item('blocking', f'PR #{number}: gh not found', 'install gh and run gh auth login')]
     except OSError:
-        return [item('blocking', f'PR #{number}: gh could not run', 'check the gh install')], ''
+        return [item('blocking', f'PR #{number}: gh could not run', 'check the gh install')]
     except subprocess.TimeoutExpired:
         return [item('blocking', f'PR #{number}: gh pr view timed out after {GH_TIMEOUT}s',
-                     'check the network and gh auth status')], ''
+                     'check the network and gh auth status')]
     if proc.returncode:
         return [item('blocking', f'PR #{number} not found in {repo} (gh pr view exit {proc.returncode})',
-                     'check the PR number and --repo, and gh auth status')], ''
+                     'check the PR number and --repo, and gh auth status')]
     try:
         doc = json.loads(proc.stdout)
     except ValueError:
         doc = None
     if not isinstance(doc, dict):
-        return [item('blocking', f'PR #{number}: gh pr view returned no PR', 'check the PR number and --repo')], ''
-    base = doc.get('baseRefName')
-    base = base if isinstance(base, str) else ''
+        return [item('blocking', f'PR #{number}: gh pr view returned no PR', 'check the PR number and --repo')]
     state = str(doc.get('state') or '').upper()
     if state in ('CLOSED', 'MERGED'):
-        return [item('warning', f'PR #{number} is {state.lower()}', 'confirm a review of a closed PR is wanted')], base
-    return [], base
+        return [item('warning', f'PR #{number} is {state.lower()}', 'confirm a review of a closed PR is wanted')]
+    return []
 
 
-def pr_base_ref(repo: str | Path, name: str) -> str:
-    """origin/<name> when it resolves, else <name>, else ''. A PR's base is read from the freshest copy."""
-    for ref in (f'origin/{name}', name) if name and not name.startswith('-') else ():
-        if commit_of(repo, ref):
-            return ref
+def default_branch_ref(repo: str | Path) -> str:
+    """origin/<default branch> when it resolves, else ''.
+
+    The declaration for a PR or a stack is read from here and nowhere else. A
+    PR's base can be another PR's head, which that PR's author controls, so
+    the base is never a source. gh names the default branch; origin/HEAD is
+    the offline answer.
+    """
+    names = []
+    try:
+        proc = subprocess.run(['gh', 'repo', 'view', '--json', 'defaultBranchRef'], cwd=str(repo),
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=GH_TIMEOUT)
+        doc = json.loads(proc.stdout) if proc.returncode == 0 else None
+        name = (doc.get('defaultBranchRef') or {}).get('name') if isinstance(doc, dict) else None
+        if isinstance(name, str):
+            names.append(name)
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        pass
+    try:
+        proc = subprocess.run(['git', '-C', str(repo), 'symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'],
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=GIT_TIMEOUT)
+        head = proc.stdout.strip() if proc.returncode == 0 else ''
+        if head.startswith('refs/remotes/origin/'):
+            names.append(head[len('refs/remotes/origin/'):])
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    for name in names:
+        if name and name != 'HEAD' and not name.startswith('-') and commit_of(repo, f'origin/{name}'):
+            return f'origin/{name}'
     return ''
+
+
+def check_declared_default(repo: str | Path) -> list[dict]:
+    """check_declared on the default branch. Unresolved, nothing runs and one warning says so."""
+    ref = default_branch_ref(repo)
+    if not ref:
+        return [item('warning', f"{DECLARATION} was not read: the repo's default branch could not be resolved",
+                     'check gh auth status, or run git remote set-head origin --auto; '
+                     'the file is only read from origin/<default branch>')]
+    return check_declared(repo, ref)
 
 
 def valid_ref(ref: str) -> bool:
@@ -533,18 +561,18 @@ def main(argv: list[str]) -> int:
     if not enabled():
         return 0
     items: list[dict] = []
-    declared_from = ''
     if args.pr:
-        found, base = view_pr(args.repo, args.pr)
-        items += found
-        declared_from = pr_base_ref(args.repo, base)
+        items += check_pr(args.repo, args.pr)
     if args.base:
         items += check_refs(args.repo, [args.base, args.head or 'HEAD'])
-        declared_from = args.base
     if not handed_off():
         if not args.no_seats:
             items += check_seats()
-        items += check_declared(args.repo, declared_from)
+        if args.pr:
+            # Never the PR's base: on a stacked PR that is the lower PR's head.
+            items += check_declared_default(args.repo)
+        else:
+            items += check_declared(args.repo, args.base or '')
     context = {'ballot': args.ballot} if args.ballot else {}
     return report(items, args.dir, context, plan=args.plan)
 

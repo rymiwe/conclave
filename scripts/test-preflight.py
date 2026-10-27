@@ -119,7 +119,11 @@ if args[:2] == ['pr', 'view']:
         sys.exit('no pull requests found')
     print(json.dumps({'number': int(args[2]), 'state': os.environ.get('PR_STATE', 'OPEN'),
                       'url': f'https://example.test/o/r/pull/{args[2]}',
-                      'author': {'login': 'someone', 'is_bot': False}, 'commits': []}))
+                      'author': {'login': 'someone', 'is_bot': False}, 'commits': [],
+                      **({'baseRefName': os.environ['PR_BASE']} if os.environ.get('PR_BASE') else {})}))
+    sys.exit(0)
+if args[:2] == ['repo', 'view'] and os.environ.get('DEFAULT_BRANCH'):
+    print(json.dumps({'defaultBranchRef': {'name': os.environ['DEFAULT_BRANCH']}}))
     sys.exit(0)
 sys.exit('unexpected gh ' + str(args))
 '''
@@ -358,6 +362,58 @@ def test_declaration_source(tmp: Path) -> None:
     got = preflight_cli(env, repo, tmp / 'src-symlink-out', '--base', 'main')
     check(got.returncode == preflight.BLOCKED and 'must be a regular file' in got.stdout and not marker.exists(),
           f'source: a symlinked declaration is refused ({got.returncode} {got.stdout!r})')
+
+
+def test_stacked_pr_declaration(tmp: Path) -> None:
+    """A stacked PR's base is the lower PR's head. Its declaration never runs; the default branch's does."""
+    bin_dir, evil = marker_bin(tmp, 'stacked-evil')
+    good = tmp / 'stacked-good'
+    write_exe(bin_dir / 'touch-good', f'#!/bin/sh\n: >{good}\n')
+    write_exe(bin_dir / 'gh', GH)
+    env = base_env(bin_dir, CONCLAVE_WAVE_PRECHECK='0', PR_BASE='feat-a')
+
+    def stacked(name: str) -> Path:
+        # main declares a harmless check. feat-a (PR 11's head, author-controlled) adds a command.
+        # PR 12 is based on feat-a. Both branches are fetched, as in a normal clone.
+        repo = make_repo(tmp / name)
+        declare(repo, [{'name': 'fine', 'command': ['touch-good'], 'needs': 'n'}])
+        git(repo, 'update-ref', 'refs/remotes/origin/main', 'main')
+        git(repo, 'checkout', '-q', '-b', 'feat-a')
+        declare(repo, [{'name': 'fine', 'command': ['touch-good'], 'needs': 'n'},
+                       {'name': 'deps', 'command': ['touch-marker'], 'needs': 'n'}])
+        git(repo, 'update-ref', 'refs/remotes/origin/feat-a', 'feat-a')
+        git(repo, 'checkout', '-q', '-b', 'feat-b')
+        return repo
+
+    def reset() -> None:
+        for path in (evil, good):
+            path.unlink(missing_ok=True)
+
+    # gh names the default branch: its declaration runs, the lower PR's command does not.
+    repo = stacked('stacked-gh')
+    reset()
+    got = preflight_cli(dict(env, DEFAULT_BRANCH='main'), repo, tmp / 'stacked-gh-out', '--pr', '12')
+    check(not evil.exists(), f'stacked: a command the lower PR adds to {preflight.DECLARATION} does not run '
+          f'({got.returncode} {got.stdout!r})')
+    check(got.returncode == 0 and good.exists() and got.stdout == 'preflight: ok\n',
+          f'stacked: the default branch declaration runs instead ({got.returncode} {got.stdout!r})')
+
+    # gh cannot answer: origin/HEAD names the default branch.
+    repo = stacked('stacked-head')
+    git(repo, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+    reset()
+    got = preflight_cli(env, repo, tmp / 'stacked-head-out', '--pr', '12')
+    check(got.returncode == 0 and good.exists() and not evil.exists(),
+          f'stacked: origin/HEAD resolves the default branch when gh cannot ({got.returncode} {got.stdout!r})')
+
+    # Neither resolves: nothing runs, one warning, and the PR base is never the fallback.
+    repo = stacked('stacked-none')
+    reset()
+    got = preflight_cli(env, repo, tmp / 'stacked-none-out', '--pr', '12')
+    check(got.returncode == 0 and not good.exists() and not evil.exists()
+          and 'default branch could not be resolved' in got.stdout.split('## Warnings')[-1],
+          f'stacked: no default branch skips the declared checks with a warning ({got.returncode} {got.stdout!r})')
+    reset()
 
 
 def test_command_rules(tmp: Path, port: int) -> None:
@@ -777,6 +833,7 @@ def main() -> None:
             test_declared(tmp, port)
             test_secrets(tmp, port)
             test_declaration_source(tmp)
+            test_stacked_pr_declaration(tmp)
             test_command_rules(tmp, port)
             test_stage_hook(tmp)
             test_seats_and_targets(tmp)

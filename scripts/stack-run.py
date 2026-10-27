@@ -1137,12 +1137,9 @@ class Runner:
                 else:
                     items += preflight.check_refs(self.repo, [base, head])
         items += preflight.check_seats(self.process, waiting=self.args.wave_wait > 0, caller='stack')
-        # The declaration is read from the stack's bottom base, never from the checkout.
-        try:
-            declared_from = origin_ref(str(prs[0].get('base', ''))) if prs else ''
-        except RuntimeError:
-            declared_from = ''
-        items += preflight.check_declared(self.repo, declared_from)
+        # The declaration is read from the default branch only: never the checkout, and never
+        # a PR base, which is the lower PR's head when --prs starts above the bottom.
+        items += preflight.check_declared_default(self.repo)
         if preflight.report(items, self.dest, {'stack_id': self.args.stack_id}):
             return None
         self.preflight_done = True

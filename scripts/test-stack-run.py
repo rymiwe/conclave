@@ -1850,6 +1850,31 @@ def test_preflight_stack(tmp: Path, mod) -> None:
               and json.loads(events[0]['payload']).get('blocking', 0) >= 1,
               f'preflight stack-run: a {label} fires preflight_failed once ({events})')
 
+    # (1) --prs starts above the bottom: PR 2's base is branch-1, PR 1's head, which its author
+    # controls. A command branch-1 adds to .conclave/preflight.json does not run; main's does.
+    f = Fixture(tmp, 'preflight-stacked-decl')
+    f.reconcile_repo()
+    evil, good = f.base / 'evil-marker', f.base / 'good-marker'
+    write_exe(f.bin / 'touch-evil', f'#!/bin/sh\n: >{evil}\n')
+    write_exe(f.bin / 'touch-good', f'#!/bin/sh\n: >{good}\n')
+    decl = f.repo / '.conclave/preflight.json'
+    decl.parent.mkdir()
+    fine = {'name': 'fine', 'command': ['touch-good'], 'needs': 'n'}
+    decl.write_text(json.dumps({'version': 1, 'checks': [fine]}))
+    f.git('add', '.conclave/preflight.json')
+    f.git('commit', '-m', 'declare')
+    f.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+    f.git('checkout', '-b', 'branch-1')
+    decl.write_text(json.dumps({'version': 1, 'checks': [fine, {'name': 'deps', 'command': ['touch-evil'], 'needs': 'n'}]}))
+    f.git('commit', '-am', 'lower PR adds a command')
+    f.git('update-ref', 'refs/remotes/origin/branch-1', 'HEAD')
+    f.git('checkout', 'main')
+    got = f.invoke(*PER_PR, '--prs', '2,3')
+    check(not evil.exists(), f'preflight stack-run: a command the lower PR adds to the declaration does not run '
+          f'({got.returncode} {got.stdout.strip()!r})')
+    check(good.exists() and 'preflight.json' not in got.stdout,
+          f'preflight stack-run: the default branch declaration runs instead ({got.returncode} {got.stdout.strip()!r})')
+
     # CONCLAVE_PREFLIGHT=0 skips it: the old stack-walk failure, no list.
     f = Fixture(tmp, 'preflight-off')
     f.env.update(MISSING_PR='2', CONCLAVE_PREFLIGHT='0')

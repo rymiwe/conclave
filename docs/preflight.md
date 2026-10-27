@@ -31,7 +31,7 @@ Every check runs, even when an earlier one fails, so the list is complete. Each 
 
 Before preflight, a review with an asking route fell back to the fixed default pair. It now stops at minute 0 instead. `CONCLAVE_PREFLIGHT=0` or `--voters` keeps the old launch.
 
-**Repo prerequisites.** An optional file in the target repo, `.conclave/preflight.json`, read from the base commit. It names what a reviewer needs to run a repro: a test database, installed dependencies, a private registry.
+**Repo prerequisites.** An optional file in the target repo, `.conclave/preflight.json`, read from a committed ref, never the working tree. It names what a reviewer needs to run a repro: a test database, installed dependencies, a private registry.
 
 ```json
 {"version": 1,
@@ -42,7 +42,7 @@ Before preflight, a review with an asking route fell back to the fixed default p
  ]}
 ```
 
-- The file is read with `git show --no-textconv <base>:.conclave/preflight.json`, never from the working tree. The base is the PR's base branch (`origin/<name>` when it resolves) for `--pr`, `--base` for refs, and the bottom PR's base for stack-run. An untracked file, an uncommitted edit, and the PR branch's own copy are never read, so a PR cannot add a command to its own review. With no base to read from, the file is skipped and one warning says so. The file must be a regular file of at most 64 KB. A symlink is refused.
+- The file is read with `git show --no-textconv <ref>:.conclave/preflight.json`, never from the working tree. For `--pr` and for stack-run the ref is `origin/<default branch>`: `gh repo view --json defaultBranchRef` names the branch, and `origin/HEAD` is the fallback. It is never the PR's base branch. On a stacked PR the base is the lower PR's head, which that PR's author controls, so reading it would let the lower PR add a command that runs before any voter. When neither names a default branch that resolves, the file is skipped and one warning says so; the PR base is never the fallback. For refs (`--base`), the ref is the `--base` the operator passed. An untracked file, an uncommitted edit, and any PR branch's copy are never read, so a PR cannot add a command to its own review or to the review of a PR stacked on it. With no ref to read from, the file is skipped and one warning says so. The file must be a regular file of at most 64 KB. A symlink is refused.
 - `version` must be `1`. `checks` is a list.
 - `name` is required. It is the label in the report.
 - `needs` is required. It is the text that tells the human what to do.
@@ -59,7 +59,7 @@ Before preflight, a review with an asking route fell back to the fixed default p
 
 ### What this does not stop
 
-The deny list is defense in depth, not a jail. A declaration comes from the reviewed base commit, so the base's maintainers are trusted. A tool they name still runs in the target checkout, and the checkout may be on the PR branch. A tool that reads project files there (`bundle`, `make`, `npm`, `pytest`) can run PR code. Prefer checks that only probe (`pg_isready`, `bundle check`) and keep them off tools that execute the project.
+The deny list is defense in depth, not a jail. A declaration comes from the default branch (or the operator's `--base`), so whoever can push there is trusted. A tool they name still runs in the target checkout, and the checkout may be on the PR branch. A tool that reads project files there (`bundle`, `make`, `npm`, `pytest`) can run PR code. Prefer checks that only probe (`pg_isready`, `bundle check`) and keep them off tools that execute the project.
 
 Preflight cannot tell a work repo from a personal one reliably and cheaply. It restricts the checks instead of guessing: URL checks are http(s) only and carry no credentials, so a work repo's declaration cannot send a token to a host. To skip URL checks, leave `url` out of the declaration.
 
