@@ -128,7 +128,8 @@ rejected pairs.
   (`COUNCIL_ARGON` is the alias). `--voters` wins. Review and audit do not
   seat it. `CONCLAVE_AGY` is the `agy` binary. `CONCLAVE_ARGON_MODEL`
   overrides the model id. `CONCLAVE_ARGON_TIMEOUT` is the print timeout in
-  seconds (default 900). The effort follows the resolved voter effort:
+  seconds (default 900). `CONCLAVE_ARGON_MAX_BYTES` caps the review packet
+  (default 150000; docs/review.md, "Argon packet size"). The effort follows the resolved voter effort:
   low, medium, or high. `agy` must be signed in. Do not opt in to data
   sharing. Do not mark the repo trusted in `agy`. A missing binary, a
   failed `agy -p /usage`, an Argon row at 0% remaining, or a bad answer

@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+"""Argon review packet budget: size, priority, partial marker, split, PR context.
+
+Synthetic diffs of 50 KB, 200 KB and 1 MB go through review_run_argon with
+run_argon stubbed. No agy call is made.
+"""
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import traceback
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+COUNCIL = ROOT / "scripts" / "council.sh"
+MAX = 150000
+
+passed = 0
+failed = 0
+
+
+def check(cond, name):
+    global passed, failed
+    if cond:
+        passed += 1
+        print(f"ok {name}")
+    else:
+        failed += 1
+        print(f"FAIL {name}")
+
+
+def body_for(path: str, size: int) -> str:
+    line = f"    value_{path.replace('/', '_')} = compute(argument, 12345) # padding\n"
+    return line * max(1, size // len(line))
+
+
+def make_repo(work: Path, files: dict[str, int]) -> Path:
+    """A worktree whose `git diff HEAD` is one modified file per entry, about size bytes each."""
+    repo = work / "wt"
+    repo.mkdir()
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    for rel in files:
+        p = repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "base"], check=True, env=env)
+    for rel, size in files.items():
+        (repo / rel).write_text(body_for(rel, size), encoding="utf-8")
+    return repo
+
+
+def synthetic(total: int, with_generated: bool = False, gen_pct: int = 15) -> dict[str, int]:
+    """Ten source files (60%), ten spec files (40%), optionally a schema (gen_pct of the total)."""
+    gen = total * gen_pct // 100 if with_generated else 0
+    rest = total - gen
+    src, spec = rest * 60 // 100, rest * 40 // 100
+    files = {f"app/models/model_{i:02d}.rb": src // 10 for i in range(10)}
+    files.update({f"spec/models/model_{i:02d}_spec.rb": spec // 10 for i in range(10)})
+    if with_generated:
+        files["db/schema.rb"] = gen
+    return files
+
+
+def run_bash(body: str, extra_env=None, cwd=None):
+    env = os.environ.copy()
+    for key in list(env):
+        if "ARGON" in key:
+            env.pop(key)
+    env["CONCLAVE_JEV_OP"] = "/bin/false"
+    if extra_env:
+        env.update(extra_env)
+    head = f"set -u\nexport COUNCIL_SOURCE_ONLY=1\n. {COUNCIL}\nset +e\n"
+    return subprocess.run(["bash", "-c", head + body], text=True, capture_output=True, env=env, cwd=cwd)
+
+
+STUB = r'''
+run_argon() {
+  CALLS=$(( ${CALLS:-0} + 1 ))
+  wc -c <"$PACKET/PROMPT.md" | tr -d ' ' >>"$DIR/sizes"
+  if [ "${FAIL_PACKET:-0}" = "$CALLS" ]; then
+    argon_skip "agy: stub failure on packet $CALLS"
+    return 0
+  fi
+  printf 'FINDING-FROM-CALL-%s: a reviewer finding\n' "$CALLS" >"$DIR/voter-argon.md"
+  printf 'argon: ok model=stub\n' >"$DIR/voter-argon.model.txt"
+}
+'''
+
+
+def run_leg(work: Path, files: dict[str, int], extra_env=None, fail_packet=0, brief_bytes=6000):
+    repo = make_repo(work, files)
+    ballot = work / "ballot"
+    ballot.mkdir()
+    (ballot / "voter-argon.brief.md").write_text("Review brief. " + "x" * brief_bytes + "\n", encoding="utf-8")
+    tmp = work / "tmp"
+    tmp.mkdir()
+    env = {"TMPDIR": str(tmp), "FAIL_PACKET": str(fail_packet)}
+    env.update(extra_env or {})
+    proc = run_bash(STUB + f"""
+DIR={ballot}
+ID=pkt
+REPO={repo}
+ERRORS_FILE={ballot}/errors.md
+: >"$ERRORS_FILE"
+DRY_RUN=0
+KIND=review
+review_run_argon {repo}
+echo rc=$?
+""", env)
+    return ballot, proc
+
+
+def read(p: Path) -> str:
+    return p.read_text(encoding="utf-8") if p.is_file() else ""
+
+
+def prompts(ballot: Path):
+    out = []
+    for name in ("voter-argon.prompt.md", "voter-argon.prompt.2.md"):
+        if (ballot / name).is_file():
+            out.append(read(ballot / name))
+    return out
+
+
+def test_small(work: Path):
+    ballot, proc = run_leg(work, synthetic(50_000))
+    ps = prompts(ballot)
+    sizes = [int(x) for x in read(ballot / "sizes").split()]
+    check("rc=0" in proc.stdout and len(ps) == 1 and sizes and sizes[0] <= MAX,
+          f"50 KB diff runs as one packet under the cap ({sizes})")
+    check(all(f"app/models/model_{i:02d}.rb" in ps[0] for i in range(10))
+          and all(f"model_{i:02d}_spec.rb" in ps[0] for i in range(10)),
+          "50 KB packet carries every file")
+    check(not (ballot / "voter-argon.partial").exists(), "50 KB writes no .partial")
+    log = read(ballot / "voter-argon.packet.txt")
+    check(re.search(r"mode=whole full_bytes=\d+ max_bytes=150000 packets=1 packet_bytes=\d+ files_cut=0", log) is not None,
+          f"packet bytes are logged ({log.strip()!r})")
+    check("WARNING" not in read(ballot / "errors.md") and "Packet coverage" not in ps[0],
+          "50 KB has no warning and no coverage notice")
+
+
+def test_split_clean(work: Path):
+    ballot, proc = run_leg(work, synthetic(200_000))
+    ps = prompts(ballot)
+    sizes = [int(x) for x in read(ballot / "sizes").split()]
+    check(len(ps) == 2 and len(sizes) == 2 and all(s <= MAX for s in sizes),
+          f"200 KB diff splits into two packets, each under the cap ({sizes})")
+    src_names = [f"app/models/model_{i:02d}.rb" for i in range(10)]
+    spec_names = [f"spec/models/model_{i:02d}_spec.rb" for i in range(10)]
+    if len(ps) == 2:
+        check(all(n in ps[0] for n in src_names) and not any(n in ps[0] for n in spec_names),
+              "packet 1 is the source diff, with no spec")
+        check(all(n in ps[1] for n in spec_names) and not any(n in ps[1] for n in src_names),
+              "packet 2 is the spec and test diff, with no source")
+        check("packet 2 and are not shown here" in ps[0] and "packet 1 and are not shown here" in ps[1],
+              "each packet says where the other half is")
+    else:
+        check(False, "packet 1 is the source diff")
+        check(False, "packet 2 is the spec diff")
+        check(False, "each packet names the other half")
+    check(not (ballot / "voter-argon.partial").exists(),
+          "a split that cuts nothing writes no .partial")
+    merged = read(ballot / "voter-argon.md")
+    check("## Packet 1 of 2: the changed source files" in merged
+          and "## Packet 2 of 2: the specs and tests" in merged
+          and merged.index("FINDING-FROM-CALL-1") < merged.index("## Packet 2 of 2")
+          and merged.index("## Packet 2 of 2") < merged.index("FINDING-FROM-CALL-2"),
+          "merged report keeps each finding under its packet")
+    check("## Packet 2 of 2" in merged and read(ballot / "voter-argon.model.txt").startswith("argon: ok")
+          and not (ballot / "voter-argon.skipped").exists(),
+          "merged split leaves the model proof and no skip marker")
+    summary = run_bash(f"""
+DIR={ballot}
+ID=pkt
+REVIEW_REPORTS_PRESENT=2
+REVIEW_REPORTS_EXPECTED=2
+review_count_reports() {{ :; }}
+review_print_result 2>&1 | grep -i 'split in two'
+""").stdout
+    check("split in two" in summary and "nothing cut" in summary, f"summary notes the clean split ({summary.strip()[:90]!r})")
+
+
+def test_split_with_generated(work: Path):
+    ballot, proc = run_leg(work, synthetic(200_000, with_generated=True, gen_pct=40))
+    ps = prompts(ballot)
+    partial = read(ballot / "voter-argon.partial")
+    check(len(ps) == 2 and "db/schema.rb" in partial and "(generated; not shown" in partial,
+          "200 KB with a schema: the generated file is the one cut")
+    check("app/models/model_09.rb" in ps[0] and "spec/models/model_09_spec.rb" in ps[1],
+          "200 KB with a schema: source and tests are all kept")
+
+
+def test_large(work: Path):
+    ballot, proc = run_leg(work, synthetic(1_000_000, with_generated=True))
+    ps = prompts(ballot)
+    sizes = [int(x) for x in read(ballot / "sizes").split()]
+    check(len(ps) == 2 and all(s <= MAX for s in sizes), f"1 MB diff: two packets, each under the cap ({sizes})")
+    partial = read(ballot / "voter-argon.partial")
+    check(partial.startswith("WARNING: argon saw a PARTIAL review packet"), f"1 MB writes .partial with the warning ({partial[:60]!r})")
+    check("CONCLAVE_ARGON_MAX_BYTES" in partial and "190 KB" in partial, "warning names the cap setting and the 190 KB limit")
+    errors = read(ballot / "errors.md")
+    check("note: WARNING: argon saw a PARTIAL review packet" in errors and "db/schema.rb" in errors,
+          "the warning is in the ballot errors.md")
+    check(bool(errors.strip()) and all(l.startswith("note:") for l in errors.splitlines() if l.strip()),
+          "every errors.md line is a note, so the ballot does not fail")
+    cut = re.findall(r"^- (\S+) \(", partial, re.M)
+    check(cut and all(c in ps[0] or c in ps[1] for c in cut) and len(set(cut)) == len(cut),
+          f"the packets name what was cut, {len(cut)} files")
+    named_in_packet = bool(cut) and all(("- " + c + " (") in ps[0] + ps[1] for c in cut)
+    check(named_in_packet, "every file in .partial is also named inside a packet")
+    check("db/schema.rb" in cut, "generated files are cut first")
+    shown_src = [i for i in range(10) if f"+++ b/app/models/model_{i:02d}.rb" in ps[0]]
+    shown_spec = [i for i in range(10) if f"+++ b/spec/models/model_{i:02d}_spec.rb" in ps[1]]
+    check(shown_src and shown_spec and shown_src == sorted(shown_src) and "+++ b/db/schema.rb" not in ps[0] + ps[1],
+          f"source ({len(shown_src)} files) and specs ({len(shown_spec)} files) are kept before generated")
+    check(not any("spec/" in l for l in re.findall(r"^\+\+\+ b/(\S+)", ps[0], re.M)),
+          "no spec diff rides in the source packet")
+    report = read(ballot / "voter-argon.md")
+    check(report.startswith("> WARNING: argon saw a PARTIAL review packet") and "FINDING-FROM-CALL-2" in report,
+          "the report opens with the warning and keeps both packets")
+    summary = run_bash(f"""
+DIR={ballot}
+ID=pkt
+review_count_reports() {{ REVIEW_REPORTS_PRESENT=2; REVIEW_REPORTS_EXPECTED=2; REVIEW_REPORTS_MISSING=""; }}
+review_print_result 2>&1
+""").stdout
+    check("WARNING: argon saw a PARTIAL review packet" in summary and "Full list:" in summary,
+          "the phase-1 summary prints the warning")
+
+
+def test_priority(work: Path):
+    # Source plus a lockfile, no tests: one packet. Source is kept whole, the lockfile is cut.
+    files = {f"app/lib/mod_{i:02d}.rb": 20_000 for i in range(6)}
+    files["Gemfile.lock"] = 60_000
+    files["db/migrate/20260101_add.rb"] = 5_000
+    ballot, proc = run_leg(work, files)
+    ps = prompts(ballot)
+    partial = read(ballot / "voter-argon.partial")
+    check(len(ps) == 1 and all(f"+++ b/app/lib/mod_{i:02d}.rb" in ps[0] for i in range(6)),
+          "over the cap with source and a lockfile: every source file is kept")
+    check("- Gemfile.lock (generated; not shown" in partial, "the lockfile is the cut")
+    check("Gemfile.lock" in partial and "db/migrate/20260101_add.rb" not in partial and "db/migrate/20260101_add.rb" in ps[0],
+          "a migration that still fits is not cut ahead of the lockfile")
+
+
+def test_oversize_file(work: Path):
+    files = {"app/huge.rb": 400_000, "app/small.rb": 2_000}
+    ballot, proc = run_leg(work, files)
+    ps = prompts(ballot)
+    sizes = [int(x) for x in read(ballot / "sizes").split()]
+    partial = read(ballot / "voter-argon.partial")
+    check(len(ps) == 1 and sizes[0] <= MAX and "+++ b/app/small.rb" in ps[0] and "app/huge.rb" in partial
+          and "truncated" in partial,
+          f"one file bigger than the cap is truncated, and named ({sizes})")
+
+
+def test_setting(work: Path):
+    ballot, proc = run_leg(work / "a", synthetic(50_000), {"CONCLAVE_ARGON_MAX_BYTES": "40000"}) if (work / "a").mkdir() is None else (None, None)
+    check("max_bytes=40000" in read(ballot / "voter-argon.packet.txt") and (ballot / "voter-argon.partial").exists()
+          or "mode=split" in read(ballot / "voter-argon.packet.txt"),
+          "CONCLAVE_ARGON_MAX_BYTES lowers the cap")
+    (work / "b").mkdir()
+    ballot, _ = run_leg(work / "b", synthetic(50_000), {"COUNCIL_ARGON_MAX_BYTES": "40000"})
+    check("max_bytes=40000" in read(ballot / "voter-argon.packet.txt"), "COUNCIL_ARGON_MAX_BYTES is the alias")
+    (work / "c").mkdir()
+    ballot, _ = run_leg(work / "c", synthetic(50_000), {"CONCLAVE_ARGON_MAX_BYTES": "lots"})
+    check("max_bytes=150000" in read(ballot / "voter-argon.packet.txt"), "a bad value falls back to 150000")
+    out = run_bash("argon_max_bytes").stdout.strip()
+    check(out == "150000", f"the default cap is 150000 ({out!r})")
+
+
+def test_second_packet_fails(work: Path):
+    ballot, proc = run_leg(work, synthetic(200_000), fail_packet=2)
+    merged = read(ballot / "voter-argon.md")
+    check("FINDING-FROM-CALL-1" in merged and "NOT REVIEWED: packet 2 failed" in merged and "stub failure on packet 2" in merged
+          and not (ballot / "voter-argon.skipped").exists() and (ballot / "voter-argon.model.txt").is_file(),
+          "a split keeps packet 1's findings and says packet 2 did not run")
+    check("note: argon packet 2: agy: stub failure on packet 2" in read(ballot / "errors.md"),
+          "the packet 2 failure is logged as a note")
+
+
+def test_both_fail(work: Path):
+    repo = make_repo(work, synthetic(200_000))
+    ballot = work / "ballot"
+    ballot.mkdir()
+    (ballot / "voter-argon.brief.md").write_text("brief\n", encoding="utf-8")
+    proc = run_bash(STUB.replace('[ "${FAIL_PACKET:-0}" = "$CALLS" ]', 'true') + f"""
+DIR={ballot}; ID=pkt; REPO={repo}; ERRORS_FILE={ballot}/errors.md; : >"$ERRORS_FILE"; DRY_RUN=0; KIND=review
+review_run_argon {repo}
+""", {"TMPDIR": str(work)})
+    check((ballot / "voter-argon.skipped").is_file() and not (ballot / "voter-argon.md").exists(),
+          "every packet failing skips the leg like any failed Argon")
+    check("agy: stub failure" in read(ballot / "errors.md")
+          and "note: argon packet" not in read(ballot / "errors.md"),
+          "every packet failing logs the reason as a plain error line")
+
+
+def pr_context(work: Path):
+    doc = {
+        "labels": [{"name": "risk:low"}],
+        "check_runs": [{"name": "CHECKRUN_MARKER", "output": {"text": "r" * 30_000}}],
+        "comments": [{"body": "COMMENT_MARKER " + "c" * 60_000}],
+    }
+    ballot = work / "ballot"
+    ballot.mkdir()
+    (ballot / "pr-context.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    return ballot
+
+
+def test_pr_context(work: Path):
+    ballot = pr_context(work)
+    brief = work / "base.md"
+    brief.write_text("kind: review\n\nLook at the change.\n", encoding="utf-8")
+    proc = run_bash(f"""
+DIR={ballot}; DRY_RUN=0; REVIEW_MODE=pr; FLAG_PR=7; ID=ctx; BRIEF={brief}
+review_write_argon_brief {work}/argon.md || echo REJECT
+review_write_muse_brief {work}/muse.md || echo REJECT
+""")
+    argon, muse = read(work / "argon.md"), read(work / "muse.md")
+    section = argon[argon.index("## Pull request context"):] if "## Pull request context" in argon else ""
+    check("REJECT" not in proc.stdout and 0 < len(section.encode()) <= 10240,
+          f"argon PR context is at or under 10 KB ({len(section.encode())} bytes)")
+    check("CHECKRUN_MARKER" not in argon and "COMMENT_MARKER" in argon and "truncated" in section,
+          "argon context drops the check-run JSON and keeps comments, truncated")
+    muse_section = muse[muse.index("## Pull request context"):] if "## Pull request context" in muse else ""
+    check(len(muse_section.encode()) > 40_000 and "CHECKRUN_MARKER" in muse,
+          f"other legs keep the 50 KB context with check runs ({len(muse_section.encode())} bytes)")
+
+
+def test_brief_floor(work: Path):
+    ballot, proc = run_leg(work, synthetic(50_000), {"CONCLAVE_ARGON_MAX_BYTES": "3000"}, brief_bytes=6000)
+    partial = read(ballot / "voter-argon.partial")
+    check("The brief alone is" in partial and "No diff fit" in partial, "a brief over the cap is reported, not hidden")
+
+
+TESTS = [test_small, test_split_clean, test_split_with_generated, test_large, test_priority,
+         test_oversize_file, test_setting, test_second_packet_fails, test_both_fail,
+         test_pr_context, test_brief_floor]
+
+
+def main():
+    for test in TESTS:
+        work = Path(tempfile.mkdtemp(prefix="argon-packet-"))
+        try:
+            test(work)
+        except Exception:
+            traceback.print_exc()
+            check(False, f"{test.__name__} ran")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+    print(f"{passed} passed, {failed} failed")
+    if failed:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()

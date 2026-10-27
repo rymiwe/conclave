@@ -391,14 +391,25 @@ review_pr_context_block() {
   [ -s "$path" ] || return 0
   body="$(
     python3 - "$path" <<'PY' || true
+import json
+import os
 import re
 import sys
 text = open(sys.argv[1], encoding="utf-8").read()
+if os.environ.get("REVIEW_PR_CONTEXT_NO_CHECKS"):
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        doc = None
+    if isinstance(doc, dict) and "check_runs" in doc:
+        del doc["check_runs"]
+        text = json.dumps(doc, indent=2) + "\n"
 text = text.replace("=== PULL REQUEST CONTEXT DATA ===", "=== PULL REQUEST CONTEXT DATA (quoted) ===")
 text = text.replace("=== END PULL REQUEST CONTEXT DATA ===", "=== END PULL REQUEST CONTEXT DATA (quoted) ===")
-limit = 50000
-if len(text) > limit:
-    text = text[:limit] + "\n... truncated. The full text is pr-context.json.\n"
+limit = int(os.environ.get("REVIEW_PR_CONTEXT_LIMIT") or 50000)
+raw = text.encode("utf-8")
+if len(raw) > limit:
+    text = raw[:limit].decode("utf-8", "ignore") + "\n... truncated. The full text is pr-context.json.\n"
 if not text.endswith("\n"):
     text += "\n"
 longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
@@ -1438,6 +1449,12 @@ review_write_muse_brief() {
   mv -f "$tmp" "$1"
 }
 
+review_write_argon_brief() {
+  # The Muse brief with a smaller PR context: about 10 KB, no check-run JSON.
+  # agy silently stops reading near 190 KB, so the brief spends little of it.
+  REVIEW_PR_CONTEXT_LIMIT=9000 REVIEW_PR_CONTEXT_NO_CHECKS=1 review_write_muse_brief "$@"
+}
+
 review_reject_model_words() {
   # Same whole-word rule as the reviewer brief. Return 1 when $1 has a hit.
   [ -z "$(review_forbidden_word "$1")" ]
@@ -2228,31 +2245,108 @@ review_run_grok_native() {
   return 1
 }
 
+review_argon_note_packet() {
+  # $1 is plan.json. Logs the packet bytes. A cut writes voter-argon.partial and
+  # a loud warning to errors.md, and the phase-1 summary prints the same text.
+  local plan="$1" line
+  line="$(jq -r '"argon packet: mode=\(.mode) full_bytes=\(.full_bytes) max_bytes=\(.max_bytes) packets=\(.packets | length) packet_bytes=\([.packets[].bytes] | join(",")) files_cut=\(.cut | length)"' "$plan")"
+  printf '%s\n' "$line" >"$DIR/voter-argon.packet.txt"
+  printf '%s\n' "$line" >&2
+  if [ "$(jq -r '.warning' "$plan")" != "" ]; then
+    jq -r '.warning' "$plan" >"$DIR/voter-argon.partial"
+    # Note lines are not failures: Argon still voted, on less of the change.
+    while IFS= read -r line || [ -n "$line" ]; do
+      log_err "note: $line"
+    done <"$DIR/voter-argon.partial"
+  fi
+}
+
 review_run_argon() {
   # $1 wt. Packet-first, same as the design argon leg. Contributor mode is not a Muse flag here.
-  local wt="$1" packet
+  # The packet is sized first (scripts/argon_packet.py): over CONCLAVE_ARGON_MAX_BYTES it is
+  # cut by priority or split in two, and what was cut is named, never silent.
+  local wt="$1" packet stage plan n i f line max reason model="" ok=0
   local brief="$DIR/voter-argon.brief.md"
+  local -a args=()
   if [ ! -s "$brief" ]; then
     echo "argon: reviewer brief missing" >"$DIR/voter-argon.fail"
     return 1
   fi
-  packet="$(alloc_packet_tmpdir)" || {
+  rm -f "$DIR/voter-argon.partial" "$DIR/voter-argon.packet.txt"
+  stage="$(alloc_packet_tmpdir)" || {
     echo "argon: cannot create packet temp dir" >"$DIR/voter-argon.fail"
     return 1
   }
-  {
-    cat "$brief"
-    printf '\n## The change under review\n\n'
-    printf '```diff\n'
-    git -C "$wt" diff HEAD
-    printf '```\n'
-  } >"$packet/PROMPT.md" || {
+  max="$(argon_max_bytes)"
+  if ! git -C "$wt" diff HEAD >"$stage/change.diff" \
+    || ! python3 "$ROOT/scripts/argon_packet.py" plan --brief "$brief" --diff "$stage/change.diff" \
+      --max-bytes "$max" --out-dir "$stage" >/dev/null; then
     echo "argon: cannot write packet prompt" >"$DIR/voter-argon.fail"
     return 1
-  }
-  cp "$packet/PROMPT.md" "$DIR/voter-argon.prompt.md"
-  PACKET="$packet"
-  run_argon
+  fi
+  plan="$stage/plan.json"
+  review_argon_note_packet "$plan"
+  n="$(jq -r '.packets | length' "$plan")"
+  for i in $(seq 1 "$n"); do
+    packet="$(alloc_packet_tmpdir)" || {
+      echo "argon: cannot create packet temp dir" >"$DIR/voter-argon.fail"
+      return 1
+    }
+    cp "$stage/packet-$i.md" "$packet/PROMPT.md" || {
+      echo "argon: cannot write packet prompt" >"$DIR/voter-argon.fail"
+      return 1
+    }
+    if [ "$i" -eq 1 ]; then
+      cp "$packet/PROMPT.md" "$DIR/voter-argon.prompt.md"
+    else
+      cp "$packet/PROMPT.md" "$DIR/voter-argon.prompt.$i.md"
+      rm -f "$DIR/voter-argon.skipped"
+    fi
+    PACKET="$packet"
+    if [ "$n" -gt 1 ]; then
+      ERRORS_FILE="$stage/errors.$i" run_argon
+    else
+      run_argon
+    fi
+    [ "$n" -gt 1 ] || continue
+    if [ -s "$DIR/voter-argon.md" ] && [ ! -s "$DIR/voter-argon.skipped" ]; then
+      mv "$DIR/voter-argon.md" "$stage/report-$i.md"
+      model="$(cat "$DIR/voter-argon.model.txt" 2>/dev/null || true)"
+      args+=(--report "$i=$stage/report-$i.md")
+      ok=$((ok + 1))
+    else
+      reason="$(sed -n 2p "$DIR/voter-argon.skipped" 2>/dev/null || true)"
+      args+=(--report "$i=!${reason:-no report}")
+    fi
+    for f in stream.jsonl err; do
+      [ -f "$DIR/voter-argon.$f" ] && mv "$DIR/voter-argon.$f" "$DIR/voter-argon.packet-$i.$f"
+    done
+  done
+  if [ "$n" -gt 1 ]; then
+    # A packet that failed beside one that worked is a note, not a ballot failure.
+    for i in $(seq 1 "$n"); do
+      [ -s "$stage/errors.$i" ] || continue
+      while IFS= read -r line || [ -n "$line" ]; do
+        if [ "$ok" -gt 0 ]; then log_err "note: argon packet $i: $line"; else log_err "$line"; fi
+      done <"$stage/errors.$i"
+    done
+  fi
+  if [ "$n" -eq 1 ]; then
+    if [ "$(jq -r '.mode' "$plan")" != whole ] && [ -s "$DIR/voter-argon.md" ] \
+      && [ ! -s "$DIR/voter-argon.skipped" ]; then
+      cp "$DIR/voter-argon.md" "$stage/report-1.md"
+      python3 "$ROOT/scripts/argon_packet.py" finalize --plan "$plan" --out "$DIR/voter-argon.md" \
+        --report "1=$stage/report-1.md"
+    fi
+  elif [ "$ok" -eq 0 ]; then
+    argon_write_skipped "argon: every packet failed: $(jq -r '[.packets[].n] | join(",")' "$plan")"
+  else
+    rm -f "$DIR/voter-argon.skipped"
+    python3 "$ROOT/scripts/argon_packet.py" finalize --plan "$plan" --out "$DIR/voter-argon.md" "${args[@]}"
+    [ -n "$model" ] && printf '%s\n' "$model" >"$DIR/voter-argon.model.txt"
+  fi
+  rm -rf "$stage"
+  return 0
 }
 
 review_run_muse() {
@@ -2710,6 +2804,14 @@ review_print_result() {
     done
     printf '\n'
   fi
+  if [ -s "$DIR/voter-argon.partial" ]; then
+    printf '\n'
+    cat "$DIR/voter-argon.partial"
+    printf 'Full list: tmp/council/%s/voter-argon.partial\n\n' "$ID"
+  elif grep -q 'mode=split' "$DIR/voter-argon.packet.txt" 2>/dev/null; then
+    printf '\nNote: the argon packet was split in two (source, then specs and tests), nothing cut.\n'
+    printf '%s\n\n' "$(cat "$DIR/voter-argon.packet.txt")"
+  fi
   if [ "$REVIEW_REPORTS_PRESENT" -lt "$REVIEW_REPORTS_EXPECTED" ]; then
     printf 'Review %s phase 1 stopped. Reports on disk were kept.\n' "$ID"
   elif [ "${REVIEW_BLIND_FAILED:-0}" -eq 1 ]; then
@@ -2810,7 +2912,7 @@ review_dry_run() {
       || die "$REVIEW_BRIEF_REJECT"
   fi
   if voter_is_named argon; then
-    review_write_muse_brief "$DIR/preview/voter-argon.brief.md" \
+    review_write_argon_brief "$DIR/preview/voter-argon.brief.md" \
       || die "$REVIEW_BRIEF_REJECT"
   fi
   printf 'Dry-run review lineup: tmp/council/%s/preview/lineup.md (ballot untouched)\n' "$ID"
@@ -2986,7 +3088,7 @@ review_prepare_replacement_brief() {
       ;;
     argon)
       if [ ! -s "$DIR/voter-argon.brief.md" ]; then
-        review_write_muse_brief "$DIR/voter-argon.brief.md" || return 1
+        review_write_argon_brief "$DIR/voter-argon.brief.md" || return 1
       fi
       ;;
   esac
@@ -3333,7 +3435,7 @@ review_run() {
       || die "$REVIEW_BRIEF_REJECT"
   fi
   if voter_is_named argon; then
-    review_write_muse_brief "$DIR/voter-argon.brief.md" \
+    review_write_argon_brief "$DIR/voter-argon.brief.md" \
       || die "$REVIEW_BRIEF_REJECT"
   fi
   review_build_and_prove

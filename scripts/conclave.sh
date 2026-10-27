@@ -522,7 +522,8 @@ pass high. Argon follows that same resolved effort: low, medium, or high
 (gemini-4-argon-low, gemini-4-argon-medium, gemini-4-argon-high).
 CONCLAVE_ARGON_MODEL overrides the id. CONCLAVE_AGY is the binary
 (default: command -v agy, else ~/.local/bin/agy). CONCLAVE_ARGON_TIMEOUT
-is the print timeout in seconds (default 900). See docs/review.md.
+is the print timeout in seconds (default 900). CONCLAVE_ARGON_MAX_BYTES
+caps the review packet (default 150000). See docs/review.md.
 agy must be signed in. Do not opt in to data sharing. Do not mark this
 repo trusted in agy. The leg is packet-first: cwd is the out-of-repo packet,
 --sandbox, --disable-slash-commands, and no permission skip. A missing agy,
@@ -2435,6 +2436,16 @@ argon_print_timeout() {
   t="$(conclave_env ARGON_TIMEOUT 900)"
   case "$t" in
     ''|*[!0-9]*) t=900 ;;
+  esac
+  printf '%s\n' "$t"
+}
+
+argon_max_bytes() {
+  # The review packet cap in bytes. agy silently stops reading near 190 KB.
+  local t
+  t="$(conclave_env ARGON_MAX_BYTES 150000)"
+  case "$t" in
+    ''|*[!0-9]*|0) t=150000 ;;
   esac
   printf '%s\n' "$t"
 }

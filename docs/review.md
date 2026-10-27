@@ -547,6 +547,47 @@ is empty. A version bump can land unattended when auto-update is on. A persona
 read error does not kill a run; check `cancellation_category` before blaming
 it. The script does not write into `~/.grok`.
 
+## Argon packet size
+
+The review Argon leg is packet-first. `review_run_argon` sends the reviewer
+brief and `git diff HEAD` to `agy` as one stream-json message. `agy` stops
+reading near 190 KB (about 80K input tokens) and reports no error: prompts
+from 211 KB to 989 KB all plateau at 60-80K input tokens. The diff is
+path-ordered, so a long packet silently loses the specs and tests.
+
+`scripts/argon_packet.py` sizes the packet before the leg runs.
+`CONCLAVE_ARGON_MAX_BYTES` is the cap (default 150000, `COUNCIL_ARGON_MAX_BYTES`
+is the alias; a value that is not a positive integer falls back to the default).
+Every run writes one line to `voter-argon.packet.txt` and to stderr with the
+mode, the full packet bytes, the cap, the packet count and each packet's bytes,
+and the number of files cut.
+
+- The Argon brief carries about 10 KB of PR context, not 50 KB, and drops the
+  check-run JSON. Other legs keep the 50 KB context.
+- Under the cap, the packet is the brief and the whole diff, as before.
+- Over the cap, files are kept whole in this priority: the brief, then the
+  changed source diff, then the spec and test diff, then generated files
+  (schema, migrations, lockfiles). A lower class gets only what the higher
+  classes left. One file diff bigger than the cap is cut at a hunk boundary and
+  marked truncated.
+- When files would be cut and both source and tests changed, the packet splits
+  in two: packet 1 is the source diff (and generated files if they fit), packet
+  2 is the spec and test diff, each under the cap. Argon runs on each, and
+  `voter-argon.md` holds both reports under `## Packet 1 of 2` and
+  `## Packet 2 of 2`. Findings are not de-duplicated. A packet that fails beside
+  one that worked is a `note:` line in `errors.md`, and its section says
+  `NOT REVIEWED`. Both failing skips the leg like any failed Argon. A split
+  that cuts nothing writes no `.partial` and the summary says so.
+- A packet that still cuts files names them in a `## Packet coverage` section
+  inside the packet, and the same list goes to `voter-argon.partial`. The first
+  line of that file is a `WARNING: argon saw a PARTIAL review packet` line with
+  the cap setting and the 190 KB limit. It also goes to `errors.md` as `note:`
+  lines (a partial packet does not fail the ballot), to the top of
+  `voter-argon.md`, and to the phase-1 summary. Argon is told it did not see the
+  cut files.
+
+Design and mixed Argon packets are not changed by this.
+
 ## Already raised
 
 Before consolidation, read what the author already answered. Do not put any of
