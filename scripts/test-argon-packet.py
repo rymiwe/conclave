@@ -566,13 +566,106 @@ def test_cut_path_cannot_forge_coverage(work: Path):
     check(argon_packet.short('a\\b"c\rd') == 'a\\\\b\\"c\\rd', "backslash, quote and CR are escaped")
 
 
+def long_path_files(n: int = 40, payload: int = 1500):
+    """gate-A4: coverage lines of ~160 bytes, so the full cut list alone is over the diff budget."""
+    files = []
+    for i in range(n):
+        path = "app/models/" + "x" * 140 + f"/f{i:02d}.rb"
+        head = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n".encode()
+        body = head + b"+x\n" * 10
+        body = body[: payload - 1] + b"\n" if len(body) >= payload else body + b"y" * (payload - len(body) - 1) + b"\n"
+        files.append((path, body))
+    return files
+
+
+def test_count_line_leaves_room_for_a_file(work: Path):
+    """A file that fits beside the one-line count is shown, and the diff fence is never empty."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import argon_packet
+    files = long_path_files()
+    diff = b"".join(b for _, b in files)
+    cap = 10_000
+    res = argon_packet.plan(b"B" * 5958 + b"\n", diff, cap, work / "plan")
+    text = read(work / "plan" / "packet-1.md")
+    shown = [f["path"] for p in res["packets"] for f in p["files"]]
+    check(res["packets"][0]["bytes"] <= cap and (work / "plan" / "packet-1.md").stat().st_size <= cap,
+          f"gate-A4 fixture: the packet is at or under the cap ({res['packets'][0]['bytes']})")
+    check(files[0][0] in shown and f"+++ b/{files[0][0]}" in text,
+          f"the first file fits beside the count line and is shown ({len(shown)} shown)")
+    check(files[0][0] not in [c["path"] for c in res["cut"]], "a shown file is not listed as cut")
+    check("```diff\n```" not in text, "the packet has no empty diff fence")
+    check(re.search(r"^- and \d+ more files, \d+ bytes$", text, re.M) is not None
+          and len(shown) + len(re.findall(r"^- \S", text, re.M)) - 1
+          + int(re.search(r"^- and (\d+) more files", text, re.M).group(1)) == len(files),
+          "every file is shown, named, or counted")
+
+
+def test_no_file_fits_fails(work: Path):
+    """Nothing fits under the cap: the plan fails loud instead of sending an empty fence."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import argon_packet
+    files = long_path_files(payload=6000)
+    try:
+        argon_packet.plan(b"B" * 5958 + b"\n", b"".join(b for _, b in files), 10_000, work / "plan")
+        raised = ""
+    except argon_packet.PacketOverCap as exc:
+        raised = str(exc)
+    check("no packet fits" in raised and not list((work / "plan").glob("packet-*.md")),
+          f"no file fits: plan fails loud and writes no packet ({raised!r})")
+
+
+def test_cut_then_skip_leaves_no_partial(work: Path):
+    """A cut packet whose Argon run skips must not claim Argon reviewed a partial packet."""
+    cases = (
+        ("split, every packet fails", synthetic(1_000_000, with_generated=True), "true"),
+        ("one cut packet fails", {**{f"app/lib/mod_{i:02d}.rb": 20_000 for i in range(6)},
+                                  "Gemfile.lock": 60_000}, '[ "$CALLS" = 1 ]'),
+    )
+    for i, (name, files, cond) in enumerate(cases):
+        sub = work / f"c{i}"
+        sub.mkdir()
+        repo = make_repo(sub, files)
+        ballot = sub / "ballot"
+        ballot.mkdir()
+        (ballot / "voter-argon.brief.md").write_text("brief\n", encoding="utf-8")
+        run_bash(STUB.replace('[ "${FAIL_PACKET:-0}" = "$CALLS" ]', cond) + f"""
+DIR={ballot}; ID=pkt; REPO={repo}; ERRORS_FILE={ballot}/errors.md; : >"$ERRORS_FILE"; DRY_RUN=0; KIND=review
+review_run_argon {repo}
+""", {"TMPDIR": str(sub)})
+        errors = read(ballot / "errors.md")
+        check((ballot / "voter-argon.skipped").is_file() and "files_cut=0" not in read(ballot / "voter-argon.packet.txt"),
+              f"{name}: fixture cuts files and skips the leg")
+        check(not (ballot / "voter-argon.partial").exists() and "PARTIAL" not in errors
+              and "does not cover what was cut" not in errors,
+              f"{name}: no .partial and no partial-review note ({errors.strip()[:80]!r})")
+        summary = run_bash(f"""
+DIR={ballot}
+ID=pkt
+review_count_reports() {{ REVIEW_REPORTS_PRESENT=0; REVIEW_REPORTS_EXPECTED=1; REVIEW_REPORTS_MISSING=""; }}
+review_print_result 2>&1
+""").stdout
+        check("PARTIAL" not in summary, f"{name}: the phase-1 summary does not say Argon reviewed a partial packet")
+
+
+def test_max_bytes_not_positive_int(work: Path):
+    """Any value that is not an integer >= 1 uses the default."""
+    got = {}
+    for value in ("00", "000", "0", "-5", "abc", "", " ", "1.5", "+3"):
+        got[value] = run_bash("argon_max_bytes", {"CONCLAVE_ARGON_MAX_BYTES": value}).stdout.strip()
+    check(all(v == "150000" for v in got.values()), f"non-positive or non-integer caps use 150000 ({got})")
+    got = {v: run_bash("argon_max_bytes", {"CONCLAVE_ARGON_MAX_BYTES": v}).stdout.strip()
+           for v in ("1", "40000", "040000")}
+    check(got == {"1": "1", "40000": "40000", "040000": "40000"}, f"integer caps >= 1 are kept, in decimal ({got})")
+
+
 TESTS = [test_small, test_split_clean, test_split_with_generated, test_large, test_priority,
          test_oversize_file, test_setting, test_second_packet_fails, test_both_fail,
          test_pr_context, test_brief_floor, test_quoted_paths, test_stale_partial_cleared,
          test_graphql_schema_is_source, test_test_prefix_only_for_runner_files, test_b_slash_in_dir_name,
          test_cut_path_cannot_forge_coverage, test_stale_skip_split, test_stale_skip_cut,
          test_stale_skip_this_run_fails, test_diff_config_pinned, test_packet_never_over_cap,
-         test_packet_cannot_fit_fails]
+         test_packet_cannot_fit_fails, test_count_line_leaves_room_for_a_file, test_no_file_fits_fails,
+         test_cut_then_skip_leaves_no_partial, test_max_bytes_not_positive_int]
 
 
 def main():

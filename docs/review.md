@@ -593,12 +593,16 @@ and the number of files cut.
   the cap setting and the 190 KB limit. It also goes to `errors.md` as `note:`
   lines (a partial packet does not fail the ballot), to the top of
   `voter-argon.md`, and to the phase-1 summary. Argon is told it did not see the
-  cut files.
-- No packet goes out over the cap. When every file is already cut, the
-  coverage list is shortened, ending in an `and N more files` count line. If
-  the brief, the packet label, and that count still do not fit, the leg fails
-  with `argon: cannot write packet prompt: argon packet is N bytes, over the
-  cap ...` in `voter-argon.fail`, and no packet is sent.
+  cut files. `.partial` and those `note:` lines are written only after a packet
+  returns a report; when every packet is skipped, the leg leaves no `.partial`.
+- No packet goes out over the cap. The coverage list is measured before the
+  files are placed, at every list length down to the `and N more files` count
+  line, and the packet that shows the most of the diff is sent, so a file that
+  fits beside a shorter list is not cut. If the brief, the packet label, and
+  that count still do not fit, or no file of the diff fits beside them, the leg
+  fails with `argon: cannot write packet prompt: ... no packet fits` in
+  `voter-argon.fail`, and no packet is sent. A diff with files is never sent
+  as an empty diff fence.
 - `voter-argon.skipped` from an earlier run is removed with the other Argon
   files at the start of the review and of the leg, and again before each
   packet. A packet counts as failed only when its own `run_argon` wrote it.

@@ -2246,19 +2246,24 @@ review_run_grok_native() {
 }
 
 review_argon_note_packet() {
-  # $1 is plan.json. Logs the packet bytes. A cut writes voter-argon.partial and
-  # a loud warning to errors.md, and the phase-1 summary prints the same text.
+  # $1 is plan.json. Logs the packet bytes when the packet is planned.
   local plan="$1" line
   line="$(jq -r '"argon packet: mode=\(.mode) full_bytes=\(.full_bytes) max_bytes=\(.max_bytes) packets=\(.packets | length) packet_bytes=\([.packets[].bytes] | join(",")) files_cut=\(.cut | length)"' "$plan")"
   printf '%s\n' "$line" >"$DIR/voter-argon.packet.txt"
   printf '%s\n' "$line" >&2
-  if [ "$(jq -r '.warning' "$plan")" != "" ]; then
-    jq -r '.warning' "$plan" >"$DIR/voter-argon.partial"
-    # Note lines are not failures: Argon still voted, on less of the change.
-    while IFS= read -r line || [ -n "$line" ]; do
-      log_err "note: $line"
-    done <"$DIR/voter-argon.partial"
-  fi
+}
+
+review_argon_note_partial() {
+  # $1 is plan.json. Call only once a packet returned a report. A cut writes
+  # voter-argon.partial and a loud warning to errors.md, and the phase-1 summary
+  # prints the same text.
+  local plan="$1" line
+  [ "$(jq -r '.warning' "$plan")" != "" ] || return 0
+  jq -r '.warning' "$plan" >"$DIR/voter-argon.partial"
+  # Note lines are not failures: Argon voted, on less of the change.
+  while IFS= read -r line || [ -n "$line" ]; do
+    log_err "note: $line"
+  done <"$DIR/voter-argon.partial"
 }
 
 review_run_argon() {
@@ -2338,16 +2343,22 @@ review_run_argon() {
     done
   fi
   if [ "$n" -eq 1 ]; then
-    if [ "$(jq -r '.mode' "$plan")" != whole ] && [ -s "$DIR/voter-argon.md" ] \
-      && [ ! -s "$DIR/voter-argon.skipped" ]; then
-      cp "$DIR/voter-argon.md" "$stage/report-1.md"
-      python3 "$ROOT/scripts/argon_packet.py" finalize --plan "$plan" --out "$DIR/voter-argon.md" \
-        --report "1=$stage/report-1.md"
+    if [ -s "$DIR/voter-argon.md" ] && [ ! -s "$DIR/voter-argon.skipped" ]; then
+      review_argon_note_partial "$plan"
+      if [ "$(jq -r '.mode' "$plan")" != whole ]; then
+        cp "$DIR/voter-argon.md" "$stage/report-1.md"
+        python3 "$ROOT/scripts/argon_packet.py" finalize --plan "$plan" --out "$DIR/voter-argon.md" \
+          --report "1=$stage/report-1.md"
+      fi
+    else
+      rm -f "$DIR/voter-argon.partial"
     fi
   elif [ "$ok" -eq 0 ]; then
+    rm -f "$DIR/voter-argon.partial"
     argon_write_skipped "argon: every packet failed: $(jq -r '[.packets[].n] | join(",")' "$plan")"
   else
     rm -f "$DIR/voter-argon.skipped"
+    review_argon_note_partial "$plan"
     python3 "$ROOT/scripts/argon_packet.py" finalize --plan "$plan" --out "$DIR/voter-argon.md" "${args[@]}"
     [ -n "$model" ] && printf '%s\n' "$model" >"$DIR/voter-argon.model.txt"
   fi

@@ -248,37 +248,56 @@ def assemble(brief: bytes, secs: list[Section], note: bytes) -> bytes:
     return out
 
 
+def fit(brief, groups, max_bytes, other, label, cap):
+    """One packet with the coverage list capped at cap names. The note is measured
+    before the fill: the room shrinks by the note until the two fit together, or no
+    room is left. The sections keep this attempt's inclusion state."""
+    secs = [s for g in groups for s in g]
+    budget = max_bytes - len(brief) - FENCE_OVERHEAD
+    reserve = 0
+    while True:
+        for sec in secs:
+            sec.included, sec.truncated, sec.shown = False, False, b""
+        room = budget - reserve
+        for group in groups:
+            room = fill(group, room)
+        cut = sorted((s for s in secs if not s.included or s.truncated), key=lambda s: s.index)
+        note = notice(max_bytes, cut, other, label, cap) if (cut or other or label) else b""
+        data = assemble(brief, secs, note)
+        # Over the cap means the note is longer than the room held back for it.
+        if len(data) <= max_bytes or reserve > budget:
+            return data, cut
+        reserve = len(note)
+
+
 def build_packet(brief, groups, max_bytes, other, label):
     """Fill the groups in order into one packet that fits. Groups are lists of sections.
 
-    Raises PacketOverCap when no packet fits, even with every file cut and the
-    coverage list shortened to its count line.
+    Every coverage-list length is tried, and the packet that shows the most of the
+    diff wins; ties keep the longer list. Raises PacketOverCap when no packet fits,
+    or when the diff has files and none of them fits beside the coverage list.
     """
-    reserve = 0
-    for _ in range(6):
-        for sec in (s for g in groups for s in g):
-            sec.included, sec.truncated, sec.shown = False, False, b""
-        room = max_bytes - len(brief) - FENCE_OVERHEAD - reserve
-        for group in groups:
-            room = fill(group, room)
-        cut = [s for g in groups for s in g if not s.included or s.truncated]
-        cut.sort(key=lambda s: s.index)
-        note = notice(max_bytes, cut, other, label) if (cut or other or label) else b""
-        data = assemble(brief, [s for g in groups for s in g], note)
-        over = len(data) - max_bytes
-        if over <= 0:
-            return data, cut
-        if max_bytes - len(brief) - FENCE_OVERHEAD <= 0:
-            break
-        reserve += over + 64
-    for cap in range(min(len(cut), LIST_CAP) - 1, -1, -1):
-        data = assemble(brief, [s for g in groups for s in g], notice(max_bytes, cut, other, label, cap))
-        if len(data) <= max_bytes:
-            return data, cut
-    raise PacketOverCap(
-        f"argon packet is {len(data)} bytes, over the cap of {max_bytes} "
-        f"(brief {len(brief)} bytes); no packet fits"
-    )
+    secs = [s for g in groups for s in g]
+    best = None
+    for cap in range(LIST_CAP, -1, -1):
+        data, _ = fit(brief, groups, max_bytes, other, label, cap)
+        if len(data) > max_bytes:
+            continue
+        shown = [s for s in secs if s.included]
+        score = (len(shown), sum(len(s.shown) for s in shown))
+        if best is None or score > best[0]:
+            best = (score, cap)
+    if best is None:
+        raise PacketOverCap(
+            f"argon packet is {len(data)} bytes, over the cap of {max_bytes} "
+            f"(brief {len(brief)} bytes); no packet fits"
+        )
+    if secs and not best[0][0]:
+        raise PacketOverCap(
+            f"argon packet would show no file of the diff under the cap of {max_bytes} "
+            f"(brief {len(brief)} bytes); no packet fits"
+        )
+    return fit(brief, groups, max_bytes, other, label, best[1])
 
 
 def entry(n, name, data, secs, cut, label):
