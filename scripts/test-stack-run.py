@@ -23,6 +23,10 @@ import time
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / 'scripts'
+# Per-PR checks. The whole-stack ballot now runs first, even with
+# --no-reconcile, and it fetches the top PR from a real git repo. These
+# fixtures have none, so they turn it off; test_whole_stack covers it.
+PER_PR = ('--no-reconcile', '--no-whole-stack')
 
 
 def check(cond: bool, label: str) -> None:
@@ -97,6 +101,11 @@ else:
     (d/'blind').mkdir(exist_ok=True)
     (d/'blind/leg-A.md').write_text('a blinded report')
     (d/'errors.md').write_text(os.environ.get('PHASE1_ERRORS', '(none)')+'\\n')
+    if os.environ.get('PHASE1_HOLD'):
+        import time
+        with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['start', args[0]])+'\\n')
+        time.sleep(float(os.environ['PHASE1_HOLD']))
+        with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['finish', args[0]])+'\\n')
     if os.environ.get('PHASE1_SLEEP'):
         import time
         pathlib.Path(os.environ['CHILD_PID']).write_text(str(os.getpid()))
@@ -183,7 +192,7 @@ class Fixture:
         self.repo.mkdir(parents=True)
         scripts = self.root / 'scripts'
         scripts.mkdir(parents=True)
-        for name in ('stack-run.py', 'review-stack.py', 'conclave_env.py', 'review-kind.sh'):
+        for name in ('stack-run.py', 'review-stack.py', 'conclave_env.py', 'review-kind.sh', 'lineup.py'):
             shutil.copyfile(SCRIPTS / name, scripts / name)
         self.bin = self.base / 'bin'
         write_exe(self.bin / 'gh', GH)
@@ -203,8 +212,9 @@ class Fixture:
                         COUNCIL_CURSOR_AGENT=str(self.bin / 'cursor-agent'),
                         COUNCIL_SEAT_USAGE=str(self.bin / 'seat-usage'),
                         COUNCIL_SEAT_JSON=str(self.seat), TMPDIR=str(self.temp))
-        self.env.pop('CONCLAVE_CHAIR', None)
-        self.env.pop('COUNCIL_CHAIR', None)
+        for name in ('CHAIR', 'WAVE_CAP', 'WAVE_PRECHECK', 'WAVE_POLL'):
+            self.env.pop(f'CONCLAVE_{name}', None)
+            self.env.pop(f'COUNCIL_{name}', None)
 
     def ballot(self, number: int) -> Path:
         p = self.root / 'tmp/council' / f'p-{number}'
@@ -268,11 +278,17 @@ def test_runner(tmp: Path, mod) -> None:
     ballot, snapshot = f.seed()
     got = f.invoke('--dry-run')
     check(got.returncode == 0, f'dry run exits zero ({got.stderr})')
-    check([line.split(':')[0] for line in got.stdout.splitlines()[:3]] == ['p-1', 'p-2', 'p-3'], 'dry run bottom-up ballot ids')
+    # The wave plan and the whole-stack line now come first; the per-PR lines keep their order.
+    ids = [line.split(':')[0] for line in got.stdout.splitlines()]
+    check([i for i in ids if i in ('p-1', 'p-2', 'p-3')] == ['p-1', 'p-2', 'p-3'], 'dry run bottom-up ballot ids')
+    check(ids.index('p-stack-stack') < ids.index('p-1'), 'dry run lists the whole-stack ballot before per-PR ballots')
+    check('wave cap: 2 (default)' in got.stdout and 'wave 1: p-stack-stack' in got.stdout
+          and 'wave 2: p-1, p-2' in got.stdout and 'wave 3: p-3' in got.stdout,
+          f'dry run shows the cap and wave plan ({got.stdout})')
     check('p-1: done; steps: none' in got.stdout, 'dry run recognizes done')
     check(not f.calls(), 'dry run launches no chair or council')
     check({p.name for p in (f.root / 'tmp/council/stack').iterdir()} == {'stack.json','stack.md','dry-run.md'}, 'dry run writes only stack and preview artifacts')
-    got = f.invoke('--no-reconcile')
+    got = f.invoke(*PER_PR)
     check(got.returncode == 0, f'full run exits zero ({got.stderr})')
     rows = f.record()['prs']
     check([r['outcome'] for r in rows] == ['reused','ok','ok'], 'full run outcomes')
@@ -299,7 +315,7 @@ def test_runner(tmp: Path, mod) -> None:
     check(settled and all('never a mechanism this diff introduces' in p for p in settled),
           'round A brief bars settling the mechanism under review')
     count = len(f.calls())
-    check(f.invoke('--no-reconcile').returncode == 0 and len(f.calls()) == count, 'second run reuses every completed ballot')
+    check(f.invoke(*PER_PR).returncode == 0 and len(f.calls()) == count, 'second run reuses every completed ballot')
 
     for pct, expected_flags in ((96,['--claude-model','opus']), (70,['--fable-overflow','cursor']), (None,['--fable-overflow','cursor'])):
         f = Fixture(tmp, f'seat-{pct}')
@@ -307,15 +323,22 @@ def test_runner(tmp: Path, mod) -> None:
             f.seat.unlink()
         else:
             f.seat.write_text(json.dumps({'fable':pct, 'ts':time.time()}))
-        got = f.invoke('--no-reconcile', '--prs', '1')
+        got = f.invoke(*PER_PR, '--prs', '1')
         check(got.returncode == 0 and f.record()['prs'][0]['claude_flags'] == expected_flags, f'seat {pct} chooses {expected_flags} ({got.stderr})')
     f = Fixture(tmp, 'sticky')
     f.env['OVERFLOW_PR'] = '-1'
-    check(f.invoke('--no-reconcile').returncode == 0, 'overflow fixture completes')
+    # Overflow is sticky between waves. Cap 1 puts each ballot in its own wave.
+    check(f.invoke(*PER_PR, '--wave-cap', '1').returncode == 0, 'overflow fixture completes')
     check([r['claude_flags'] for r in f.record()['prs']] == [['--fable-overflow','cursor'], ['--claude-model','cursor-fable'], ['--claude-model','cursor-fable']], 'overflow sticks for every later ballot')
+    f = Fixture(tmp, 'sticky-cap-2')
+    f.env['OVERFLOW_PR'] = '-1'
+    # p-2 runs beside p-1, so its flags depend on timing; only p-1 and p-3 are fixed.
+    flags = [r['claude_flags'] for r in f.record()['prs']] if f.invoke(*PER_PR).returncode == 0 else []
+    check(len(flags) == 3 and flags[0] == ['--fable-overflow','cursor'] and flags[2] == ['--claude-model','cursor-fable'],
+          f'cap 2: overflow in wave 1 sticks for wave 2 ({flags})')
     f = Fixture(tmp, 'posting')
     f.env['POST_PR'] = '-2'
-    check(f.invoke('--no-reconcile').returncode == 0 and bool(f.record()['prs'][1]['POSTED?']), 'gh pr comment tool call marks POSTED?')
+    check(f.invoke(*PER_PR).returncode == 0 and bool(f.record()['prs'][1]['POSTED?']), 'gh pr comment tool call marks POSTED?')
     hits = mod.posted_hits([{'type':'tool_use', 'name':'mcp__linear__save_issue'},
                            {'type':'tool_use','name':'mcp__notion__update_page'},
                            {'type':'tool_call','command':'gh api repos/x/comments --method POST'},
@@ -323,11 +346,11 @@ def test_runner(tmp: Path, mod) -> None:
     check(len(hits) == 3, 'detects MCP writes and API posts without flagging prose')
     f = Fixture(tmp, 'no-result')
     f.env['NO_RESULT_PR'] = '-2'
-    check(f.invoke('--no-reconcile').returncode == 1, 'missing result causes final exit 1')
+    check(f.invoke(*PER_PR).returncode == 1, 'missing result causes final exit 1')
     check(f.record()['prs'][1]['outcome'].startswith('failed:') and f.record()['prs'][2]['outcome'] == 'ok', 'ballot failure does not stop next ballot')
     f = Fixture(tmp, 'timeout')
     f.env['TIMEOUT_PR'] = '-1'
-    check(f.invoke('--no-reconcile', '--chair-timeout', '1').returncode == 1, 'chair timeout exits 1')
+    check(f.invoke(*PER_PR, '--chair-timeout', '1').returncode == 1, 'chair timeout exits 1')
     check('timeout' in f.record()['prs'][0]['outcome'] and f.record()['prs'][1]['outcome'] == 'ok', 'timeout recorded and next ballot runs')
     f = Fixture(tmp, 'resume')
     for n in (1,2,3):
@@ -342,14 +365,14 @@ def test_runner(tmp: Path, mod) -> None:
             (b / 'judgment.md').write_text('judgment')
             (b / 'findings.json').write_text('{"findings":[]}')
             (b / 'decide.md').write_text('TODO(chair)')
-    check(f.invoke('--no-reconcile', '--jobs', '2').returncode == 0, 'two-job resumed run completes')
+    check(f.invoke(*PER_PR, '--jobs', '2').returncode == 0, 'two-job resumed run completes')
     check([r['state'] for r in f.record()['prs']] == ['needs decide','needs findings','needs legs'], 'all partial resume states')
     calls = f.calls()
     check(len([c for c in calls if c[0] == 'cursor']) == 3, 'resumes skip chair A')
     check(not any(c[0] == 'council' and c[1] == ['p-1','--findings'] for c in calls), 'needs decide skips findings gate')
     f = Fixture(tmp, 'context')
-    check(f.invoke('--no-reconcile', context=False).returncode == 1 and not f.calls(), 'missing context and ticket fail before any ballot')
-    check(f.invoke('--no-reconcile', '--ticket','TEST-1', context=False).returncode == 0, 'ticket context chair runs before ballots')
+    check(f.invoke(*PER_PR, context=False).returncode == 1 and not f.calls(), 'missing context and ticket fail before any ballot')
+    check(f.invoke(*PER_PR, '--ticket','TEST-1', context=False).returncode == 0, 'ticket context chair runs before ballots')
     check('Read Linear ticket TEST-1' in f.calls()[0][1][-1], 'context prompt names ticket and read-only scope')
     for flags in (['--jobs','3'], ['--chair-model','auto'], ['--chair-model','a-composer-id']):
         check(f.invoke(*flags).returncode != 0, f'rejects {flags}')
@@ -421,7 +444,7 @@ def test_blocked_resume(tmp: Path, mod) -> None:
         (b / 'blind/leg-A.md').write_text('report')
         if errors is not None:
             (b / 'errors.md').write_text(errors)
-        got = f.invoke('--prs', '1', '--no-reconcile')
+        got = f.invoke('--prs', '1', *PER_PR)
         check(got.returncode == 1 and f.record()['prs'][0]['outcome'] == reason and not f.calls(),
               f'item 1 blocked errors case {i} runs nothing')
         preview = f.invoke('--prs', '1', '--dry-run', '--no-reconcile')
@@ -431,9 +454,9 @@ def test_blocked_resume(tmp: Path, mod) -> None:
         check(mod.state(b) == 'needs findings', 'item 1 clean errors allow findings')
     f = Fixture(tmp, 'failed-phase-resume')
     f.env.update(PHASE1_ERRORS='read-only baseline mismatch', PHASE1_EXIT='1')
-    check(f.invoke('--prs','1','--no-reconcile').returncode == 1, 'item 1 phase 1 fails after blinding')
+    check(f.invoke('--prs','1',*PER_PR).returncode == 1, 'item 1 phase 1 fails after blinding')
     count = len(f.calls())
-    check(f.invoke('--prs','1','--no-reconcile').returncode == 1 and len(f.calls()) == count
+    check(f.invoke('--prs','1',*PER_PR).returncode == 1 and len(f.calls()) == count
           and f.record()['prs'][0]['outcome'] == reason, 'item 1 rerun cannot turn failed phase 1 into ok')
 
 
@@ -452,7 +475,7 @@ def test_sticky_resume(tmp: Path, mod) -> None:
     f = Fixture(tmp, 'sticky-resume')
     # A later directory must affect the very first ballot, before it is visited.
     (f.ballot(3) / 'voter-claude.via').write_text('cursor\n')
-    check(f.invoke('--no-reconcile').returncode == 0 and
+    check(f.invoke(*PER_PR).returncode == 0 and
           all(row['claude_flags'] == ['--claude-model','cursor-fable'] for row in f.record()['prs']),
           'item 5 resume restores sticky Cursor before first ballot')
 
@@ -466,7 +489,7 @@ def test_seat_age(tmp: Path, mod) -> None:
     f.seat.write_text(json.dumps({'fable':96,'ts':time.time()-60}))
     check(mod.seat_percent(f.seat) == 96, 'item 6 fresh seat timestamp accepted')
     f.env['COUNCIL_SEAT_MAX_AGE'] = '1'
-    check(f.invoke('--prs','1','--no-reconcile').returncode == 0 and
+    check(f.invoke('--prs','1',*PER_PR).returncode == 0 and
           f.record()['prs'][0]['claude_flags'] == ['--fable-overflow','cursor'],
           'item 6 max age override sends stale high percent to unknown routing')
 
@@ -481,7 +504,7 @@ def test_posted_chairs(tmp: Path, mod) -> None:
     check(len(hits) == 2 and 'Context and reconcile chairs POSTED?: ' in md
           and all(hit in md for hit in hits), 'item 7 context and reconcile POSTED hits rendered under table')
     f = Fixture(tmp, 'posted-none')
-    f.invoke('--no-reconcile','--prs','1')
+    f.invoke(*PER_PR,'--prs','1')
     check('Context and reconcile chairs POSTED?: none' in
           (f.root / 'tmp/council/stack/run.md').read_text(), 'item 7 absent chair hits rendered as none')
 
@@ -489,19 +512,19 @@ def test_posted_chairs(tmp: Path, mod) -> None:
 def test_posted_resume(tmp: Path, mod) -> None:
     f = Fixture(tmp, 'posted-resume')
     f.env.update(POST_PR='-1', POST_CONTEXT='1')
-    check(f.invoke('--ticket','TEST-1','--no-reconcile',context=False).returncode == 0, 'item 8 first posting run completes')
+    check(f.invoke('--ticket','TEST-1',*PER_PR,context=False).returncode == 0, 'item 8 first posting run completes')
     before = f.record()
     f.env.pop('POST_CONTEXT')
     f.env.pop('POST_PR')
-    check(f.invoke('--no-reconcile').returncode == 0 and f.record()['prs'][0]['POSTED?'] == before['prs'][0]['POSTED?']
+    check(f.invoke(*PER_PR).returncode == 0 and f.record()['prs'][0]['POSTED?'] == before['prs'][0]['POSTED?']
           and f.record().get('POSTED?') == before['POSTED?'], 'item 8 reused ballots and top-level hits survive resume')
     b = f.ballot(1)
     (b / 'decide.md').write_text('TODO(chair)')
     f.env['POST_PR'] = '-1'
-    check(f.invoke('--no-reconcile').returncode == 0 and len(f.record()['prs'][0]['POSTED?']) == 1,
+    check(f.invoke(*PER_PR).returncode == 0 and len(f.record()['prs'][0]['POSTED?']) == 1,
           'item 8 repeated hit union keeps order without duplicates')
     previous = f.record()
-    check(f.invoke('--prs','1,3','--no-reconcile').returncode == 1 and
+    check(f.invoke('--prs','1,3',*PER_PR).returncode == 1 and
           f.record()['prs'] == previous['prs'] and f.record()['POSTED?'] == previous['POSTED?'],
           'item 8 invalid stack on resume preserves earlier POSTED history')
 
@@ -517,14 +540,14 @@ def test_receipts(tmp: Path, mod) -> None:
     check(mod.state(b) == 'needs legs', 'item 9 matching brief receipt enables legs')
     (b / 'brief.md').write_text(old + 'changed\n')
     check(mod.state(b) == 'new', 'item 9 modified brief invalidates receipt')
-    check(f.invoke('--prs','1','--no-reconcile').returncode == 0 and
+    check(f.invoke('--prs','1',*PER_PR).returncode == 0 and
           (b / 'brief.md.prev').read_text() == old + 'changed\n' and
           (b / '.stack-brief.sha256').read_text().strip() == hashlib.sha256((b / 'brief.md').read_bytes()).hexdigest(),
           'item 9 chair A replaces leftover brief and writes matching receipt')
     (b / 'comments.md').unlink()
     check(mod.state(b) == 'needs decide', 'item 9 judgment with filled decide but no comments needs decide')
     count = len(f.calls())
-    check(f.invoke('--prs','1','--no-reconcile').returncode == 0 and
+    check(f.invoke('--prs','1',*PER_PR).returncode == 0 and
           len(f.calls()) == count + 1 and 'phase 4 only' in f.calls()[-1][1][-1],
           'item 9 missing comments resumes chair B phase 4')
     (b / 'comments.md').unlink()
@@ -539,7 +562,7 @@ def test_receipts(tmp: Path, mod) -> None:
     receipt(b)
     (b / 'brief.md').write_text('leftover incomplete replacement')
     f.env['NO_RESULT_PR'] = '-1'
-    f.invoke('--prs','1','--no-reconcile')
+    f.invoke('--prs','1',*PER_PR)
     check(not (f.ballot(1) / '.stack-brief.sha256').exists() and mod.state(f.ballot(1)) == 'new',
           'item 9 failed chair leaves no receipt despite brief output')
 
@@ -547,7 +570,7 @@ def test_receipts(tmp: Path, mod) -> None:
 def test_streams(tmp: Path, mod) -> None:
     f = Fixture(tmp, 'unicode-stream')
     f.env['CHAIR_RESULT'] = 'Complete\u2028still one JSON line\u0085end'
-    got = f.invoke('--prs','1','--no-reconcile')
+    got = f.invoke('--prs','1',*PER_PR)
     check(got.returncode == 0, f'item 11 chair accepts literal U+2028 and U+0085 in JSON stream ({got.stderr})')
 
 
@@ -598,18 +621,19 @@ def test_max_cap(tmp: Path, mod) -> None:
     for name, extra in cases:
         f = Fixture(tmp, 'max-cap-' + name)
         f.env.update(OPUS_CAP_PR='-1', **extra)
-        check(f.invoke().returncode == 1 and [r['outcome'] for r in f.record()['prs'][1:]] == [reason,reason]
+        # Cap 1 so p-2 is not already running beside p-1; no git repo, so no whole-stack ballot.
+        check(f.invoke('--no-whole-stack', '--wave-cap', '1').returncode == 1 and [r['outcome'] for r in f.record()['prs'][1:]] == [reason,reason]
               and f.record()['reconcile'] == reason and len([c for c in f.calls() if c[0] == 'cursor']) == 1,
               f'item 13 {name} cap skips unstarted ballots and reconcile')
         f.env.pop('OPUS_CAP_PR')
-        check(f.invoke('--no-reconcile').returncode == 0, f'item 13 {name} reset resumes normally')
+        check(f.invoke(*PER_PR).returncode == 0, f'item 13 {name} reset resumes normally')
     for name, extra in [('rate-limit', {'OPUS_ERR':'retrying after rate limit backoff'}),
                          ('success-result', {'OPUS_JSON': json.dumps({
                              'is_error': False, 'result': 'usage limit',
                              'modelUsage': {'claude-opus-5': {'inputTokens': 1}}})})]:
         f = Fixture(tmp, 'max-not-cap-' + name)
         f.env.update(OPUS_CAP_PR='-1', **extra)
-        check(f.invoke('--no-reconcile').returncode == 1 and f.record()['prs'][1]['outcome'] == 'ok',
+        check(f.invoke(*PER_PR).returncode == 1 and f.record()['prs'][1]['outcome'] == 'ok',
               f'item 13 {name} does not cap the Claude subscription')
 
 
@@ -638,7 +662,9 @@ def test_signals(tmp: Path, mod) -> None:
         f.env.update(CHILD_PID=str(pidfile), **({'PHASE1_SLEEP':'1'} if phase == 'phase1' else {'RECONCILE_SLEEP':'1'}))
         if phase == 'kill':
             f.env['IGNORE_TERM'] = '1'
-        args = f.args('--no-reconcile') if phase == 'phase1' else f.args('--reconcile-only', context=False)
+        # One ballot per wave, as before the default cap became 2: one phase 1 child writes CHILD_PID.
+        args = (f.args(*PER_PR, '--wave-cap', '1') if phase == 'phase1'
+                else f.args('--reconcile-only', context=False))
         proc = subprocess.Popen(args, env=f.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         child = None
         try:
@@ -1139,13 +1165,48 @@ def test_whole_stack(tmp: Path, mod) -> None:
     off = f.invoke('--dry-run', '--no-whole-stack')
     check(off.returncode == 0 and name not in off.stdout and 'After ballots: reconcile stack top' in off.stdout,
           'fix 5 --no-whole-stack hides the whole-stack ballot')
-    skipped = f.invoke('--dry-run', '--no-reconcile')
-    check(name not in skipped.stdout, 'fix 5 --no-reconcile dry run has no whole-stack ballot')
+    # Reconcile no longer gates the whole-stack ballot, so --no-reconcile keeps it.
+    kept = f.invoke('--dry-run', '--no-reconcile')
+    check(f'{name}: new;' in kept.stdout and 'After ballots' not in kept.stdout,
+          'waves --no-reconcile dry run still shows the whole-stack ballot')
+    only = f.invoke('--dry-run', '--reconcile-only')
+    check(name not in only.stdout and 'wave' not in only.stdout, 'waves --reconcile-only dry run has no ballot and no waves')
 
     got = f.invoke()
     check(got.returncode == 0, f'fix 5 full run includes the whole-stack ballot ({got.stderr})')
     check(f.record()['reconcile'] == 'ok' and f.record()['whole_stack'] == 'ok',
-          f"fix 5 reconcile then whole stack ({f.record().get('whole_stack')})")
+          f"fix 5 whole stack and reconcile both ok ({f.record().get('whole_stack')})")
+    calls = f.calls()
+
+    def at(pred) -> int:
+        return next((i for i, c in enumerate(calls) if pred(c)), -1)
+
+    first_pr_a = at(lambda c: c[0] == 'cursor' and 'Round A.' in c[1][-1] and 'Ballot id:' not in c[1][-1])
+    stack_phase1 = at(lambda c: c[0] == 'council' and c[1][0] == name and '--dry-run' in c[1])
+    stack_b = at(lambda c: c[0] == 'cursor' and f'/{name}. Follow' in c[1][-1])
+    check(0 <= stack_phase1 < stack_b < first_pr_a,
+          f'waves (a) whole-stack phase 1 and chair B run before the first per-PR chair A ({stack_phase1}, {stack_b}, {first_pr_a})')
+    reconcile_at = at(lambda c: c[0] == 'cursor' and 'Reconcile every finding' in c[1][-1])
+    last_pr = max(i for i, c in enumerate(calls) if c[0] == 'council' and c[1][0] in ('p-1', 'p-2', 'p-3'))
+    check(reconcile_at > last_pr, 'waves reconcile runs after every per-PR ballot')
+    judgment = str(f.root / 'tmp/council' / name / 'judgment.md')
+    pr_briefs = [c[1][-1] for c in calls if c[0] == 'cursor' and 'Round A.' in c[1][-1] and 'Ballot id:' not in c[1][-1]]
+    stack_brief = [c[1][-1] for c in calls if c[0] == 'cursor' and f'Ballot id: {name}' in c[1][-1]]
+    note = mod.stack_findings_prompt(f.root / 'tmp/council' / name)
+    check(len(pr_briefs) == 3 and all(note in p and judgment in p for p in pr_briefs),
+          'waves (b) every per-PR round A names the whole-stack judgment.md')
+    check(all('## Already reported at stack level (do not re-report)' in p and 'distinct defect' in p for p in pr_briefs),
+          'waves (b) per-PR round A asks for the already-reported section')
+    check(len(stack_brief) == 1 and 'Already reported at stack level' not in stack_brief[0] and judgment not in stack_brief[0],
+          'waves (b) the whole-stack round A gets no stack-findings text')
+    check(all(not mod.FORBIDDEN.search(prompt_outside_repo(p, str(ROOT), str(f.repo))) for p in pr_briefs),
+          'waves (b) per-PR prompts with stack findings carry no model or vendor words')
+    waves = f.record()['waves']
+    check([w['ballots'] for w in waves] == [[name], ['p-1', 'p-2'], ['p-3']]
+          and all(w['precheck'] == 'inconclusive' for w in waves),
+          f'waves run.json records each wave; the empty seat-usage stub is inconclusive ({waves})')
+    check('inconclusive' in got.stderr and 'launching anyway' in got.stderr,
+          'waves inconclusive pre-check warns on stderr and proceeds')
     rest = ['--base', 'origin/main', '--head', oid, '--repo', str(f.repo), '--fable-overflow', 'cursor']
     stack_calls = [c for c in f.calls() if c[0] == 'council' and c[1][0] == name]
     check([c[1] for c in stack_calls] == [[name, '--dry-run', *rest], [name, *rest], [name, '--findings']],
@@ -1153,7 +1214,9 @@ def test_whole_stack(tmp: Path, mod) -> None:
     check(all(c[2] == 'test-chair' for c in stack_calls), 'fix 5 whole-stack council.sh sees COUNCIL_CHAIR_MODEL')
     earlier = [c for c in f.calls() if c[0] == 'council' and c[1][0] != name]
     check(earlier and all(c[2] is None for c in earlier), 'fix 5 per-PR council.sh calls do not gain a chair model')
-    chairs = [c[1][-1] for c in f.calls() if c[0] == 'cursor' and name in c[1][-1]]
+    # Per-PR round A now names the whole-stack directory too; match the whole-stack prompts by their ballot line.
+    chairs = [c[1][-1] for c in f.calls() if c[0] == 'cursor'
+              and (f'Ballot id: {name}' in c[1][-1] or f'/{name}. Follow' in c[1][-1])]
     check(len(chairs) == 2, f'fix 5 whole-stack uses round A and round B ({len(chairs)} prompts)')
     brief, decide = chairs
     for phrase in ('problems that span PRs', 'a contract one PR sets and a later PR breaks',
@@ -1185,21 +1248,234 @@ def test_whole_stack(tmp: Path, mod) -> None:
           and not any(c[0] == 'council' and c[1][0].endswith('-stack') for c in f.calls()),
           'fix 5 --no-whole-stack still reconciles and launches no stack ballot')
 
+    # The whole-stack ballot now runs before reconcile, so a failed reconcile
+    # no longer keeps it from starting. It still fails the run.
     f = Fixture(tmp, 'whole-stack-reconcile-fail')
     f.reconcile_repo()
     f.env['RECONCILE_FAIL'] = '1'
-    check(f.invoke().returncode == 1 and f.record()['whole_stack'] == 'not started'
-          and not any(c[0] == 'cursor' and 'whole stack as one diff' in c[1][-1] for c in f.calls())
-          and not any(c[0] == 'council' and c[1][0].endswith('-stack') for c in f.calls()),
-          'fix 5 a failed reconcile does not start the whole-stack ballot')
+    check(f.invoke().returncode == 1 and f.record()['whole_stack'] == 'ok'
+          and f.record()['reconcile'].startswith('failed:')
+          and [r['outcome'] for r in f.record()['prs']] == ['ok', 'ok', 'ok'],
+          'waves a failed reconcile after a finished whole-stack ballot fails the run')
 
     f = Fixture(tmp, 'whole-stack-fail')
     f.reconcile_repo()
     f.env['NO_RESULT_PR'] = '-stack'
-    check(f.invoke().returncode == 1 and str(f.record()['whole_stack']).startswith('failed:')
-          and f.record()['reconcile'] == 'ok'
+    got = f.invoke()
+    rec = f.record()
+    started = [c for c in f.calls() if (c[0] == 'council' and c[1][0] in ('p-1', 'p-2', 'p-3'))
+               or (c[0] == 'cursor' and 'Ballot id:' not in c[1][-1])]
+    check(got.returncode == 1 and str(rec['whole_stack']).startswith('failed:') and not started
           and not any(c[0] == 'council' and c[1][0].endswith('-stack') for c in f.calls()),
-          f"fix 5 whole-stack chair failure fails the run ({f.record().get('whole_stack')})")
+          f"waves (e) whole-stack failure starts no per-PR ballot ({rec.get('whole_stack')}, {started})")
+    want = (f"failed: not started; whole-stack ballot failed ({rec['whole_stack'].removeprefix('failed: ')}); "
+            'rerun to resume, or pass --no-whole-stack to review per PR without it')
+    check([r['outcome'] for r in rec['prs']] == [want] * 3, f"waves (e) per-PR rows say why ({rec['prs'][0]['outcome']})")
+    check(rec['reconcile'] == 'failed: not started; whole-stack ballot failed' and 'reconcile skipped' in got.stderr,
+          f"waves (e) reconcile is skipped with a message ({rec['reconcile']})")
+
+
+SEAT_SEQ = '''\
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+if '--route' not in sys.argv:
+    sys.exit(0)
+with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['seat', sys.argv[1:]])+'\\n')
+seq = pathlib.Path(os.environ['SEAT_SEQ'])
+lines = seq.read_text().splitlines()
+print(lines[0] if lines else '')
+if len(lines) > 1:
+    seq.write_text('\\n'.join(lines[1:]) + '\\n')
+sys.exit(int(os.environ.get('SEAT_EXIT', '0')))
+'''
+SEAT_OK = json.dumps({'mode': 'auto', 'lineup': {'voters': [
+    {'family': 'fable', 'seat': 'cursor'}, {'family': 'astra', 'seat': 'chatgpt'}]}})
+SEAT_ASK = json.dumps({'mode': 'ask', 'reason': 'every pool capped',
+                       'skipped': [{'family': 'astra', 'code': 'capped'}, {'family': 'muse', 'code': 'capped'}]})
+
+
+def seat_route(f: Fixture, *answers: str) -> None:
+    """Replace the fixture's empty seat-usage stub with one that answers the route in order."""
+    write_exe(f.bin / 'seat-usage', SEAT_SEQ)
+    seq = f.base / 'seat-seq.txt'
+    seq.write_text('\n'.join(answers) + '\n')
+    f.env['SEAT_SEQ'] = str(seq)
+
+
+def most_at_once(calls: list) -> int:
+    running = peak = 0
+    for c in calls:
+        if c[0] == 'start':
+            running += 1
+            peak = max(peak, running)
+        elif c[0] == 'finish':
+            running -= 1
+    return peak
+
+
+def test_waves(tmp: Path, mod) -> None:
+    ns = lambda **kw: mod.argparse.Namespace(**{'wave_cap': None, 'jobs': None, **kw})
+    saved = {k: os.environ.pop(k) for k in list(os.environ) if k.endswith('_WAVE_CAP')}
+    try:
+        check(mod.wave_cap(ns()) == (2, 'default'), 'waves (c) cap defaults to 2')
+        os.environ['CONCLAVE_WAVE_CAP'] = '3'
+        check(mod.wave_cap(ns()) == (3, 'CONCLAVE_WAVE_CAP'), 'waves (c) env cap')
+        check(mod.wave_cap(ns(jobs=1)) == (1, '--jobs'), 'waves (c) --jobs beats env')
+        check(mod.wave_cap(ns(jobs=1, wave_cap=2)) == (2, '--wave-cap'), 'waves (c) --wave-cap beats --jobs')
+        del os.environ['CONCLAVE_WAVE_CAP']
+        os.environ['COUNCIL_WAVE_CAP'] = '1'
+        check(mod.wave_cap(ns()) == (1, 'CONCLAVE_WAVE_CAP'), 'waves (c) COUNCIL_WAVE_CAP alias')
+    finally:
+        for k in ('CONCLAVE_WAVE_CAP', 'COUNCIL_WAVE_CAP'):
+            os.environ.pop(k, None)
+        os.environ.update(saved)
+
+    verdicts = {
+        'ok': mod.precheck_verdict(SEAT_OK),
+        'ask': mod.precheck_verdict(SEAT_ASK),
+        'one': mod.precheck_verdict(json.dumps({'lineup': {'voters': [{'family': 'grok', 'seat': 'grok'}]},
+                                                'downgrade': {'reason': 'pace'}})),
+        'same': mod.precheck_verdict(json.dumps({'lineup': {'voters': [{'family': 'fable', 'seat': 'cursor'},
+                                                                       {'family': 'fable', 'seat': 'claude'}]}})),
+        'down': mod.precheck_verdict(json.dumps({'lineup': {'voters': [{'family': 'grok', 'seat': 'grok'},
+                                                                       {'family': 'astra', 'seat': 'chatgpt'}]},
+                                                 'downgrade': {'reason': 'pace'}})),
+        'garbage': mod.precheck_verdict('not json'),
+        'empty': mod.precheck_verdict(''),
+    }
+    check(verdicts['ok'][0] == 'ok' and verdicts['down'][0] == 'ok', f'waves (d) ok and downgrade with 2 voters pass ({verdicts})')
+    check(verdicts['ask'][0] == 'blocked' and 'every pool capped' in verdicts['ask'][1]
+          and 'astra:capped' in verdicts['ask'][1] and 'muse:capped' in verdicts['ask'][1],
+          f"waves (d) ask blocks and names the reason and skipped codes ({verdicts['ask']})")
+    check(verdicts['one'][0] == 'blocked' and verdicts['same'][0] == 'blocked',
+          f'waves (d) fewer than 2 distinct voters blocks ({verdicts["one"]}, {verdicts["same"]})')
+    check(verdicts['garbage'][0] == 'blocked' and verdicts['empty'][0] == 'inconclusive',
+          'waves (d) unreadable json blocks; empty output is inconclusive')
+
+    # (c) and (f): concurrency per cap, with no whole-stack ballot.
+    for label, extra, env, cap in (('default', (), {}, 2), ('cap-1', ('--wave-cap', '1'), {}, 1),
+                                   ('env-3', (), {'CONCLAVE_WAVE_CAP': '3'}, 3)):
+        f = Fixture(tmp, f'waves-{label}')
+        f.env.update(PHASE1_HOLD='0.6', **env)
+        got = f.invoke(*PER_PR, *extra)
+        calls = f.calls()
+        rec = f.record() if got.returncode == 0 else {}
+        plan = [[f'p-{n}' for n in range(i + 1, min(i + cap, 3) + 1)] for i in range(0, 3, cap)]
+        check(got.returncode == 0 and rec['wave_cap'] == cap and [w['ballots'] for w in rec['waves']] == plan,
+              f'waves (c) {label} plans waves of {cap} ({got.stderr.strip()} {rec.get("waves")})')
+        peak = most_at_once(calls)
+        check(peak <= cap and (cap == 3 or peak == cap), f'waves (c) {label} never runs more than {cap} at once ({peak})')
+        if label == 'default':
+            briefs = [c[1][-1] for c in calls if c[0] == 'cursor' and 'Round A.' in c[1][-1]]
+            check(len(briefs) == 3 and not any('Already reported at stack level' in p or '-stack-stack' in p for p in briefs),
+                  'waves (f) --no-whole-stack per-PR round A has no stack-findings text')
+    f = Fixture(tmp, 'waves-reject')
+    for flags, env in ((('--wave-cap', '4'), {}), (('--wave-cap', '0'), {}), ((), {'CONCLAVE_WAVE_CAP': '4'}),
+                       ((), {'CONCLAVE_WAVE_CAP': 'two'})):
+        got = run(f.args(*PER_PR, *flags), env=dict(f.env, **env))
+        check(got.returncode != 0 and not f.calls(), f'waves (c) rejects {flags or env}')
+    got = run(f.args(*PER_PR), env=dict(f.env, CONCLAVE_WAVE_CAP='two'))
+    check('CONCLAVE_WAVE_CAP must be 1, 2, or 3' in got.stderr, f'waves (c) a bad env cap is a clear error ({got.stderr.strip()})')
+    got = run(f.args(*PER_PR, '--wave-wait', '-1'), env=f.env)
+    check(got.returncode == 2 and not f.calls(), 'waves rejects a negative --wave-wait')
+
+    # (d) a capped first wave launches nothing.
+    f = Fixture(tmp, 'waves-ask')
+    seat_route(f, SEAT_ASK)
+    got = f.invoke(*PER_PR)
+    rec = f.record()
+    capped = [r['outcome'] for r in rec['prs']]
+    check(got.returncode == 1 and not any(c[0] in ('council', 'cursor') for c in f.calls()),
+          f'waves (d) ask route: no phase 1 and no chair ({got.stderr.strip()})')
+    check(all(o.startswith('failed: not started; seats capped (') and 'astra:capped' in o for o in capped),
+          f'waves (d) unlaunched rows say seats capped ({capped})')
+    check(rec['reconcile'] == 'failed: not started; seats capped', f"waves (d) reconcile not started ({rec['reconcile']})")
+    check([(w['wave'], w['precheck']) for w in rec['waves']] == [(1, 'blocked')] and 'astra:capped' in rec['waves'][0]['message'],
+          f"waves (d) run.json waves shows the blocked wave ({rec['waves']})")
+    line = [l for l in got.stderr.splitlines() if 'not launched' in l]
+    check(len(line) == 1 and 'wave 1' in line[0] and 'rerun the same command' in line[0] and 'every pool capped' in line[0],
+          f'waves (d) one clear stderr line names the wave and reason ({got.stderr.strip()})')
+    seat = [c[1] for c in f.calls() if c[0] == 'seat']
+    check(seat == [['--route', 'lineup', '--json', '--kind', 'review']], f'waves (d) pre-check asks the review lineup route ({seat})')
+    check('pre-check blocked' in (f.root / 'tmp/council/stack/run.md').read_text(), 'waves (d) run.md records the pre-check')
+
+    # (d) a passing wave, then a capped one; rerun resumes.
+    f = Fixture(tmp, 'waves-mid')
+    seat_route(f, SEAT_OK, SEAT_ASK)
+    got = f.invoke(*PER_PR)
+    rec = f.record()
+    check(got.returncode == 1 and [w['precheck'] for w in rec['waves']] == ['ok', 'blocked']
+          and [r['outcome'] for r in rec['prs']][:2] == ['ok', 'ok']
+          and rec['prs'][2]['outcome'].startswith('failed: not started; seats capped')
+          and not any(c[0] == 'council' and c[1][0] == 'p-3' for c in f.calls()),
+          f"waves (d) a passing wave launches and the capped next wave does not ({rec['waves']})")
+    seat_route(f, SEAT_OK)
+    got = f.invoke(*PER_PR)
+    rec = f.record()
+    check(got.returncode == 0 and [r['outcome'] for r in rec['prs']] == ['reused', 'reused', 'ok']
+          and [w['precheck'] for w in rec['waves']] == ['not needed', 'ok'],
+          f"waves (d) rerun resumes and reuses finished ballots ({rec['waves']} {got.stderr.strip()})")
+
+    # (d) a wave of chair-only ballots spends no seat, so a capped route does not block it.
+    f = Fixture(tmp, 'waves-chair-only')
+    seat_route(f, SEAT_ASK)
+    for n in (1, 2, 3):
+        b = f.ballot(n)
+        (b / 'judgment.md').write_text('head_oid: ' + 'a' * 40 + '\n')
+        (b / 'decide.md').write_text('f1 \u2014 **what breaks, for whom**: TODO(chair)\n**recommend**: TODO(chair)\n')
+        (b / 'findings.json').write_text(json.dumps({'findings': []}))
+    got = f.invoke(*PER_PR, '--no-reconcile')
+    rec = f.record()
+    check(got.returncode == 0 and [w['precheck'] for w in rec['waves']] == ['not needed', 'not needed']
+          and not any(c[0] == 'council' for c in f.calls()),
+          f"waves (d) chair-only ballots are not blocked by a capped route ({rec['waves']} {got.stderr.strip()})")
+
+    # (d) --wave-wait polls until the route passes.
+    f = Fixture(tmp, 'waves-wait')
+    seat_route(f, SEAT_ASK, SEAT_OK)
+    f.env['CONCLAVE_WAVE_POLL'] = '0.1'
+    got = f.invoke(*PER_PR, '--prs', '1', '--wave-wait', '10')
+    check(got.returncode == 0 and 'checking again' in got.stderr and f.record()['waves'][0]['precheck'] == 'ok',
+          f'waves (d) --wave-wait re-checks and then launches ({got.stderr.strip()})')
+    f = Fixture(tmp, 'waves-wait-out')
+    seat_route(f, SEAT_ASK)
+    f.env['CONCLAVE_WAVE_POLL'] = '0.1'
+    start = time.monotonic()
+    got = f.invoke(*PER_PR, '--prs', '1', '--wave-wait', '1')
+    seats = len([c for c in f.calls() if c[0] == 'seat'])
+    check(got.returncode == 1 and seats >= 3 and time.monotonic() - start < 20
+          and not any(c[0] in ('council', 'cursor') for c in f.calls()),
+          f'waves (d) --wave-wait gives up after its seconds ({seats} checks)')
+
+    # (d) inconclusive: missing or failing binary warns and proceeds. The escape hatch skips the check.
+    for label, env in (('missing', {'COUNCIL_SEAT_USAGE': str(tmp / 'no-such-seat-usage')}),
+                       ('erroring', {'SEAT_EXIT': '3'})):
+        f = Fixture(tmp, f'waves-{label}')
+        seat_route(f, SEAT_ASK)
+        f.env.update(env)
+        got = f.invoke(*PER_PR, '--prs', '1')
+        check(got.returncode == 0 and f.record()['waves'][0]['precheck'] == 'inconclusive'
+              and 'warning: wave 1 pre-check inconclusive' in got.stderr,
+              f'waves (d) {label} seat-usage is inconclusive and proceeds ({got.stderr.strip()})')
+    f = Fixture(tmp, 'waves-off')
+    seat_route(f, SEAT_ASK)
+    f.env['CONCLAVE_WAVE_PRECHECK'] = '0'
+    got = f.invoke(*PER_PR, '--prs', '1')
+    check(got.returncode == 0 and f.record()['waves'][0]['precheck'] == 'skipped'
+          and not any(c[0] == 'seat' for c in f.calls()), 'waves CONCLAVE_WAVE_PRECHECK=0 skips the pre-check')
+
+    # (d) the whole-stack wave is pre-checked too.
+    f = Fixture(tmp, 'waves-stack-ask')
+    f.reconcile_repo()
+    seat_route(f, SEAT_ASK)
+    got = f.invoke()
+    rec = f.record()
+    check(got.returncode == 1 and not any(c[0] in ('council', 'cursor') for c in f.calls())
+          and rec['whole_stack'].startswith('failed: not started; seats capped')
+          and all(r['outcome'].startswith('failed: not started; seats capped') for r in rec['prs'])
+          and rec['reconcile'] == 'failed: not started; seats capped'
+          and [w['ballots'] for w in rec['waves']] == [['p-stack-stack']],
+          f"waves (d) a capped whole-stack wave starts nothing ({rec.get('whole_stack')} {rec.get('waves')})")
 
 
 def test_stale_head(tmp: Path) -> None:
@@ -1272,7 +1548,7 @@ def test_detach(tmp: Path) -> None:
     dest = f.root / 'tmp/council/stack'
     pid = None
     try:
-        proc = subprocess.run(f.args('--detach', '--no-reconcile', '--prs', '1'), env=f.env,
+        proc = subprocess.run(f.args('--detach', *PER_PR, '--prs', '1'), env=f.env,
                               text=True, capture_output=True, timeout=20)
         check(proc.returncode == 0, f'fix 5 --detach exits 0 once a step starts ({proc.stderr})')
         meta = json.loads((dest / 'detach.json').read_text())
@@ -1314,7 +1590,7 @@ def test_detach(tmp: Path) -> None:
 
     f = Fixture(tmp, 'detach-die')
     arm(f)
-    proc = subprocess.run(f.args('--detach', '--chair-model', 'auto', '--no-reconcile', '--prs', '1'),
+    proc = subprocess.run(f.args('--detach', '--chair-model', 'auto', *PER_PR, '--prs', '1'),
                           env=f.env, text=True, capture_output=True, timeout=20)
     check(proc.returncode != 0 and 'before the first ballot step' in proc.stderr
           and 'chair model must be explicit' in proc.stderr,
@@ -1381,7 +1657,7 @@ def test_detach_resume(tmp: Path) -> None:
     (dest / 'run.json').write_text(json.dumps({
         'prs': [row], 'reconcile': 'ok', 'context': 'ready', 'whole_stack': 'ok', 'POSTED?': [],
     }))
-    proc = subprocess.run(f.args('--detach', '--no-reconcile', '--prs', '7', '--pr', '7'),
+    proc = subprocess.run(f.args('--detach', *PER_PR, '--prs', '7', '--pr', '7'),
                           env=f.env, text=True, capture_output=True, timeout=20)
     check(proc.returncode != 0 and 'started: p-7 finished' not in proc.stdout,
           f'f6 a failed resume does not report the old finished step ({proc.returncode} stdout={proc.stdout!r} stderr={proc.stderr!r})')
@@ -1405,6 +1681,7 @@ def main() -> None:
         test_opus_session_limit(tmp, mod)
         test_shallow_repo(tmp)
         test_whole_stack(tmp, mod)
+        test_waves(tmp, mod)
         test_stale_head(tmp)
         test_stack_ballot_name(tmp)
         test_detach(tmp)
