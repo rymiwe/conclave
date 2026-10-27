@@ -57,6 +57,11 @@ if '-X' in args:
         req = json.loads(sys.stdin.read())
         (state / 'posted-reply.json').write_text(json.dumps({'url': base, 'body': req}))
         print(json.dumps({'id': 77, 'html_url': 'https://github.com/example/widgets/pull/7#discussion_r77'}))
+    elif base.endswith('/comments') and '/reviews/' not in base:
+        req = json.loads(sys.stdin.read())
+        with (state / 'file-comments.jsonl').open('a') as out:
+            out.write(json.dumps(req) + '\\n')
+        print(json.dumps({'id': 8100, 'html_url': 'https://github.com/example/widgets/pull/7#discussion_r8100'}))
     elif base != repo + '/reviews':
         sys.exit('unexpected POST ' + base)
     else:
@@ -157,14 +162,19 @@ def test_right_lines() -> None:
 
 
 def test_expect_outside_diff(root: Path) -> None:
-    """f4: expect is checked on a line outside the diff, using the file at the head."""
+    """f2: expect is checked on a line outside the diff, using the file at the head.
+
+    The fixture moved f2 to app/label.rb, a file that is not in this PR's diff,
+    so the comment still moves into the review body. A line outside the diff
+    in a file that is in the diff is a file-level comment now.
+    """
     f = Fixture(root / 'outside-expect')
     blob = '\n'.join(f'line {i}' for i in range(1, 40)) + '\nlabel = I18n.locale\n'
     blobs = root / 'blobs.json'
-    blobs.write_text(json.dumps({'app/widget.rb': blob}))
+    blobs.write_text(json.dumps({'app/label.rb': blob}))
     env = {'GH_BLOBS': str(blobs)}
     payload = f.payload()
-    payload['comments'] = [c for c in payload['comments'] if c['path'] == 'app/widget.rb' and c['line'] == 40]
+    payload['comments'] = [c for c in payload['comments'] if c['path'] == 'app/label.rb' and c['line'] == 40]
     payload['comments'][0]['expect'] = 'not-on-this-line'
     payload['body_findings'] = []
     f.set_payload(payload)
@@ -176,9 +186,9 @@ def test_expect_outside_diff(root: Path) -> None:
     payload['comments'][0]['expect'] = 'I18n.locale'
     f.set_payload(payload)
     matched = f.post('--dry-run', env=env)
-    check(matched.returncode == 0 and f'blob/{HEAD}/app/widget.rb#L40' in
+    check(matched.returncode == 0 and f'blob/{HEAD}/app/label.rb#L40' in
           (f.council / 'demo-1/post-7.request.json').read_text(),
-          f'f4 a matching expect outside the diff still moves the comment ({matched.returncode} {matched.stderr.strip()})')
+          f'f2 a matching expect outside the diff still moves the comment ({matched.returncode} {matched.stderr.strip()})')
 
 
 def test_form_feed_hunk(root: Path) -> None:
@@ -207,16 +217,20 @@ def test_dry_run(f: Fixture) -> None:
     check(f.posts() == 0, 'dry run never POSTs')
     check(not (f.council / 'demo-1/posted.json').exists(), 'dry run writes no posted.json')
     req = json.loads((f.council / 'demo-1/post-7.request.json').read_text())
-    check(req['commit_id'] == HEAD and req['event'] == 'COMMENT', 'request carries commit_id and event')
+    # f1 is Requested, and the payload no longer carries an event. The event
+    # follows that label. APPROVE is not selected.
+    check(req['commit_id'] == HEAD and req['event'] == 'REQUEST_CHANGES',
+          'request carries commit_id and REQUEST_CHANGES')
     check([(c['path'], c['line'], c['side']) for c in req['comments']] ==
           [('app/widget.rb', 3, 'RIGHT'), ('app/widget.rb', 13, 'RIGHT')], 'only in-diff lines stay inline, side RIGHT')
     check(all('finding' not in c and 'expect' not in c for c in req['comments']), 'request drops payload-only keys')
     body = req['body']
     check('**Outside this diff**' in body, 'outside-diff comments move into the body')
-    check(f'https://github.com/example/widgets/blob/{HEAD}/app/widget.rb#L40' in body
+    # f2's file is not in the diff, so it still moves. See test_expect_outside_diff.
+    check(f'https://github.com/example/widgets/blob/{HEAD}/app/label.rb#L40' in body
           and f'https://github.com/example/widgets/blob/{HEAD}/lib/other.rb#L1' in body,
           'moved comments carry a permalink at the head')
-    check('moved: app/widget.rb:40 (f2)' in proc.stdout and 'nothing posted' in proc.stdout, 'dry run prints the plan')
+    check('moved: app/label.rb:40 (f2)' in proc.stdout and 'nothing posted' in proc.stdout, 'dry run prints the plan')
 
 
 def test_post(f: Fixture) -> None:
@@ -652,14 +666,19 @@ def test_repro_and_labels(root: Path) -> None:
           'a changed reply stops the rerun before the unsent reply is posted '
           f'({second.returncode} {second.stderr.strip()} posts={f.posts()} before={before})')
 
+    # An unlabeled new inline comment is refused on your own PR too.
     f = Fixture(root / 'own-pr')
     payload = f.payload()
     payload['pr_author'] = 'me'
     payload['reviewer'] = 'me'
     payload['comments'][0]['body'] = 'size counts deleted items.'
+    payload['comments'][0].pop('severity', None)
     f.set_payload(payload)
     proc = f.post('--dry-run')
-    check(proc.returncode == 0, f'an unlabeled inline comment on your own PR is not flagged ({proc.stderr.strip()})')
+    check(proc.returncode != 0 and 'no label' in proc.stderr and f.posts() == 0
+          and not (f.council / 'demo-1/post-7.request.json').exists(),
+          'an unlabeled inline comment on your own PR is refused and writes no request file '
+          f'({proc.returncode} {proc.stderr.strip()})')
 
 
 def test_moved_repro_keeps_its_block(root: Path) -> None:
@@ -894,18 +913,449 @@ def test_inline_repro_not_dropped(root: Path) -> None:
 
 
 def test_moved_repro_missing_block_dies(root: Path) -> None:
-    """A moved comment with no room for its script stops, instead of posting without it."""
+    """A moved comment with no room for its script stops, instead of posting without it.
+
+    The summary is a short opener, so the bulk that uses up the review body
+    is a later moved comment, not a 65300-character summary.
+    """
     f = Fixture(root / 'no-room')
     payload = f.payload()
-    payload['body'] = 'N' * 65300
+    payload['body'] = 'Four notes on the widget change.'
     payload['body_findings'] = []
-    payload['comments'] = [c for c in payload['comments'] if c.get('finding') == 'f2']
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') in ('f2', 'f3')]
+    for comment in payload['comments']:
+        if comment.get('finding') == 'f3':
+            comment['body'] = 'z' * 70000
     f.set_payload(payload)
     repro = f.council / 'demo-1' / 'repro'
     repro.mkdir()
     (repro / 'f2.rb').write_text('puts :hi\n', encoding='utf-8')
     refused(f, 'a moved repro that does not fit is refused before POST',
             'no room for repro demo-1/f2.rb')
+
+
+OFFER = 'verdict: pending human — APPROVE offered'
+NO_OFFER = 'verdict: pending human — no approve offer'
+SEVERITY_LABELS = {
+    'blocking': '**Requested:**',
+    'should-fix': '**Requested:**',
+    'nit': '**Advisory:**',
+    'usability': '**Advisory:**',
+    'fyi': '**Informational:**',
+}
+PR1_SVC = '@@ -1,2 +1,4 @@\n class Svc\n+  def a\n+  end\n end\n'
+PR2_X = '@@ -1,1 +1,2 @@\n module X\n+  LIMIT = 3\n'
+PR3_SVC = (
+    '@@ -124,2 +124,5 @@\n   def b\n   end\n+  def stale_total\n+    rows.sum\n+  end\n'
+)
+STACK_GH = '''\
+#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+args = sys.argv[1:]
+log = Path(os.environ['GH_LOG'])
+with log.open('a') as handle:
+    handle.write(json.dumps(args) + '\\n')
+if '-X' in args:
+    sys.stderr.write('unexpected POST\\n')
+    sys.exit(1)
+path = next((a for a in args if a.startswith('repos/') or a == 'user'), '')
+base = path.split('?')[0]
+page = int(parse_qs(urlsplit(path).query).get('page', ['1'])[0])
+if path == 'user':
+    print(json.dumps({'login': 'me'}))
+    raise SystemExit
+if '/contents/' in base:
+    sys.exit(1)
+marker = '/pulls/'
+if marker not in base:
+    sys.exit('unexpected gh call ' + ' '.join(args))
+number, tail = base.split(marker, 1)[1].split('/', 1) if '/' in base.split(marker, 1)[1] else (base.split(marker, 1)[1], '')
+if tail.startswith('files'):
+    print('[]' if page > 1 else Path(os.environ['GH_PATCHES'], number + '.json').read_text())
+elif tail == '':
+    print(json.dumps({'head': {'sha': os.environ['GH_HEAD']}}))
+else:
+    sys.exit('unexpected gh call ' + ' '.join(args))
+'''
+
+
+def verdict_line(proc: subprocess.CompletedProcess) -> str:
+    for line in proc.stdout.splitlines():
+        if line.startswith('verdict:'):
+            return line
+    return ''
+
+
+def request_of(f: Fixture) -> dict:
+    return json.loads((f.council / 'demo-1/post-7.request.json').read_text())
+
+
+def write_voters(f: Fixture, count: int) -> None:
+    blind = f.council / 'demo-1' / 'blind'
+    blind.mkdir(parents=True)
+    rows = ''.join(f'{letter}=/tmp/voter-{letter}.json\n' for letter in 'ABCDEFGH'[:count])
+    (blind / 'key.txt').write_text(rows)
+
+
+def inline_only(f: Fixture, comments: list, body: str = 'One note on the widget change.') -> dict:
+    payload = f.payload()
+    payload.pop('event', None)
+    payload.pop('voters_finished', None)
+    payload['body'] = body
+    payload['body_findings'] = []
+    payload['comments'] = comments
+    f.set_payload(payload)
+    return payload
+
+
+def one_inline(body: str, **extra: object) -> dict:
+    comment = {
+        'finding': 'f1', 'path': 'app/widget.rb', 'line': 3,
+        'expect': 'items.count', 'body': body,
+    }
+    comment.update(extra)
+    return comment
+
+
+def test_summary_opener(root: Path) -> None:
+    f = Fixture(root / 'opener-short')
+    inline_only(f, [one_inline('**Requested:** size counts deleted items.')], body='x' * 600)
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0, f'a 600-character summary opener passes ({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'opener-chars')
+    inline_only(f, [one_inline('**Requested:** size counts deleted items.')], body='x' * 601)
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and 'summary opener is 601 characters' in proc.stderr and f.posts() == 0
+          and not (f.council / 'demo-1/post-7.request.json').exists(),
+          f'a summary opener over 600 characters is refused ({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'opener-lines')
+    inline_only(f, [one_inline('**Requested:** size counts deleted items.')],
+                body='\n'.join(f'line {i}' for i in range(1, 8)))
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and 'summary opener is 7 non-empty lines' in proc.stderr and f.posts() == 0,
+          f'a summary opener over 6 lines is refused ({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'opener-table')
+    inline_only(f, [one_inline('**Requested:** size counts deleted items.')],
+                body='Notes.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n')
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and 'summary opener contains a markdown table' in proc.stderr and f.posts() == 0,
+          f'a summary opener with a table is refused ({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'opener-ok')
+    inline_only(f, [one_inline('**Requested:** size counts deleted items.')], body='One note on the widget change.')
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0 and f.posts() == 0, f'a short summary opener passes ({proc.returncode} {proc.stderr.strip()})')
+
+
+def test_severity_on_comments(root: Path) -> None:
+    for severity, label in SEVERITY_LABELS.items():
+        f = Fixture(root / f'sev-{severity}')
+        inline_only(f, [one_inline('size counts deleted items.', severity=severity)])
+        proc = f.post('--dry-run')
+        check(proc.returncode == 0, f'severity {severity} dry-runs ({proc.returncode} {proc.stderr.strip()})')
+        body = request_of(f)['comments'][0]['body']
+        check(body.startswith(label + ' '), f'severity {severity} is prepended as {label} ({body})')
+
+    f = Fixture(root / 'already-labeled')
+    inline_only(f, [one_inline('**Requested:** size counts deleted items.')])
+    proc = f.post('--dry-run')
+    body = request_of(f)['comments'][0]['body'] if proc.returncode == 0 else ''
+    check(proc.returncode == 0 and body.startswith('**Requested:**'),
+          f'an already-labeled inline comment keeps its label ({proc.returncode} {body!r} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'own-severity')
+    payload = inline_only(f, [one_inline('size counts deleted items.', severity='usability')])
+    payload['pr_author'] = 'me'
+    payload['reviewer'] = 'me'
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    body = request_of(f)['comments'][0]['body'] if proc.returncode == 0 else ''
+    check(proc.returncode == 0 and body.startswith('**Advisory:**'),
+          f'your own PR prepends the label from severity ({proc.returncode} {body!r} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'mismatch')
+    inline_only(f, [one_inline('**Advisory:** size counts deleted items.', severity='blocking')])
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and 'disagrees with severity' in proc.stderr and f.posts() == 0
+          and not (f.council / 'demo-1/post-7.request.json').exists(),
+          f'a label that disagrees with severity is refused ({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'unlabeled-other')
+    payload = f.payload()
+    payload['pr_author'] = 'author'
+    payload['reviewer'] = 'me'
+    payload['comments'] = [one_inline('size counts deleted items.')]
+    payload['body_findings'] = []
+    payload.pop('event', None)
+    f.set_payload(payload)
+    proc = f.post()
+    check(proc.returncode != 0 and 'no label' in proc.stderr and f.posts() == 0
+          and not (f.council / 'demo-1/post-7.request.json').exists()
+          and not (f.council / 'demo-1/posted.json').exists(),
+          'an unlabeled inline comment with no severity is refused and writes no request file '
+          f'({proc.returncode} {proc.stderr.strip()})')
+
+
+def test_file_level_and_reanchor(root: Path) -> None:
+    f = Fixture(root / 'file-level')
+    inline_only(f, [{
+        'finding': 'f1', 'path': 'app/widget.rb', 'line': 40,
+        'body': '**Advisory:** this line is not in the diff.',
+    }])
+    dry = f.post('--dry-run')
+    req = request_of(f) if dry.returncode == 0 else {}
+    plan = req.get('plan') or []
+    check(dry.returncode == 0 and plan and plan[0]['post_as'] == 'file' and req.get('comments') == []
+          and req.get('file_comments') and 'plan: demo-1:f1 file app/widget.rb' in dry.stdout,
+          f'file-level fallback: the plan says file and the request has no inline comment '
+          f'({dry.returncode} {dry.stderr.strip()} {req})')
+    real = f.post('--human-verdict', 'COMMENT')
+    posted_req = json.loads((f.state / 'posted-request.json').read_text()) if (f.state / 'posted-request.json').is_file() else {}
+    file_rows = []
+    file_log = f.state / 'file-comments.jsonl'
+    if file_log.is_file():
+        file_rows = [json.loads(line) for line in file_log.read_text().splitlines() if line]
+    check(real.returncode == 0 and len(file_rows) == 1 and file_rows[0].get('subject_type') == 'file'
+          and file_rows[0].get('path') == 'app/widget.rb' and posted_req.get('comments') == [],
+          f'a real post sends subject_type file once ({real.returncode} {real.stderr.strip()} {file_rows})')
+    before = f.posts()
+    again = f.post('--human-verdict', 'COMMENT')
+    file_rows_again = [json.loads(line) for line in file_log.read_text().splitlines() if line]
+    check(again.returncode != 0 and 'already in' in again.stderr and f.posts() == before and len(file_rows_again) == 1,
+          f'a rerun does not post the file-level comment again ({again.returncode} {again.stderr.strip()} posts={f.posts()})')
+
+    def stack_run(name: str, comments: list, findings: list) -> tuple[subprocess.CompletedProcess, list]:
+        council = root / name / 'council'
+        ballot = council / 'reanchor'
+        ballot.mkdir(parents=True)
+        patches = root / name / 'patches'
+        patches.mkdir()
+        for number, rows in (
+            ('1', [{'filename': 'app/svc.rb', 'patch': PR1_SVC}]),
+            ('2', [{'filename': 'lib/x.rb', 'patch': PR2_X}]),
+            ('3', [{'filename': 'app/svc.rb', 'patch': PR3_SVC}]),
+        ):
+            (patches / f'{number}.json').write_text(json.dumps(rows))
+        (ballot / 'stack.json').write_text(json.dumps({
+            'status': 'stack', 'prs': [{'number': 1}, {'number': 2}, {'number': 3}],
+        }))
+        (ballot / 'findings.json').write_text(json.dumps({'findings': findings}))
+        (ballot / 'post-1.json').write_text(json.dumps({
+            'repo': 'example/widgets', 'ballot': 'reanchor', 'commit_id': HEAD,
+            'body': 'One note.', 'comments': comments,
+        }))
+        bin_dir = root / name / 'bin'
+        bin_dir.mkdir()
+        gh = bin_dir / 'gh'
+        gh.write_text(textwrap.dedent(STACK_GH), encoding='utf-8')
+        gh.chmod(0o755)
+        log = root / name / 'calls.jsonl'
+        env = {**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+               'GH_LOG': str(log), 'GH_PATCHES': str(patches), 'GH_HEAD': HEAD}
+        env.pop('COUNCIL_GH', None)
+        env.pop('CONCLAVE_GH', None)
+        proc = subprocess.run(
+            ['python3', str(SCRIPTS / 'post-review.py'), 'reanchor', '1', '--council-dir', str(council)],
+            env=env, text=True, capture_output=True,
+        )
+        calls = [json.loads(line) for line in log.read_text().splitlines()] if log.is_file() else []
+        return proc, calls
+
+    proc, calls = stack_run('reanchor', [{
+        'finding': 'f1', 'path': 'app/svc.rb', 'line': 126,
+        'body': '**Requested:** the total is first added on a later pull request.',
+    }], [{
+        'id': 'f1', 'file': 'app/svc.rb', 'line': 126, 'cited_code': 'def stale_total',
+    }])
+    request = root / 'reanchor' / 'council' / 'reanchor' / 'post-1.request.json'
+    check(proc.returncode != 0 and 're-anchor to #3 app/svc.rb:126' in proc.stderr
+          and not any('-X' in call for call in calls) and not request.exists(),
+          f'a stack-tip line is refused and nothing is posted ({proc.returncode} {proc.stderr.strip()} calls={calls})')
+
+    proc, calls = stack_run('flag', [{
+        'finding': 'f1', 'path': 'lib/x.rb', 'line': 9,
+        'body': '**Advisory:** the limit is not on this pull request.',
+    }], [{
+        'id': 'f1', 'file': 'lib/x.rb', 'line': 9, 'cited_code': 'nothing here',
+    }])
+    request = root / 'flag' / 'council' / 'reanchor' / 'post-1.request.json'
+    check(proc.returncode != 0 and 'flag for the chair' in proc.stderr
+          and not any('-X' in call for call in calls) and not request.exists(),
+          f'a line that cannot be matched is flagged and nothing is posted ({proc.returncode} {proc.stderr.strip()})')
+
+
+def test_verdict(root: Path) -> None:
+    f = Fixture(root / 'requested')
+    inline_only(f, [one_inline('**Requested:** size counts deleted items.')])
+    proc = f.post('--dry-run')
+    req = request_of(f)
+    check(proc.returncode == 0 and req.get('event') == 'REQUEST_CHANGES'
+          and verdict_line(proc) == 'verdict: REQUEST_CHANGES (1 Requested)',
+          f'Requested finding requests changes ({verdict_line(proc)!r} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'requested-and-advisory')
+    inline_only(f, [
+        one_inline('**Requested:** size counts deleted items.'),
+        {'finding': 'f3', 'path': 'app/widget.rb', 'line': 13, 'expect': '@cache = nil',
+         'body': '**Advisory:** reset leaves the cache warm.'},
+    ])
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0 and request_of(f).get('event') == 'REQUEST_CHANGES'
+          and 'REQUEST_CHANGES (1 Requested)' in verdict_line(proc),
+          f'Requested plus Advisory still requests changes ({verdict_line(proc)!r} {proc.stderr.strip()})')
+
+    for label, name in (('**Advisory:**', 'advisory'), ('**Informational:**', 'informational')):
+        f = Fixture(root / f'{name}-offer')
+        inline_only(f, [one_inline(f'{label} size counts deleted items.')])
+        write_voters(f, 2)
+        proc = f.post('--dry-run')
+        req = request_of(f) if proc.returncode == 0 else {}
+        check(proc.returncode == 0 and OFFER in verdict_line(proc) and req.get('event') != 'APPROVE'
+              and 'event' not in req and 'APPROVE' not in json.dumps({k: req.get(k) for k in ('event',)}),
+              f'{name}-only with 2 voters offers APPROVE and emits no APPROVE event '
+              f'({verdict_line(proc)!r} event={req.get("event")!r} {proc.stderr.strip()})')
+
+        f = Fixture(root / f'{name}-refuse')
+        inline_only(f, [one_inline(f'{label} size counts deleted items.')])
+        write_voters(f, 2)
+        proc = f.post()
+        check(proc.returncode != 0 and 'A real post needs --human-verdict' in proc.stderr and f.posts() == 0
+              and not (f.council / 'demo-1/posted.json').exists(),
+              f'{name}-only without --human-verdict posts nothing ({proc.returncode} {proc.stderr.strip()})')
+
+        f = Fixture(root / f'{name}-approve')
+        inline_only(f, [one_inline(f'{label} size counts deleted items.')])
+        write_voters(f, 2)
+        proc = f.post('--human-verdict', 'APPROVE')
+        posted = json.loads((f.state / 'posted-request.json').read_text()) if proc.returncode == 0 else {}
+        record = request_of(f) if (f.council / 'demo-1/post-7.request.json').is_file() else {}
+        check(proc.returncode == 0 and posted.get('event') == 'APPROVE' and 'plan_verdict' not in posted
+              and record.get('event') == 'APPROVE' and OFFER in record.get('plan_verdict', ''),
+              f'{name}-only --human-verdict APPROVE posts APPROVE ({proc.returncode} {posted} {proc.stderr.strip()})')
+
+    for count, how in ((1, '1 voter'), (0, 'unknown count')):
+        f = Fixture(root / f'voters-{count}')
+        inline_only(f, [one_inline('**Advisory:** size counts deleted items.')])
+        if count:
+            write_voters(f, count)
+        proc = f.post('--dry-run')
+        line = verdict_line(proc)
+        check(proc.returncode == 0 and line.startswith(NO_OFFER) and f'only {count} voter(s) finished' in line
+              and 'need 2' in line,
+              f'advisory-only with {how} withholds the approve offer ({line!r} {proc.stderr.strip()})')
+        if count == 0:
+            check('the voter count is unknown and is taken as 0' in line,
+                  f'an unknown voter count is stated ({line!r})')
+        refused_approve = f.post('--human-verdict', 'APPROVE')
+        check(refused_approve.returncode != 0 and 'approve offer was withheld' in refused_approve.stderr
+              and f.posts() == 0,
+              f'--human-verdict APPROVE is refused with {how} ({refused_approve.returncode} {refused_approve.stderr.strip()})')
+        accepted = f.post('--human-verdict', 'REQUEST_CHANGES')
+        posted = json.loads((f.state / 'posted-request.json').read_text()) if accepted.returncode == 0 else {}
+        check(accepted.returncode == 0 and posted.get('event') == 'REQUEST_CHANGES',
+              f'--human-verdict REQUEST_CHANGES works with {how} ({accepted.returncode} {posted} {accepted.stderr.strip()})')
+
+    f = Fixture(root / 'payload-loses-to-key')
+    payload = inline_only(f, [one_inline('**Advisory:** size counts deleted items.')])
+    payload['voters_finished'] = 2
+    f.set_payload(payload)
+    write_voters(f, 1)
+    proc = f.post('--dry-run')
+    check(NO_OFFER in verdict_line(proc) and 'only 1 voter(s) finished' in verdict_line(proc)
+          and 'counted from demo-1/blind/key.txt' in verdict_line(proc),
+          f'the ballot key wins over a higher payload count ({verdict_line(proc)!r})')
+
+    f = Fixture(root / 'payload-count')
+    payload = inline_only(f, [one_inline('**Informational:** size counts deleted items.')])
+    payload['voters_finished'] = 2
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(OFFER in verdict_line(proc) and 'the payload voters_finished' in verdict_line(proc),
+          f'voters_finished is used when the ballot has no key ({verdict_line(proc)!r} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'payload-approve')
+    payload = inline_only(f, [])
+    payload['event'] = 'APPROVE'
+    payload['comments'] = []
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and 'APPROVE is only a --human-verdict' in proc.stderr and f.posts() == 0,
+          f'a payload event APPROVE is refused ({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'comment-with-findings')
+    payload = inline_only(f, [one_inline('**Advisory:** size counts deleted items.')])
+    payload['event'] = 'COMMENT'
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and 'payload event COMMENT' in proc.stderr and f.posts() == 0
+          and not (f.council / 'demo-1/post-7.request.json').exists(),
+          f'payload event COMMENT with findings is refused ({proc.returncode} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'human-comment')
+    inline_only(f, [one_inline('**Advisory:** size counts deleted items.')])
+    write_voters(f, 2)
+    proc = f.post('--human-verdict', 'COMMENT')
+    posted = json.loads((f.state / 'posted-request.json').read_text()) if proc.returncode == 0 else {}
+    check(proc.returncode == 0 and posted.get('event') == 'COMMENT',
+          f'--human-verdict COMMENT is the human choosing COMMENT ({proc.returncode} {posted} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'conflict-event')
+    payload = inline_only(f, [one_inline('**Requested:** size counts deleted items.')])
+    payload['event'] = 'COMMENT'
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and 'payload event COMMENT' in proc.stderr and 'REQUEST_CHANGES' in proc.stderr,
+          f'a payload COMMENT conflicts with Requested ({proc.returncode} {proc.stderr.strip()})')
+
+    for human in ('APPROVE', 'COMMENT'):
+        f = Fixture(root / f'conflict-{human}')
+        inline_only(f, [one_inline('**Requested:** size counts deleted items.')])
+        proc = f.post('--human-verdict', human)
+        check(proc.returncode != 0 and f'--human-verdict {human}' in proc.stderr and 'REQUEST_CHANGES' in proc.stderr
+              and f.posts() == 0,
+              f'--human-verdict {human} conflicts with Requested ({proc.returncode} {proc.stderr.strip()})')
+
+    for path in sorted(FIXTURES.rglob('post-*.json')):
+        f = Fixture(root / f'fixture-{path.stem}')
+        proc = f.post('--dry-run')
+        req = request_of(f) if proc.returncode == 0 else {}
+        check(proc.returncode == 0 and req.get('event') != 'APPROVE' and not verdict_line(proc).startswith('verdict: APPROVE'),
+              f'{path.name} does not emit APPROVE ({verdict_line(proc)!r} event={req.get("event")!r} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'reply-only')
+    payload = inline_only(f, [{'in_reply_to': 42, 'body': 'The next build picks this up.'}])
+    payload['comments'] = [{'in_reply_to': 42, 'body': 'The next build picks this up.'}]
+    f.set_payload(payload)
+    proc = f.post()
+    posted = json.loads((f.state / 'posted-request.json').read_text()) if proc.returncode == 0 else {}
+    check(proc.returncode == 0 and posted.get('event') == 'COMMENT' and f.posts() == 2
+          and 'no labeled findings' in request_of(f).get('plan_verdict', ''),
+          f'a reply-only payload posts COMMENT ({proc.returncode} event={posted.get("event")!r} posts={f.posts()} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'summary-only')
+    payload = inline_only(f, [])
+    payload['event'] = 'REQUEST_CHANGES'
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    check(proc.returncode == 0 and request_of(f).get('event') == 'REQUEST_CHANGES',
+          f'zero labeled findings keep the payload event ({verdict_line(proc)!r} {proc.stderr.strip()})')
+
+    f = Fixture(root / 'moved-only')
+    payload = f.payload()
+    payload.pop('event', None)
+    payload['body_findings'] = []
+    payload['comments'] = [c for c in payload['comments'] if c.get('finding') in ('f2', 'f3')]
+    f.set_payload(payload)
+    proc = f.post('--dry-run')
+    req = request_of(f) if proc.returncode == 0 else {}
+    labels = [row.get('label') for row in req.get('plan', [])]
+    check(proc.returncode == 0 and req.get('event') == 'COMMENT' and labels and all(label is None for label in labels),
+          f'findings moved outside the diff are zero labeled findings ({verdict_line(proc)!r} labels={labels} {proc.stderr.strip()})')
 
 
 def main() -> None:
@@ -927,6 +1377,10 @@ def main() -> None:
         test_hand_written_repro_is_adopted(root)
         test_inline_repro_not_dropped(root)
         test_moved_repro_missing_block_dies(root)
+        test_summary_opener(root)
+        test_severity_on_comments(root)
+        test_file_level_and_reanchor(root)
+        test_verdict(root)
     print('all post-review checks passed')
 
 

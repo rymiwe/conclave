@@ -6,14 +6,14 @@ repro/<finding-id>.<ext> (repro/f1.rb). The comment for that finding gets one
 collapsed details block. A finding with no file there gets no block.
 
 Labels (**Requested:**, **Advisory:**, **Informational:**, and the legacy
-**Question:**) belong only on new inline comments: at the start of one, and
-only when the pull request is someone else's. A reply never keeps one. The
-review summary never opens with one, and a bullet inside the summary loses
-one while SUMMARY_BULLETS_MAY_HAVE_LABELS is False (the setting since
-2026-10-23). This module strips labels on a reply, strips a label that opens
-the summary and every summary bullet label, and requires a new inline comment in
-someone else's pull request to start with one. It does not enforce the absence
-of labels on an inline comment on your own pull request.
+**Question:**) belong only on new inline comments, at the start of one.
+Every new inline comment needs one, on your own pull request and on
+someone else's. A reply never keeps one. The review summary never opens
+with one, and a bullet inside the summary loses one while
+SUMMARY_BULLETS_MAY_HAVE_LABELS is False (the setting since 2026-10-23).
+This module strips labels on a reply and strips a label that opens the
+summary and every summary bullet label. The check that a new inline
+comment is missing its label lives in check-comment-labels.py.
 
 GitHub rejects a review comment body longer than 65536 characters. A script
 that does not fit is truncated inside the fence, with a note after the fence.
@@ -38,6 +38,14 @@ from pathlib import Path
 
 # GitHub's review-comment body limit, in characters.
 GITHUB_COMMENT_LIMIT = 65536
+# The review summary is a short opener. Each finding posts as its own
+# comment. These limits apply to the payload body before an outside-diff
+# block or a repro block is appended. post-review.py refuses a longer one,
+# and one with a markdown table.
+SUMMARY_OPENER_MAX_CHARS = 600
+SUMMARY_OPENER_MAX_LINES = 6
+_TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+_DETAILS_BLOCK = re.compile(r"<details>.*?</details>", re.S)
 
 # Info string GitHub highlights, keyed by the filename extension.
 _LANG = {
@@ -259,6 +267,45 @@ def adopt_hand_block(body: str, filename: str, marker: str) -> str:
         if _REPRO_MARKER_LINE.fullmatch(before.rsplit("\n", 1)[-1].strip()):
             continue
         return f"{body[:start]}{marker}\n{body[start:]}"
+
+
+def summary_opener_text(body: str) -> str:
+    """Summary prose before an outside-diff block or a repro block.
+
+    A hand-written details block is a repro, so it does not count toward
+    the opener limits. body_findings are attached later and are not in body yet.
+    """
+    text = _DETAILS_BLOCK.sub("", prose_without_repro(body))
+    marker = "**Outside this diff**"
+    at = text.find(marker)
+    if at >= 0:
+        text = text[:at]
+    return text.strip()
+
+
+def summary_has_table(text: str) -> bool:
+    """True when text has a markdown table separator row."""
+    return any(_TABLE_SEP.match(line) for line in text.splitlines())
+
+
+def summary_opener_problems(body: str) -> list[str]:
+    """Refusals for a summary that is not a short opener. Each names a count."""
+    text = summary_opener_text(body)
+    found: list[str] = []
+    chars = len(text)
+    if chars > SUMMARY_OPENER_MAX_CHARS:
+        found.append(
+            f"summary opener is {chars} characters; the limit is {SUMMARY_OPENER_MAX_CHARS}"
+        )
+    rows = [line for line in text.splitlines() if line.strip()]
+    if len(rows) > SUMMARY_OPENER_MAX_LINES:
+        found.append(
+            f"summary opener is {len(rows)} non-empty lines; "
+            f"the limit is {SUMMARY_OPENER_MAX_LINES}"
+        )
+    if summary_has_table(text):
+        found.append("summary opener contains a markdown table")
+    return found
 
 
 def prose_without_repro(body: str) -> str:

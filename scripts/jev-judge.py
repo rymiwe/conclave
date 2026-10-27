@@ -20,6 +20,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 import audit_gate  # noqa: E402
+import finding_anchor  # noqa: E402
 from conclave_env import setting  # noqa: E402
 
 API_URL = os.environ.get("TYPESAFE_BASE_URL", "https://api.typesafe.ai").rstrip(
@@ -1023,13 +1024,30 @@ def later_in_stack_line(finding: dict, header_stack: str, stack: dict) -> str:
     return "not touched later in the stack"
 
 
+SUMMARY_OPENER_NOTE = (
+    "The review summary is only a short opener; each finding posts as its own comment."
+)
+
+
+def how_it_posts_line(finding: dict, anchors: dict | None) -> str:
+    """The plan for one finding. decide.md and judgment.md share this text."""
+    anchor = (anchors or {}).get(str(finding.get("id")))
+    return finding_anchor.how_it_posts(finding, anchor)
+
+
 def render_decide(
-    doc: dict, raw: dict, header_stack: str, stack: dict, ballot: str = "<ballot id>"
+    doc: dict,
+    raw: dict,
+    header_stack: str,
+    stack: dict,
+    ballot: str = "<ballot id>",
+    anchors: dict | None = None,
 ) -> str:
     """Skeleton beside judgment.md. The claim is not copied into it.
 
     The closing line asks for ballot-prefixed ids: finding ids repeat
     across ballots, so a bare f3 can name a different finding elsewhere.
+    anchors is anchors.json from finding_anchor.py, or None.
     """
     findings = doc.get("findings") or []
     if not findings:
@@ -1048,6 +1066,7 @@ def render_decide(
                     f"{fid} — **what breaks, for whom**: {DECIDE_MARKER}",
                     f"**how sure**: {sure}; {gate}; {_confidence_text(conf)}",
                     f"**later PRs that change this file**: {later}",
+                    f"**how it posts**: {how_it_posts_line(finding, anchors)}",
                     (
                         f"**recommend**: {DECIDE_MARKER} post as a bug / "
                         "post as a question / post as advisory / hold. "
@@ -1061,32 +1080,36 @@ def render_decide(
         )
     example = f"{ballot} {findings[0]['id']}"
     return "\n\n".join(blocks) + (
-        "\n\nReply with the findings to post, each with its ballot id "
+        f"\n\n{SUMMARY_OPENER_NOTE} Reply with the findings to post, each with its ballot id "
         f"(for example `{example}`), or none.\n"
     )
 
 
-def _prefilled_by_id(text: str) -> dict[str, tuple[str, str]]:
-    """Finding id to its how-sure line and later-in-the-stack line."""
-    found: dict[str, tuple[str, str]] = {}
+def _prefilled_by_id(text: str) -> dict[str, tuple[str, str, str]]:
+    """Finding id to its how-sure, later-in-the-stack, and how-it-posts lines."""
+    found: dict[str, tuple[str, str, str]] = {}
     current: str | None = None
     how = ""
     later = ""
+    posts = ""
     for line in text.splitlines():
         match = re.match(r"^(\S+) — \*\*what breaks", line)
         if match:
             if current is not None:
-                found[current] = (how, later)
+                found[current] = (how, later, posts)
             current = match.group(1)
             how = ""
             later = ""
+            posts = ""
             continue
         if line.startswith("**how sure**:"):
             how = line
         elif line.startswith("**later PRs that change this file**:"):
             later = line
+        elif line.startswith("**how it posts**:"):
+            posts = line
     if current is not None:
-        found[current] = (how, later)
+        found[current] = (how, later, posts)
     return found
 
 
@@ -1127,13 +1150,16 @@ def write_decide(d: Path, doc: dict, raw: dict) -> None:
     """Write decide.md. Keep a filled file only when it still matches.
 
     The finding ids must match, and every pre-filled line (how sure, later
-    PRs that change this file) must equal what would be rendered now.
+    PRs that change this file, how it posts) must equal what would be
+    rendered now. A changed anchors.json changes the how-it-posts line.
     A chair edit is copied to decide.md.prev first, replacing any older copy.
     An unedited skeleton is rewritten and leaves decide.md.prev alone.
     """
     meta = load_run_header(d)
     header_stack = meta.get("stack") if isinstance(meta.get("stack"), str) else ""
-    rendered = render_decide(doc, raw, header_stack, load_stack(d), d.name)
+    rendered = render_decide(
+        doc, raw, header_stack, load_stack(d), d.name, finding_anchor.load_anchors(d)
+    )
     path = d / "decide.md"
     if path.is_file():
         existing = path.read_text(encoding="utf-8")
@@ -1166,11 +1192,22 @@ def write_review_judgment(d: Path, doc: dict, raw: dict, table: str) -> str:
     text = header + table
     if not text.endswith("\n"):
         text += "\n"
+    review = (str(meta.get("kind") or "")).strip() == "review"
+    if review and doc["findings"]:
+        text += how_each_finding_posts(doc, finding_anchor.load_anchors(d))
     (d / "judgment.md").write_text(text, encoding="utf-8")
     (d / "convergence.md").write_text(table, encoding="utf-8")
-    if (str(meta.get("kind") or "")).strip() == "review":
+    if review:
         write_decide(d, doc, raw)
     return text
+
+
+def how_each_finding_posts(doc: dict, anchors: dict | None) -> str:
+    """judgment.md section after the table, in findings.json order. Review kind only."""
+    lines = ["", "## How each finding posts", "", SUMMARY_OPENER_NOTE, ""]
+    for finding in doc["findings"]:
+        lines.append(f"- {finding['id']}: {how_it_posts_line(finding, anchors)}")
+    return "\n".join(lines) + "\n"
 
 
 def audit_findings_questions(doc: dict) -> dict:
