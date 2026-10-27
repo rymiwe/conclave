@@ -332,6 +332,13 @@ has "plain one_way: yes parses" "$(parse_of $'approve\none_way: yes\none_way_at:
 has "plain one_way: no parses" "$(parse_of $'approve\none_way: no')" '"one_way": "no"'
 has "bold **one_way: no** parses" "$(parse_of $'approve\n**one_way: no**')" '"one_way": "no"'
 has "uppercase value one_way: NO is unparseable" "$(parse_of $'approve\none_way: NO')" "unparseable one_way line: 'one_way: NO'"
+for l in 'one_way: no longer reversible' 'one_way: no, actually yes' 'one_way: yes; actually no' 'one_way: yes please'; do
+  v="$(parse_of $'approve\n'"$l")"
+  has "'$l' is unparseable" "$v" "unparseable one_way line: '$l'"
+  has "'$l' gives no verdict" "$v" '"one_way": null'
+done
+has "'one_way: no. The start-order...' parses as no" "$(parse_of $'approve\none_way: no. The start-order stress run was killed.')" '"one_way": "no"'
+has "'one_way: no  ' with trailing spaces parses as no" "$(parse_of $'approve\none_way: no  ')" '"one_way": "no"'
 
 # cursor-agent joins assistant turns with no separator in its result string.
 asst() { jq -cn --arg t "$1" '{type:"assistant",message:{role:"assistant",content:[{type:"text",text:$t}]}}'; }

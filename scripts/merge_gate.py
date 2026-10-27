@@ -44,9 +44,11 @@ REFUSED = 3
 # A directive is a line whose first token is one_way: or one_way_at: (colon
 # required). A garbled value after the colon is unparseable; prose is not a directive.
 VERDICT = re.compile(r"^(?i:one_way)\s*:(.*)$")
-# The value is lowercase yes|no and ends at end of line or a non-lowercase
-# character, so a glued "no" + "The ..." parses and nothing, nope, none do not.
-VALUE = re.compile(r"\s*(yes|no)(?![a-z])")
+# The value is lowercase yes|no. It may end the line (trailing spaces allowed),
+# be followed by . : ) ] or be glued to an uppercase letter, so "noThe ..."
+# parses. Whitespace, a comma or a semicolon then more text, or a lowercase
+# letter is unparseable: nothing, nope, none, "no longer", "no, actually yes".
+VALUE = re.compile(r"\s*(yes|no)(?=\s*$|[.:)\]]|[A-Z])")
 DIRECTIVE_AT = re.compile(r"^one_way_at\s*:", re.I)
 ITEM = re.compile(r"^one_way_at\s*:\s*(\S+:\d+)\s*(.*)$", re.I)
 
