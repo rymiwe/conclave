@@ -426,20 +426,23 @@ def test_stage_hook(tmp: Path) -> None:
                               timeout=60)
 
     # (5) Argv shape, env, payload.
-    got = emit('wave_done', json.dumps({'wave': 2, 'ballots': ['p-1'], 'outcomes': ['ok']}))
+    got = emit('ballot_done', json.dumps({'wave': 2, 'ballot': 'p-1', 'pr': 1, 'outcome': 'ok'}))
     calls = hook_calls(log)
     payload = json.loads(calls[0]['payload']) if calls else {}
     check(got.returncode == 0 and len(calls) == 1, f'hook: called once per event ({calls})')
-    check(calls[0]['argv'][:3] == ['--flag', 'two words', 'wave_done'] and len(calls[0]['argv']) == 4
-          and json.loads(calls[0]['argv'][3]) == payload and calls[0]['event'] == 'wave_done',
+    check(calls[0]['argv'][:3] == ['--flag', 'two words', 'ballot_done'] and len(calls[0]['argv']) == 4
+          and json.loads(calls[0]['argv'][3]) == payload and calls[0]['event'] == 'ballot_done',
           f"hook: argv is the shlex-split hook, the event, then one JSON payload; env matches ({calls[0]['argv']})")
-    check(payload.get('event') == 'wave_done' and payload.get('wave') == 2 and payload.get('dir') == str(dest)
+    check(payload.get('event') == 'ballot_done' and payload.get('wave') == 2 and payload.get('dir') == str(dest)
           and str(payload.get('ts', '')).endswith('Z') and 'T' in payload.get('ts', ''),
           f'hook: payload has event, ts (UTC ISO), dir, and the event fields ({payload})')
     check(calls[0]['stdin'] == '' and not calls[0]['stdin_tty'], 'hook: stdin is /dev/null')
 
     # repros_done is reserved and accepted. Unknown names are logged and ignored.
     check('repros_done' in stage_hook.EVENTS, 'hook: repros_done is in the known events')
+    check('ballot_started' in stage_hook.EVENTS and 'ballot_done' in stage_hook.EVENTS
+          and 'wave' + '_done' not in stage_hook.EVENTS,
+          f'hook: ballot_started and ballot_done replace the per-wave event ({stage_hook.EVENTS})')
     got = emit('repros_done', '{}')
     check(got.returncode == 0 and len(hook_calls(log)) == 2 and hook_calls(log)[1]['event'] == 'repros_done',
           'hook: repros_done is accepted and runs the hook')
@@ -449,7 +452,7 @@ def test_stage_hook(tmp: Path) -> None:
           'hook: an unknown event is logged and ignored, never raised')
     saved = {k: os.environ.pop(k) for k in ('CONCLAVE_STAGE_HOOK', 'COUNCIL_STAGE_HOOK') if k in os.environ}
     try:
-        check(stage_hook.emit('wave_done', {}, dest) is False, 'hook: unset hook runs nothing')
+        check(stage_hook.emit('ballot_done', {}, dest) is False, 'hook: unset hook runs nothing')
         os.environ['COUNCIL_STAGE_HOOK'] = env['CONCLAVE_STAGE_HOOK']
         os.environ['HOOK_LOG'] = str(log)
         check(stage_hook.emit('holistic_done', {'outcome': 'ok'}, dest) is True
@@ -463,13 +466,13 @@ def test_stage_hook(tmp: Path) -> None:
     # (6) Failing hooks never break the caller.
     (dest / 'stage-hook.log').unlink()
     for label, extra, want in (
-            ('exit 1', {'HOOK_EXIT': '1'}, 'wave_done failed: exit 1'),
-            ('missing', {'CONCLAVE_STAGE_HOOK': str(bin_dir / 'no-such-hook')}, 'wave_done failed: not found'),
-            ('not executable', {'CONCLAVE_STAGE_HOOK': str(bin_dir / 'not-exec')}, 'wave_done failed: not executable'),
+            ('exit 1', {'HOOK_EXIT': '1'}, 'ballot_done failed: exit 1'),
+            ('missing', {'CONCLAVE_STAGE_HOOK': str(bin_dir / 'no-such-hook')}, 'ballot_done failed: not found'),
+            ('not executable', {'CONCLAVE_STAGE_HOOK': str(bin_dir / 'not-exec')}, 'ballot_done failed: not executable'),
             ('timeout', {'CONCLAVE_STAGE_HOOK': str(bin_dir / 'sleeper'), 'CONCLAVE_STAGE_HOOK_TIMEOUT': '1'},
-             'wave_done failed: timeout after 1s')):
+             'ballot_done failed: timeout after 1s')):
         start = time.monotonic()
-        got = emit('wave_done', '{"wave": 2}', extra)
+        got = emit('ballot_done', '{"wave": 2}', extra)
         elapsed = time.monotonic() - start
         text = (dest / 'stage-hook.log').read_text() if (dest / 'stage-hook.log').is_file() else ''
         check(got.returncode == 0 and f'stage-hook: {want}' in got.stderr and want in text and elapsed < 8,

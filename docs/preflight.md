@@ -128,7 +128,8 @@ Every payload has `event`, `ts` (UTC, ISO 8601, ending in `Z`), and `dir` (the r
 |---|---|---|
 | `preflight_failed` | Preflight blocked, in either launch path, after `needs-human.md` is written. | `needs_file`, `blocking`, `warnings`; `ballot` from `conclave.sh`, `stack_id` from stack-run |
 | `holistic_done` | stack-run, when the whole-stack wave returns, whether it finished, failed, or did not start. | `stack_id`, `ballot`, `outcome` |
-| `wave_done` | stack-run, after each per-PR wave finishes. Wave numbers match `run.json`, so the first per-PR wave is 2 when the whole-stack ballot ran. A wave that does not start does not fire. | `stack_id`, `wave`, `ballots`, `outcomes` |
+| `ballot_started` | stack-run, when a per-PR ballot takes a slot in the rolling window, after its pre-check passed and the usage cap allowed it. Each ballot is its own wave in `run.json`, so `wave` matches that record; the first per-PR ballot is wave 2 when the whole-stack ballot ran. A ballot that does not start fires neither event. | `stack_id`, `wave`, `ballot`, `pr` |
+| `ballot_done` | stack-run, when that ballot finishes, before its slot goes to the next one. Always after the same ballot's `ballot_started`. Ballots overlap, so events from different ballots interleave. | `stack_id`, `wave`, `ballot`, `pr`, `outcome` |
 | `repros_done` | Reserved. A later repro stage will emit it. Nothing emits it yet; the emitter already accepts the name. | (none yet) |
 | `post_plan_ready` | `conclave.sh --findings`, at the end of the review findings gate, once per run, when `judgment.md` binds `comments to post` (at least one finding gated to post). The chair drafts one comment for each of those findings. | `ballot`, `drafted` (findings gated to post), `decision` (`comments to post`) |
 | `stalled` | stack-run, when a chair subprocess passes `--chair-timeout`. | `stack_id`, `ballot` (or the chair label), `step`, `seconds` |

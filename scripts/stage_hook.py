@@ -32,8 +32,8 @@ if str(_SCRIPT_DIR) not in sys.path:
 from conclave_env import setting  # noqa: E402
 
 # repros_done is reserved for a later repro stage. Nothing emits it yet.
-EVENTS = ('preflight_failed', 'holistic_done', 'wave_done', 'repros_done',
-          'post_plan_ready', 'stalled')
+EVENTS = ('preflight_failed', 'holistic_done', 'ballot_started', 'ballot_done',
+          'repros_done', 'post_plan_ready', 'stalled')
 DEFAULT_TIMEOUT = 30.0
 LOG_NAME = 'stage-hook.log'
 

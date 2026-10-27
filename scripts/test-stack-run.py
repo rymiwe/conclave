@@ -1557,9 +1557,13 @@ def bare_runner(mod, cap: int, count: int, ballot, precheck):
     r = mod.Runner.__new__(mod.Runner)
     r.args = mod.argparse.Namespace(wave_wait=0)
     r.cap, r.poll, r.max_capped, r.lock = cap, 60.0, False, threading.RLock()
-    r.record = {'prs': [{'ballot': f'p-{n}', 'state': 'new', 'outcome': 'pending'} for n in range(1, count + 1)],
+    r.record = {'prs': [{'pr': n, 'ballot': f'p-{n}', 'state': 'new', 'outcome': 'pending'}
+                        for n in range(1, count + 1)],
                 'waves': []}
     r.save = lambda: None
+    # Stage events are recorded, not run: (event, ballot, outcome or None).
+    r.events = []
+    r.stage = lambda event, **fields: r.events.append((event, fields.get('ballot'), fields.get('outcome')))
     r.precheck = precheck
     r.ballot_run = ballot
     return r
@@ -1715,6 +1719,11 @@ def test_rolling_cap_closes_queue(mod) -> None:
     check(result == [''] and started == ['p-1', 'p-2', 'p-3']
           and [p['outcome'] for p in r.record['prs']] == ['ok', 'ok', 'ok', reason, reason],
           f"rolling cap: no ballot launches after the cap and the rest are not started ({result}, {started}, {r.record['prs']})")
+    check(sorted(e[1] for e in r.events if e[0] == 'ballot_started') == ['p-1', 'p-2', 'p-3']
+          and sorted((e[1], e[2]) for e in r.events if e[0] == 'ballot_done') == [('p-1', 'ok'), ('p-2', 'ok'), ('p-3', 'ok')]
+          and all(r.events.index(('ballot_started', b, None)) < [e[:2] for e in r.events].index(('ballot_done', b))
+                  for b in ('p-1', 'p-2', 'p-3')),
+          f'rolling cap: launched ballots fire ballot_started then ballot_done; p-4 and p-5 fire neither ({r.events})')
 
 
 def test_rolling_cap_after_inconclusive_precheck(mod) -> None:
@@ -1828,20 +1837,32 @@ def test_preflight_stack(tmp: Path, mod) -> None:
           and all(c[4] is None for c in f.calls() if c[0] == 'council'),
           'preflight stack-run: with preflight off, phase 1 gets no CONCLAVE_PREFLIGHT_DONE')
 
-    # (8) holistic_done and wave_done; the handoff flag reaches phase 1 only.
+    # (8) holistic_done, then ballot_started and ballot_done per per-PR ballot; the handoff flag reaches phase 1 only.
     f = Fixture(tmp, 'preflight-events')
     f.reconcile_repo()
     log = arm_hook(f)
     got = f.invoke('--no-reconcile')
     events = hook_calls(log)
     payloads = [json.loads(e['payload']) for e in events]
-    check(got.returncode == 0 and [e['event'] for e in events] == ['holistic_done', 'wave_done', 'wave_done'],
-          f'preflight stack-run: holistic_done once, then wave_done per per-PR wave ({[e["event"] for e in events]} {got.stderr.strip()})')
+    names = [e['event'] for e in events]
+    check(got.returncode == 0 and names[:1] == ['holistic_done'] and names.count('holistic_done') == 1
+          and names.count('ballot_started') == 3 and names.count('ballot_done') == 3 and 'wave_done' not in names,
+          f'preflight stack-run: holistic_done once, then ballot_started and ballot_done per per-PR ballot ({names} {got.stderr.strip()})')
     check(payloads and payloads[0].get('ballot') == 'p-stack-stack' and payloads[0].get('outcome') == 'ok',
           f'preflight stack-run: holistic_done payload names the ballot and outcome ({payloads[:1]})')
-    check([p.get('wave') for p in payloads[1:]] == [2, 3] and payloads[1].get('ballots') == ['p-1', 'p-2']
-          and payloads[1].get('outcomes') == ['ok', 'ok'] and payloads[2].get('ballots') == ['p-3'],
-          f'preflight stack-run: wave_done payload has wave, ballots, outcomes ({payloads[1:]})')
+    started = {p.get('ballot'): (i, p) for i, p in enumerate(payloads) if p.get('event') == 'ballot_started'}
+    done = {p.get('ballot'): (i, p) for i, p in enumerate(payloads) if p.get('event') == 'ballot_done'}
+    waves = f.record()['waves']
+    wave_of = {w['ballots'][0]: w['wave'] for w in waves}
+    check(set(started) == set(done) == {'p-1', 'p-2', 'p-3'}
+          and all(started[b][0] < done[b][0] for b in started)
+          and all(started[b][1].get('wave') == done[b][1].get('wave') == wave_of[b] for b in started)
+          and all(started[b][1].get('pr') == done[b][1].get('pr') == int(b[2:]) for b in started)
+          and all(done[b][1].get('outcome') == 'ok' and 'outcome' not in started[b][1] for b in started),
+          f'preflight stack-run: each ballot fires ballot_started then ballot_done with its run.json wave, pr, and outcome ({payloads[1:]} {waves})')
+    # Rolling window (cap 2): the third ballot starts only after one of the first two is done.
+    check(started['p-3'][0] > min(done['p-1'][0], done['p-2'][0]) if {'p-1', 'p-2', 'p-3'} <= set(started) and {'p-1', 'p-2'} <= set(done) else False,
+          f'preflight stack-run: ballot_started for p-3 follows a ballot_done that freed its slot ({[(p.get("event"), p.get("ballot")) for p in payloads]})')
     check(all(p.get('stack_id') == 'stack' and p.get('dir') == str(f.root / 'tmp/council/stack')
               and p.get('event') == e['event'] == e['argv'][1] and str(p.get('ts', '')).endswith('Z')
               for p, e in zip(payloads, events)),
@@ -1896,20 +1917,21 @@ def test_preflight_stack(tmp: Path, mod) -> None:
     got = f.invoke(*PER_PR, '--prs', '1', '--chair-timeout', '1')
     events = hook_calls(log)
     stalled = [json.loads(e['payload']) for e in events if e['event'] == 'stalled']
-    waves = [json.loads(e['payload']) for e in events if e['event'] == 'wave_done']
+    dones = [json.loads(e['payload']) for e in events if e['event'] == 'ballot_done']
     check(got.returncode == 1 and len(stalled) == 1 and stalled[0].get('ballot') == 'p-1'
           and stalled[0].get('step') == 'chair_a' and stalled[0].get('seconds') == 1,
           f'preflight stack-run: stalled fires once on a chair timeout with ballot, step, seconds ({stalled})')
-    check(len(waves) == 1 and waves[0].get('outcomes') == ['failed'] and 'timeout' not in json.dumps(waves),
-          f'preflight stack-run: wave_done reports the failed outcome class, not the error text ({waves})')
+    check(len(dones) == 1 and dones[0].get('ballot') == 'p-1' and dones[0].get('outcome') == 'failed'
+          and 'timeout' not in json.dumps(dones),
+          f'preflight stack-run: ballot_done reports the failed outcome class, not the error text ({dones})')
 
     # (6) A missing hook leaves the run's exit code alone and logs to stage-hook.log.
     f = Fixture(tmp, 'preflight-hook-missing')
     f.env['CONCLAVE_STAGE_HOOK'] = str(f.base / 'no-such-hook')
     got = f.invoke(*PER_PR, '--prs', '1')
     hook_log = f.root / 'tmp/council/stack/stage-hook.log'
-    check(got.returncode == 0 and hook_log.is_file() and 'wave_done failed: not found' in hook_log.read_text()
-          and 'stage-hook: wave_done failed: not found' in got.stderr,
+    check(got.returncode == 0 and hook_log.is_file() and 'ballot_started failed: not found' in hook_log.read_text()
+          and 'stage-hook: ballot_done failed: not found' in got.stderr,
           f'preflight stack-run: a missing hook is logged and the run still exits 0 ({got.returncode} {got.stderr.strip()})')
 
 

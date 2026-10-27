@@ -1330,6 +1330,19 @@ class Runner:
         outcome = row['outcome']
         return self.whole_failed(outcome if outcome.startswith('failed:') else f'failed: {outcome}')
 
+    def staged_ballot(self, row: dict, wave: int) -> None:
+        """Run one per-PR ballot between its ballot_started and ballot_done stage events.
+
+        Both fire on the worker thread, so a ballot's done never precedes its started.
+        A ballot the cap or the pre-check declines never runs here and fires neither.
+        """
+        fields = {'wave': wave, 'ballot': row['ballot'], 'pr': row['pr']}
+        self.stage('ballot_started', **fields)
+        try:
+            self.ballot_run(row)
+        finally:
+            self.stage('ballot_done', **fields, outcome=outcome_class(row['outcome']))
+
     def per_pr_waves(self) -> str:
         """Per-PR ballots bottom up, at most self.cap in flight. Return why the rest stopped, or ''.
 
@@ -1361,7 +1374,7 @@ class Runner:
                     if self.max_capped:
                         entry.update(precheck='not started', message=MAX_CAPPED)
                         break
-                    running.add(pool.submit(self.ballot_run, queue.popleft()))
+                    running.add(pool.submit(self.staged_ballot, queue.popleft(), entry['wave']))
                 self.warn_if_inconclusive(entry)
             for future in running:
                 future.result()

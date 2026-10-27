@@ -724,7 +724,7 @@ When the pre-check blocks, no new ballot starts. Ballots already running finish;
 
 `CONCLAVE_WAVE_PRECHECK=0` skips the pre-check. It is for tests and for an escape when the route is wrong. `CONCLAVE_WAVE_POLL` sets the seconds between checks; tests use it.
 
-Preflight runs once before wave 1 with the same route call, so capped seats stop the run at minute 0 with exit 3. With `--wave-wait`, capped seats are only a preflight warning and the first wave waits as above. Each per-PR wave fires the `wave_done` stage event, the whole-stack wave fires `holistic_done`, and a chair timeout fires `stalled`. See [`docs/preflight.md`](preflight.md).
+Preflight runs once before wave 1 with the same route call, so capped seats stop the run at minute 0 with exit 3. With `--wave-wait`, capped seats are only a preflight warning and the first wave waits as above. Each per-PR ballot fires `ballot_started` when it takes a slot and `ballot_done` when it finishes, the whole-stack wave fires `holistic_done`, and a chair timeout fires `stalled`. See [`docs/preflight.md`](preflight.md).
 
 ### Per ballot
 
