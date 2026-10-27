@@ -94,7 +94,17 @@ args = sys.argv[1:]
 with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['council', args, os.environ.get('COUNCIL_CHAIR_MODEL'), os.environ.get('CONCLAVE_CHAIR')])+'\\n')
 d = pathlib.Path(os.environ['FIXTURE_ROOT'])/'tmp/council'/args[0]
 d.mkdir(parents=True, exist_ok=True)
-if '--dry-run' in args: sys.exit(0)
+if '--dry-run' in args:
+    if args[0].endswith(os.environ.get('DRY_HOLD_PR', 'never')):
+        # Slow dry run: hold until the DRY_HOLD_FOR ballot is finished, so its phase 1 has already run.
+        import time
+        run_json = pathlib.Path(os.environ['FIXTURE_ROOT'])/'tmp/council/stack/run.json'
+        for _ in range(2000):
+            rows = json.loads(run_json.read_text()).get('prs', []) if run_json.exists() else []
+            if any(r['ballot'] == os.environ['DRY_HOLD_FOR'] and r['step'] == 'finished' for r in rows):
+                break
+            time.sleep(0.01)
+    sys.exit(0)
 if '--findings' in args:
     (d/'judgment.md').write_text('head_oid: ' + 'a'*40 + '\\n')
     (d/'decide.md').write_text('f1 — **what breaks, for whom**: TODO(chair)\\n**how sure**: read\\n**later PRs that change this file**: none\\n**recommend**: TODO(chair)\\n')
@@ -121,12 +131,12 @@ else:
         pathlib.Path(os.environ['CHILD_PID']).write_text(str(os.getpid()))
         time.sleep(60)
     if args[0].endswith(os.environ.get('OPUS_CAP_PR', 'never')) and os.environ.get('CAP_AFTER'):
-        # Slow phase 1: hold the usage-limit failure until the CAP_AFTER ballot has started chair A.
+        # Slow phase 1: hold the usage-limit failure until the CAP_AFTER ballot reaches CAP_AFTER_STEP.
         import time
         run_json = pathlib.Path(os.environ['FIXTURE_ROOT'])/'tmp/council/stack/run.json'
         for _ in range(2000):
             rows = json.loads(run_json.read_text()).get('prs', []) if run_json.exists() else []
-            if any(r['ballot'] == os.environ['CAP_AFTER'] and r['step'] == 'chair A' for r in rows):
+            if any(r['ballot'] == os.environ['CAP_AFTER'] and r['step'] == os.environ.get('CAP_AFTER_STEP', 'chair A') for r in rows):
                 break
             time.sleep(0.01)
     if args[0].endswith(os.environ.get('OPUS_CAP_PR', 'never')):
@@ -1652,16 +1662,19 @@ def test_rolling(mod) -> None:
 def test_max_cap_rolling(tmp: Path, mod) -> None:
     """Cap 2: p-1's slow phase 1 hits the usage limit after p-2 freed a slot and p-3 launched."""
     reason = f'failed: {mod.MAX_CAPPED}'
-    f = Fixture(tmp, 'max-cap-rolling')
-    f.env.update(OPUS_CAP_PR='-1', CAP_AFTER='p-3', CHAIR_A_HOLD_PR='-3', CHAIR_A_HOLD_FOR='p-1',
-                 OPUS_JSON='{"is_error":true,"result":"Claude usage limit reached"}')
-    proc = f.invoke('--no-whole-stack', '--no-reconcile', '--wave-cap', '2')
-    rows = f.record()['prs']
-    voters = [c[1][0] for c in f.calls() if c[0] == 'council' and '--dry-run' not in c[1] and '--findings' not in c[1]]
-    check(proc.returncode == 1 and rows[1]['outcome'] == 'ok' and rows[0]['outcome'].startswith('failed: phase 1 exit'),
-          f"rolling cap: p-1 fails on the limit and p-2 finishes ({proc.returncode}, {[r['outcome'] for r in rows]}, {proc.stderr[-300:]})")
-    check(voters == ['p-1', 'p-2'] and rows[2]['outcome'] == reason,
-          f"rolling cap: p-3 launched before the cap starts no phase 1 and is marked not started ({voters}, {rows[2]['outcome']})")
+    # p-3 is held in chair A, or in its dry run, until p-1's phase 1 has set the cap.
+    holds = {'chair A': dict(CHAIR_A_HOLD_PR='-3', CHAIR_A_HOLD_FOR='p-1'),
+             'dry run': dict(DRY_HOLD_PR='-3', DRY_HOLD_FOR='p-1', CAP_AFTER_STEP='phase 1')}
+    for where, hold in holds.items():
+        f = Fixture(tmp, 'max-cap-rolling-' + where.replace(' ', '-'))
+        f.env.update(OPUS_CAP_PR='-1', CAP_AFTER='p-3', OPUS_JSON='{"is_error":true,"result":"Claude usage limit reached"}', **hold)
+        proc = f.invoke('--no-whole-stack', '--no-reconcile', '--wave-cap', '2')
+        rows = f.record()['prs']
+        voters = [c[1][0] for c in f.calls() if c[0] == 'council' and '--dry-run' not in c[1] and '--findings' not in c[1]]
+        check(proc.returncode == 1 and rows[1]['outcome'] == 'ok' and rows[0]['outcome'].startswith('failed: phase 1 exit'),
+              f"rolling cap ({where}): p-1 fails on the limit and p-2 finishes ({proc.returncode}, {[r['outcome'] for r in rows]}, {proc.stderr[-300:]})")
+        check(sorted(voters) == ['p-1', 'p-2'] and rows[2]['outcome'] == reason,
+              f"rolling cap ({where}): p-3 launched before the cap starts no phase 1 and is marked not started ({voters}, {rows[2]['outcome']})")
 
 
 def test_rolling_cap_closes_queue(mod) -> None:

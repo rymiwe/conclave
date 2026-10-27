@@ -941,7 +941,6 @@ class Runner:
                 # A ballot launched before the cap is seen can reach here after another ballot's phase 1 set it.
                 self.refuse_if_capped()
                 flags, percent = self.flags()
-                self.refuse_if_capped()
                 row.update(claude_flags=flags, fable_weekly_percent=percent)
                 self.mark_step(row, 'phase 1')
                 self.save()
@@ -950,6 +949,7 @@ class Runner:
                     with (self.logs / f"{row['ballot']}-phase1.out").open('w') as out, (self.logs / f"{row['ballot']}-phase1.err").open('w') as err:
                         env = dict(os.environ, **self.target_env(row))
                         for args in self.phase_commands(row['ballot'], row['pr'], flags, row.get('target')):
+                            self.refuse_if_capped()
                             rc = self.process(args, cwd=self.repo, stdout=out, stderr=err, env=env).returncode
                             if rc:
                                 raise RuntimeError(f'phase 1 exit {rc}: {shlex.join(args)}')
