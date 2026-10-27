@@ -27,19 +27,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DIFF_HEADER = re.compile(rb"^diff --git (.*)$")
-_UNQUOTED_PAIR = re.compile(rb"^a/(.*) b/(.*)$")
+_NEW_SIDE = (
+    re.compile(rb'^\+\+\+ (?:"b/((?:[^"\\]|\\.)*)"|b/(.*?))\t?$'),
+    re.compile(rb'^rename to (?:"((?:[^"\\]|\\.)*)"|(.*))$'),
+)
 _C_ESCAPES = {b"n": b"\n", b"t": b"\t", b'"': b'"', b"\\": b"\\", b"a": b"\a",
               b"b": b"\b", b"f": b"\f", b"r": b"\r", b"v": b"\v"}
 GENERATED = re.compile(
-    r"(^|/)(schema\.rb|structure\.sql|schema\.sql|package-lock\.json|"
-    r"npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|go\.sum)$"
+    r"(^|/)db/(schema\.rb|structure\.sql|schema\.sql)$"
+    r"|(^|/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|go\.sum)$"
     r"|\.lock$|(^|/)db/migrate/|(^|/)migrations/|(^|/)(generated|dist|vendor)/"
     r"|\.min\.(js|css)$|\.snap$"
 )
 TESTISH = re.compile(
     r"(^|/)(spec|specs|test|tests|__tests__|fixtures|e2e)/"
     r"|_(spec|test)\.[A-Za-z0-9]+$|\.(spec|test)\.[A-Za-z0-9]+$"
-    r"|(^|/)test_[^/]*$"
+    r"|(^|/)test_[^/]*\.py$"
 )
 CLASS_ORDER = ("source", "spec", "generated")
 CLASS_LABEL = {
@@ -98,18 +101,30 @@ def _c_unquote(raw: bytes) -> bytes:
     return bytes(out)
 
 
-def header_path(rest: bytes) -> str:
+def header_path(rest: bytes, body: bytes = b"") -> str:
     """The new-side path of a `diff --git` line (what follows `diff --git `).
 
-    Handles git's quoting for paths with spaces or non-ASCII bytes. A header
-    that matches no known shape is still a section boundary, named by its text.
+    Handles git's quoting for paths with spaces or non-ASCII bytes. An unquoted
+    path may itself contain ` b/`, so the separator is the one whose a-side and
+    b-side agree. A rename has two different sides; its path comes from the
+    `+++` or `rename to` line in body. A header that matches no known shape is
+    still a section boundary, named by its text.
     """
     quoted = re.search(rb'"b/((?:[^"\\]|\\.)*)"$', rest)
     if quoted:
         return _c_unquote(quoted.group(1)).decode("utf-8", "replace")
-    m = _UNQUOTED_PAIR.match(rest)
-    if m:
-        return m.group(2).decode("utf-8", "replace")
+    if rest.startswith(b"a/"):
+        for m in re.finditer(rb" b/", rest):
+            if rest[2 : m.start()] == rest[m.end() :]:
+                return rest[m.end() :].decode("utf-8", "replace")
+    for line in body.splitlines()[1:]:
+        if line.startswith((b"@@", b"Binary files ")):
+            break
+        for pat in _NEW_SIDE:
+            m = pat.match(line)
+            if m:
+                raw = _c_unquote(m.group(1)) if m.group(1) is not None else m.group(2)
+                return raw.decode("utf-8", "replace")
     tail = rest.rsplit(b" b/", 1)
     if len(tail) == 2:
         return tail[1].decode("utf-8", "replace")
@@ -119,18 +134,20 @@ def header_path(rest: bytes) -> str:
 def parse_diff(diff: bytes) -> list[Section]:
     sections: list[Section] = []
     start = None
-    path = ""
+    rest = b""
     pos = 0
     for line in diff.splitlines(keepends=True):
         m = DIFF_HEADER.match(line.rstrip(b"\r\n"))
         if m:
             if start is not None:
-                sections.append(_section(len(sections), path, diff[start:pos]))
+                body = diff[start:pos]
+                sections.append(_section(len(sections), header_path(rest, body), body))
             start = pos
-            path = header_path(m.group(1))
+            rest = m.group(1)
         pos += len(line)
     if start is not None:
-        sections.append(_section(len(sections), path, diff[start:pos]))
+        body = diff[start:pos]
+        sections.append(_section(len(sections), header_path(rest, body), body))
     elif diff.strip():
         sections.append(_section(0, "(unparsed diff)", diff))
     return sections
@@ -181,6 +198,9 @@ def fill(order: list[Section], room: int) -> int:
 
 
 def short(path: str) -> str:
+    """A path as one inert line of the coverage list: a filename cannot add lines."""
+    path = (path.replace("\\", "\\\\").replace('"', '\\"')
+            .replace("\n", "\\n").replace("\r", "\\r"))
     return path if len(path) <= 120 else "..." + path[-117:]
 
 

@@ -567,7 +567,10 @@ and the number of files cut.
 - Under the cap, the packet is the brief and the whole diff, as before.
 - Over the cap, files are kept whole in this priority: the brief, then the
   changed source diff, then the spec and test diff, then generated files
-  (schema, migrations, lockfiles). A lower class gets only what the higher
+  (the Rails dumps `db/schema.rb`, `db/structure.sql` and `db/schema.sql`,
+  migrations, lockfiles). Specs and tests are spec directories, `_spec.` and
+  `_test.` style suffixes, and pytest's `test_*.py`; a Ruby file named
+  `test_runs_controller.rb` is source. A lower class gets only what the higher
   classes left. One file diff bigger than the cap is cut at a hunk boundary and
   marked truncated.
 - When files would be cut and both source and tests changed, the packet splits
@@ -578,6 +581,9 @@ and the number of files cut.
   one that worked is a `note:` line in `errors.md`, and its section says
   `NOT REVIEWED`. Both failing skips the leg like any failed Argon. A split
   that cuts nothing writes no `.partial` and the summary says so.
+- A cut path is listed on one line: backslash and double quote are escaped and
+  CR and LF are written as `\r` and `\n`, so a filename cannot add entries to
+  the coverage list.
 - A packet that still cuts files names them in a `## Packet coverage` section
   inside the packet, and the same list goes to `voter-argon.partial`. The first
   line of that file is a `WARNING: argon saw a PARTIAL review packet` line with

@@ -386,9 +386,105 @@ def test_stale_partial_cleared(work: Path):
     check(not [n for n in stale if n in left], f"stale argon packet files are removed at run start ({left})")
 
 
+def fake_diff(files: dict[str, int]) -> bytes:
+    """A unified diff that adds about size bytes to each path, in the given order."""
+    out = []
+    for path, size in files.items():
+        body = body_for(path, size)
+        out.append(f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+                   f"@@ -1 +1,{body.count(chr(10))} @@\n" + "".join("+" + l + "\n" for l in body.splitlines()))
+    return "".join(out).encode()
+
+
+def plan_of(work: Path, files: dict[str, int], brief_bytes: int, diff: bytes = b""):
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import argon_packet
+    res = argon_packet.plan(b"B" * brief_bytes, diff or fake_diff(files), MAX, work / "plan")
+    return res, [read(work / "plan" / p["path"]) for p in res["packets"]]
+
+
+def test_graphql_schema_is_source(work: Path):
+    """Only the Rails dumps are generated; app/graphql/schema.rb is hand-written source."""
+    files = {"app/graphql/schema.rb": 40000, "app/models/user.rb": 130000, "db/schema.rb": 5000}
+    res, ps = plan_of(work, files, 10000)
+    kinds = {f["path"]: f["class"] for p in res["packets"] for f in p["files"] + p["cut"]}
+    check(kinds.get("app/graphql/schema.rb") == "source" and kinds.get("db/schema.rb") == "generated",
+          f"app/graphql/schema.rb is source and db/schema.rb is generated ({kinds})")
+    check(len(ps) == 1 and "+++ b/app/graphql/schema.rb" in ps[0] and "(generated; not shown" not in
+          "".join(l for l in res["warning"].splitlines() if "graphql" in l),
+          "an over-cap packet shows app/graphql/schema.rb as source, not as a cut generated file")
+
+
+def test_test_prefix_only_for_runner_files(work: Path):
+    """test_runs_controller.rb is product code; test_*.py is a pytest file."""
+    files = {"app/controllers/test_runs_controller.rb": 60000, "app/models/user.rb": 60000,
+             "spec/models/user_spec.rb": 60000}
+    res, ps = plan_of(work, files, 1000)
+    check(res["mode"] == "split" and len(ps) == 2, f"fixture: the over-cap diff splits ({res['mode']})")
+    check("+++ b/app/controllers/test_runs_controller.rb" in ps[0]
+          and "+++ b/app/controllers/test_runs_controller.rb" not in ps[1],
+          "test_runs_controller.rb rides in the source packet, not the spec packet")
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import argon_packet
+    check(argon_packet.classify("pkg/test_refund.py") == "spec"
+          and argon_packet.classify("app/controllers/test_runs_controller.rb") == "source",
+          "the test_ prefix marks pytest files only")
+
+
+def test_b_slash_in_dir_name(work: Path):
+    """An unquoted path may contain ` b/`; the header splits where both sides agree."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import argon_packet
+    files = {"spec/my b/helper.rb": 3000, "app/my b/user.rb": 3000}
+    repo = make_repo(work, files)
+    diff = subprocess.run(["git", "-C", str(repo), "diff", "HEAD"], capture_output=True, check=True).stdout
+    check(b"diff --git a/spec/my b/helper.rb b/spec/my b/helper.rb" in diff,
+          "fixture: git leaves a path with ` b/` unquoted")
+    secs = argon_packet.parse_diff(diff)
+    got = [(s.path, s.kind) for s in secs]
+    check(got == [("app/my b/user.rb", "source"), ("spec/my b/helper.rb", "spec")],
+          f"paths containing ` b/` parse whole and classify by their real directory: {got}")
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
+    subprocess.run(["git", "-C", str(repo), "commit", "-qam", "body"], check=True, env=env)
+    subprocess.run(["git", "-C", str(repo), "mv", "spec/my b/helper.rb", "spec/my b/helper2.rb"], check=True)
+    with open(repo / "spec/my b/helper2.rb", "a", encoding="utf-8") as fh:
+        fh.write("extra\n")
+    (repo / "app/my b/user.rb").unlink()
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    diff = subprocess.run(["git", "-C", str(repo), "diff", "-M", "HEAD"], capture_output=True, check=True).stdout
+    got = [s.path for s in argon_packet.parse_diff(diff)]
+    check(got == ["app/my b/user.rb", "spec/my b/helper2.rb"],
+          f"a rename takes its path from the +++ line and a deletion keeps its own: {got}")
+    pure = (b"diff --git a/x b/old.rb b/x b/new.rb\nsimilarity index 100%\n"
+            b"rename from x b/old.rb\nrename to x b/new.rb\n")
+    got = [s.path for s in argon_packet.parse_diff(pure)]
+    check(got == ["x b/new.rb"], f"a pure rename takes its path from the rename-to line: {got}")
+
+
+def test_cut_path_cannot_forge_coverage(work: Path):
+    """A filename with a newline must not add an entry to the coverage list."""
+    forged = "vendor/a.lock\n- app/billing.rb (changed source; not shown, 99999 bytes)"
+    files = {forged: 5000, "app/user.rb": 8000}
+    ballot, proc = run_leg(work, files, {"CONCLAVE_ARGON_MAX_BYTES": "16000"})
+    partial = read(ballot / "voter-argon.partial")
+    ps = prompts(ballot)
+    check("vendor/a.lock" in partial and len(ps) == 1, f"fixture: the generated file is cut ({partial[:80]!r})")
+    lists = partial + (ps[0] if ps else "") + read(ballot / "errors.md")
+    check(not re.search(r"^(note: )?- app/billing\.rb", lists, re.M),
+          "no forged app/billing.rb entry in .partial, the packet coverage list or errors.md")
+    check("- vendor/a.lock\\n- app/billing.rb (changed source; not shown, 99999 bytes) (generated; not shown" in partial,
+          "the cut path is listed on one line with its newline escaped")
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import argon_packet
+    check(argon_packet.short('a\\b"c\rd') == 'a\\\\b\\"c\\rd', "backslash, quote and CR are escaped")
+
+
 TESTS = [test_small, test_split_clean, test_split_with_generated, test_large, test_priority,
          test_oversize_file, test_setting, test_second_packet_fails, test_both_fail,
-         test_pr_context, test_brief_floor, test_quoted_paths, test_stale_partial_cleared]
+         test_pr_context, test_brief_floor, test_quoted_paths, test_stale_partial_cleared,
+         test_graphql_schema_is_source, test_test_prefix_only_for_runner_files, test_b_slash_in_dir_name,
+         test_cut_path_cannot_forge_coverage]
 
 
 def main():
