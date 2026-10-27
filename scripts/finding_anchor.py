@@ -407,6 +407,24 @@ class GhError(Exception):
         self.message = message
 
 
+def _json_pages(text: str) -> list:
+    """Flatten gh --paginate output. With more than one page gh prints one JSON
+    array per page back to back, which json.loads rejects as "Extra data"."""
+    decoder = json.JSONDecoder()
+    rows: list = []
+    pos, text = 0, text or ""
+    while True:
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        if pos >= len(text):
+            break
+        page, pos = decoder.raw_decode(text, pos)
+        if not isinstance(page, list):
+            raise ValueError("expected a list")
+        rows.extend(page)
+    return rows
+
+
 def fetch_files(repo: str, number: int) -> dict[str, str]:
     """filename -> patch. Raises GhError. Does not retry."""
     proc = subprocess.run(
@@ -418,11 +436,9 @@ def fetch_files(repo: str, number: int) -> dict[str, str]:
         detail = (proc.stderr or proc.stdout).strip() or f"exit {proc.returncode}"
         raise GhError(detail)
     try:
-        rows = json.loads(proc.stdout or "null")
-    except json.JSONDecodeError as exc:
+        rows = _json_pages(proc.stdout)
+    except (json.JSONDecodeError, ValueError) as exc:
         raise GhError(f"non-JSON from pulls/{number}/files: {exc}") from exc
-    if not isinstance(rows, list):
-        raise GhError(f"pulls/{number}/files: expected a list")
     files: dict[str, str] = {}
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("filename"), str):

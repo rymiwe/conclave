@@ -350,12 +350,39 @@ def test_fresh_ballot_has_no_judgment(tmp: Path) -> None:
           f"a fresh ballot with no judgment.md is anchored and re-anchored ({proc.returncode} {proc.stderr.strip()} {anchors})")
 
 
+def test_paginated_files() -> None:
+    """The gate's third-round finding: gh --paginate prints one array per page."""
+    def page(*names: str) -> str:
+        return json.dumps([{"filename": n, "patch": "@@ -0,0 +1 @@\n+x"} for n in names])
+    check(finding_anchor._json_pages(page("a") + "\n" + page("b", "c") + "\n") == json.loads(page("a", "b", "c")),
+          "two pages back to back flatten into one list")
+    check(finding_anchor._json_pages("") == [], "empty output is no files")
+    real = finding_anchor.subprocess.run
+    finding_anchor.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(
+        a, 0, stdout=page("a.rb") + "\n" + page("b.rb") + "\n", stderr="")
+    try:
+        files = finding_anchor.fetch_files("example/widgets", 1)
+    finally:
+        finding_anchor.subprocess.run = real
+    check(sorted(files) == ["a.rb", "b.rb"], f"fetch_files reads a file from every page ({sorted(files)})")
+    finding_anchor.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="{}", stderr="")
+    try:
+        finding_anchor.fetch_files("example/widgets", 1)
+        refused = False
+    except finding_anchor.GhError:
+        refused = True
+    finally:
+        finding_anchor.subprocess.run = real
+    check(refused, "a non-list page is a GhError")
+
+
 def main() -> None:
     test_labels()
     test_right_lines_moved()
     test_resolve()
     test_how_it_posts()
     test_exact_added_lines_only()
+    test_paginated_files()
     with tempfile.TemporaryDirectory(prefix="finding-anchor-tests-") as raw:
         test_cli(Path(raw))
         test_target_missing_from_stack(Path(raw))
