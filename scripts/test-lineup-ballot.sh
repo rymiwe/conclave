@@ -624,6 +624,22 @@ check "claude plus unknown co-author builder vendor is anthropic" [ "$(review_re
 check "ambiguous trailers print one line saying why" [ "$(grep -c 'trailers are ambiguous' "$work/amb.err")" -eq 1 ]
 check "ambiguous line names the vendor" grep -q 'excluding every vendor they name (anthropic)' "$work/amb.err"
 
+# An ambiguous trailer naming a vendor with no seat stops the review (fail
+# closed), the way merge-gate refuses with exit 3.
+unmapped_rc=0
+(
+  review_pr_load_facts() { return 0; }
+  KIND=review
+  HEADER_AUTHOR=""
+  REVIEW_PR_FACT_VENDOR=ambiguous
+  REVIEW_PR_FACT_VENDORS="anthropic mistral"
+  unmapped_args=()
+  review_append_author_args unmapped_args
+  exit 0
+) 2>"$work/unmapped.err" || unmapped_rc=$?
+check "unmapped ambiguous vendor stops the review" [ "$unmapped_rc" -eq 3 ]
+check "unmapped ambiguous vendor error names the vendor" grep -q "no seat for vendor 'mistral'" "$work/unmapped.err"
+
 write_pr_json 'doc = {
   "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss", "type": "User"},
   "commits": [{"messageHeadline": "Seat",

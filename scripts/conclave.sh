@@ -1541,7 +1541,12 @@ review_append_author_args() {
     for extra in ${REVIEW_PR_FACT_VENDORS#* }; do
       [ "$extra" = "$vendor" ] && continue
       seat="$(review_vendor_seat "$extra")"
-      [ -n "$seat" ] && _dest+=(--exclude-seat "$seat")
+      if [ -z "$seat" ]; then
+        # No seat means it cannot be excluded. Stop rather than fail open.
+        echo "conclave: refused: no seat for vendor '$extra' named by ambiguous PR trailers; stopping the review" >&2
+        exit 3
+      fi
+      _dest+=(--exclude-seat "$seat")
     done
   fi
   # This call is done. A later re-seat may ask gh if this one failed.
