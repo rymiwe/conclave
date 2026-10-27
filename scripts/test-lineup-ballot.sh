@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The default ballot is seat-usage --route lineup. CONCLAVE_SEAT_USAGE is the
-# stub. A missing binary, a failed run, or mode ask keeps the fixed default.
+# stub. A missing binary, a failed run, or mode ask keeps the fixed default,
+# except on a review whose PR trailers are ambiguous, which stops (exit 3).
 # No live router and no live model call.
 set -eu
 
@@ -690,6 +691,22 @@ check "failed seat-usage error names the vendors and its stderr" \
 rc="$(ambiguous_route "anthropic xai" "$work/bad.json" 0 "")"
 check "non-json seat-usage stops an ambiguous review" [ "$rc" -eq 3 ]
 check "non-json seat-usage error names a vendor" grep -q "did not report excluding vendor 'anthropic'" "$work/ambiguous.err"
+# A missing seat-usage excluded nobody either. Only an ambiguous review stops;
+# "missing review router" above keeps the fixed default.
+missing_rc=0
+(
+  review_pr_load_facts() { return 0; }
+  reset_pr_route
+  REVIEW_PR_FACT_VENDOR=ambiguous
+  REVIEW_PR_FACT_VENDORS="anthropic xai"
+  CONCLAVE_SEAT_USAGE="$work/missing-seat-usage"
+  export CONCLAVE_SEAT_USAGE
+  apply review
+) >/dev/null 2>"$work/ambiguous.err" || missing_rc=$?
+check "missing seat-usage stops an ambiguous review" [ "$missing_rc" -eq 3 ]
+check "missing seat-usage error names the vendors" \
+  grep -qx "conclave: refused: seat-usage is missing ($work/missing-seat-usage) while ambiguous PR trailers named anthropic, xai; stopping the review" "$work/ambiguous.err"
+check "missing seat-usage error is one line" [ "$(grep -c 'conclave: refused' "$work/ambiguous.err")" -eq 1 ]
 old_rc=0
 (
   review_pr_load_facts() { return 0; }

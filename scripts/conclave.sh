@@ -1651,7 +1651,8 @@ lineup_parse_voters() {
 
 load_lineup_ballot() {
   # Stops the run (exit 3) only when ambiguous trailers named a vendor and
-  # seat-usage did not show it excluded or seated no lineup without it. The control plane already ran the lineup.
+  # seat-usage is missing, did not show it excluded, or seated no lineup
+  # without it. The control plane already ran the lineup.
   # A brief author: header naming a known family passes --author, and on
   # review also --builder-vendor for that family. With no header, review
   # passes --builder-vendor only when a PR commit trailer names one model.
@@ -1665,13 +1666,6 @@ load_lineup_ballot() {
   # nobody. A pace-picked builder is not excluded. Audit has no default author.
   local bin raw parsed status legs args tail name why line rest
   bin="$(conclave_env SEAT_USAGE "$HOME/.local/bin/seat-usage")"
-  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
-    BALLOT_SOURCE=fallback
-    BALLOT_SOURCE_NOTE="seat-usage missing"
-    ballot_use_fixed_default
-    note_review_route_fallback
-    return 0
-  fi
   args=(--route lineup --json --kind "$KIND")
   if [ "$KIND" = "review" ]; then
     if [ -z "${REPO:-}" ] && [ -n "${FLAG_REPO:-}" ]; then
@@ -1686,6 +1680,19 @@ load_lineup_ballot() {
     if [ -n "${REPO:-}" ]; then
       args+=(--repo "$REPO")
     fi
+  fi
+  # After the author args, which set REVIEW_EXCLUDED_VENDORS: the fixed
+  # fallback could seat a vendor ambiguous trailers named.
+  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+    if [ -n "${REVIEW_EXCLUDED_VENDORS:-}" ]; then
+      echo "conclave: refused: seat-usage is missing (${bin:-unset}) while ambiguous PR trailers named ${REVIEW_EXCLUDED_VENDORS// /, }; stopping the review" >&2
+      exit 3
+    fi
+    BALLOT_SOURCE=fallback
+    BALLOT_SOURCE_NOTE="seat-usage missing"
+    ballot_use_fixed_default
+    note_review_route_fallback
+    return 0
   fi
   local err
   err="$(mktemp)"
