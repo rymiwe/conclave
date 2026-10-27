@@ -547,6 +547,68 @@ is empty. A version bump can land unattended when auto-update is on. A persona
 read error does not kill a run; check `cancellation_category` before blaming
 it. The script does not write into `~/.grok`.
 
+## Argon packet size
+
+The review Argon leg is packet-first. `review_run_argon` sends the reviewer
+brief and `git diff HEAD` to `agy` as one stream-json message. The diff is run
+with `a/` and `b/` prefixes, no color, and `diff.mnemonicPrefix` and
+`diff.noprefix` off, so user or repo settings cannot change the headers the
+packet script parses. `agy` stops
+reading near 190 KB (about 80K input tokens) and reports no error: prompts
+from 211 KB to 989 KB all plateau at 60-80K input tokens. The diff is
+path-ordered, so a long packet silently loses the specs and tests.
+
+`scripts/argon_packet.py` sizes the packet before the leg runs.
+`CONCLAVE_ARGON_MAX_BYTES` is the cap (default 150000, `COUNCIL_ARGON_MAX_BYTES`
+is the alias; a value that is not a positive integer falls back to the default).
+Every run writes one line to `voter-argon.packet.txt` and to stderr with the
+mode, the full packet bytes, the cap, the packet count and each packet's bytes,
+and the number of files cut.
+
+- The Argon brief carries about 10 KB of PR context, not 50 KB, and drops the
+  check-run JSON. Other legs keep the 50 KB context.
+- Under the cap, the packet is the brief and the whole diff, as before.
+- Over the cap, files are kept whole in this priority: the brief, then the
+  changed source diff, then the spec and test diff, then generated files
+  (the Rails dumps `db/schema.rb`, `db/structure.sql` and `db/schema.sql`,
+  migrations, lockfiles). Specs and tests are spec directories, `_spec.` and
+  `_test.` style suffixes, and pytest's `test_*.py`; a Ruby file named
+  `test_runs_controller.rb` is source. A lower class gets only what the higher
+  classes left. One file diff bigger than the cap is cut at a hunk boundary and
+  marked truncated.
+- When files would be cut and both source and tests changed, the packet splits
+  in two: packet 1 is the source diff (and generated files if they fit), packet
+  2 is the spec and test diff, each under the cap. Argon runs on each, and
+  `voter-argon.md` holds both reports under `## Packet 1 of 2` and
+  `## Packet 2 of 2`. Findings are not de-duplicated. A packet that fails beside
+  one that worked is a `note:` line in `errors.md`, and its section says
+  `NOT REVIEWED`. Both failing skips the leg like any failed Argon. A split
+  that cuts nothing writes no `.partial` and the summary says so.
+- A cut path is listed on one line: backslash and double quote are escaped and
+  CR and LF are written as `\r` and `\n`, so a filename cannot add entries to
+  the coverage list.
+- A packet that still cuts files names them in a `## Packet coverage` section
+  inside the packet, and the same list goes to `voter-argon.partial`. The first
+  line of that file is a `WARNING: argon saw a PARTIAL review packet` line with
+  the cap setting and the 190 KB limit. It also goes to `errors.md` as `note:`
+  lines (a partial packet does not fail the ballot), to the top of
+  `voter-argon.md`, and to the phase-1 summary. Argon is told it did not see the
+  cut files. `.partial` and those `note:` lines are written only after a packet
+  returns a report; when every packet is skipped, the leg leaves no `.partial`.
+- No packet goes out over the cap. The coverage list is measured before the
+  files are placed, at every list length down to the `and N more files` count
+  line, and the packet that shows the most of the diff is sent, so a file that
+  fits beside a shorter list is not cut. If the brief, the packet label, and
+  that count still do not fit, or no file of the diff fits beside them, the leg
+  fails with `argon: cannot write packet prompt: ... no packet fits` in
+  `voter-argon.fail`, and no packet is sent. A diff with files is never sent
+  as an empty diff fence.
+- `voter-argon.skipped` from an earlier run is removed with the other Argon
+  files at the start of the review and of the leg, and again before each
+  packet. A packet counts as failed only when its own `run_argon` wrote it.
+
+Design and mixed Argon packets are not changed by this.
+
 ## Already raised
 
 Before consolidation, read what the author already answered. Do not put any of
