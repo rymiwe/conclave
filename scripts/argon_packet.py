@@ -26,7 +26,10 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DIFF_HEADER = re.compile(rb"^diff --git a/(.*) b/(.*)$")
+DIFF_HEADER = re.compile(rb"^diff --git (.*)$")
+_UNQUOTED_PAIR = re.compile(rb"^a/(.*) b/(.*)$")
+_C_ESCAPES = {b"n": b"\n", b"t": b"\t", b'"': b'"', b"\\": b"\\", b"a": b"\a",
+              b"b": b"\b", b"f": b"\f", b"r": b"\r", b"v": b"\v"}
 GENERATED = re.compile(
     r"(^|/)(schema\.rb|structure\.sql|schema\.sql|package-lock\.json|"
     r"npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|go\.sum)$"
@@ -72,6 +75,47 @@ class Section:
         return len(self.body)
 
 
+def _c_unquote(raw: bytes) -> bytes:
+    """Undo git's C-style path quoting (the text between the double quotes)."""
+    out = bytearray()
+    i = 0
+    while i < len(raw):
+        ch = raw[i : i + 1]
+        if ch != b"\\" or i + 1 >= len(raw):
+            out += ch
+            i += 1
+            continue
+        nxt = raw[i + 1 : i + 2]
+        if nxt in _C_ESCAPES:
+            out += _C_ESCAPES[nxt]
+            i += 2
+        elif re.match(rb"[0-7]{3}", raw[i + 1 : i + 4]):
+            out.append(int(raw[i + 1 : i + 4], 8))
+            i += 4
+        else:
+            out += nxt
+            i += 2
+    return bytes(out)
+
+
+def header_path(rest: bytes) -> str:
+    """The new-side path of a `diff --git` line (what follows `diff --git `).
+
+    Handles git's quoting for paths with spaces or non-ASCII bytes. A header
+    that matches no known shape is still a section boundary, named by its text.
+    """
+    quoted = re.search(rb'"b/((?:[^"\\]|\\.)*)"$', rest)
+    if quoted:
+        return _c_unquote(quoted.group(1)).decode("utf-8", "replace")
+    m = _UNQUOTED_PAIR.match(rest)
+    if m:
+        return m.group(2).decode("utf-8", "replace")
+    tail = rest.rsplit(b" b/", 1)
+    if len(tail) == 2:
+        return tail[1].decode("utf-8", "replace")
+    return "(unparsed header: " + rest.decode("utf-8", "replace")[:80] + ")"
+
+
 def parse_diff(diff: bytes) -> list[Section]:
     sections: list[Section] = []
     start = None
@@ -83,7 +127,7 @@ def parse_diff(diff: bytes) -> list[Section]:
             if start is not None:
                 sections.append(_section(len(sections), path, diff[start:pos]))
             start = pos
-            path = m.group(2).decode("utf-8", "replace")
+            path = header_path(m.group(1))
         pos += len(line)
     if start is not None:
         sections.append(_section(len(sections), path, diff[start:pos]))

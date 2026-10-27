@@ -3406,6 +3406,8 @@ review_run() {
     "$DIR"/voter-*.md "$DIR"/voter-*.err "$DIR"/voter-*.fail \
     "$DIR"/voter-*.json "$DIR"/voter-*.model.txt "$DIR"/voter-*.turn.txt \
     "$DIR"/voter-*.stdout.md "$DIR"/voter-*.seconds \
+    "$DIR"/voter-argon.partial "$DIR"/voter-argon.packet.txt \
+    "$DIR"/voter-argon.packet-* \
     "$DIR"/lineup.md "$DIR"/diffshape.txt "$DIR"/readonly.txt \
     "$DIR"/model-check.md "$DIR"/worktrees-kept.txt \
     "$DIR"/findings.json "$DIR"/judgment.md "$DIR"/convergence.md \

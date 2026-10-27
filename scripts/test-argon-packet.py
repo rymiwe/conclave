@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import subprocess
 import tempfile
 import traceback
@@ -339,9 +340,55 @@ def test_brief_floor(work: Path):
     check("The brief alone is" in partial and "No diff fit" in partial, "a brief over the cap is reported, not hidden")
 
 
+def test_quoted_paths(work: Path):
+    """git quotes paths with a space or a non-ASCII byte; none may vanish from the packet."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import argon_packet
+    files = {"docs/My Notes.md": 3000, "app/user.rb": 3000, "app/caf\u00e9.rb": 3000}
+    parse_dir = work / "parse"
+    parse_dir.mkdir()
+    repo = make_repo(parse_dir, files)
+    diff = subprocess.run(["git", "-C", str(repo), "diff", "HEAD"], capture_output=True, check=True).stdout
+    check(b'diff --git "a/app/caf\\303\\251.rb" "b/app/caf\\303\\251.rb"' in diff
+          and b"diff --git a/docs/My Notes.md b/docs/My Notes.md" in diff,
+          "fixture: git quotes the non-ASCII path and leaves the space path bare")
+    names = [sec.path for sec in argon_packet.parse_diff(diff)]
+    check(names == ["app/caf\u00e9.rb", "app/user.rb", "docs/My Notes.md"], f"quoted headers are sections: {names}")
+    (work / "leg").mkdir()
+    ballot, proc = run_leg(work / "leg", files)
+    ps = prompts(ballot)
+    check(len(ps) == 1 and "+++ b/app/user.rb" in ps[0] and "My Notes.md" in ps[0],
+          "an under-cap diff keeps the quoted-path file in the packet")
+    (work / "cut").mkdir()
+    ballot, proc = run_leg(work / "cut", files, {"CONCLAVE_ARGON_MAX_BYTES": "9000"})
+    partial = read(ballot / "voter-argon.partial")
+    seen = "".join(prompts(ballot)) + partial
+    check(all(name in seen for name in ("My Notes.md", "app/user.rb", "caf")) and "My Notes.md" in partial + "".join(prompts(ballot)),
+          "every file, quoted path or not, is in the packet or named in .partial")
+
+
+def test_stale_partial_cleared(work: Path):
+    """review_run's start-of-run cleanup removes the last run's packet files."""
+    text = (ROOT / "scripts" / "review-kind.sh").read_text(encoding="utf-8")
+    body = text.split("review_run() {", 1)[1]
+    start = body.index('  rm -f \\\n    "$DIR"/voter-*.md')
+    end = body.index('"$DIR"/pr-context.json', start) + len('"$DIR"/pr-context.json')
+    snippet = body[start:end]
+    ballot = work / "ballot"
+    ballot.mkdir()
+    stale = ["voter-argon.partial", "voter-argon.packet.txt", "voter-argon.packet-1.err",
+             "voter-argon.packet-2.stream.jsonl"]
+    for name in stale:
+        (ballot / name).write_text("stale\n", encoding="utf-8")
+    (ballot / "voter-argon.brief.md").write_text("brief\n", encoding="utf-8")
+    proc = run_bash(f"DIR={ballot}\n{snippet}\nls -A {ballot}\n")
+    left = proc.stdout.split()
+    check(not [n for n in stale if n in left], f"stale argon packet files are removed at run start ({left})")
+
+
 TESTS = [test_small, test_split_clean, test_split_with_generated, test_large, test_priority,
          test_oversize_file, test_setting, test_second_packet_fails, test_both_fail,
-         test_pr_context, test_brief_floor]
+         test_pr_context, test_brief_floor, test_quoted_paths, test_stale_partial_cleared]
 
 
 def main():
