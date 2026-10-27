@@ -3086,7 +3086,7 @@ review_route_json() {
   local err
   err="$(mktemp)"
   raw="$("$bin" "${args[@]}" 2>"$err")" || raw=""
-  if ! review_check_excluded_vendors "$raw" "$err"; then
+  if ! review_check_excluded_vendors "$raw" "$err" "reseating nobody"; then
     rm -f "$err"
     return 1
   fi
