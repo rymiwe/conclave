@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -93,7 +94,17 @@ args = sys.argv[1:]
 with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['council', args, os.environ.get('COUNCIL_CHAIR_MODEL'), os.environ.get('CONCLAVE_CHAIR')])+'\\n')
 d = pathlib.Path(os.environ['FIXTURE_ROOT'])/'tmp/council'/args[0]
 d.mkdir(parents=True, exist_ok=True)
-if '--dry-run' in args: sys.exit(0)
+if '--dry-run' in args:
+    if args[0].endswith(os.environ.get('DRY_HOLD_PR', 'never')):
+        # Slow dry run: hold until the DRY_HOLD_FOR ballot is finished, so its phase 1 has already run.
+        import time
+        run_json = pathlib.Path(os.environ['FIXTURE_ROOT'])/'tmp/council/stack/run.json'
+        for _ in range(2000):
+            rows = json.loads(run_json.read_text()).get('prs', []) if run_json.exists() else []
+            if any(r['ballot'] == os.environ['DRY_HOLD_FOR'] and r['step'] == 'finished' for r in rows):
+                break
+            time.sleep(0.01)
+    sys.exit(0)
 if '--findings' in args:
     (d/'judgment.md').write_text('head_oid: ' + 'a'*40 + '\\n')
     (d/'decide.md').write_text('f1 — **what breaks, for whom**: TODO(chair)\\n**how sure**: read\\n**later PRs that change this file**: none\\n**recommend**: TODO(chair)\\n')
@@ -106,10 +117,28 @@ else:
         with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['start', args[0]])+'\\n')
         time.sleep(float(os.environ['PHASE1_HOLD']))
         with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['finish', args[0]])+'\\n')
+    if args[0].endswith(os.environ.get('WAIT_PR', 'never')):
+        # Hold this phase 1 until the runner moves the WAIT_FOR ballot past its phase 1.
+        import time
+        run_json = pathlib.Path(os.environ['FIXTURE_ROOT'])/'tmp/council/stack/run.json'
+        for _ in range(1000):
+            rows = json.loads(run_json.read_text()).get('prs', []) if run_json.exists() else []
+            if any(r['ballot'] == os.environ['WAIT_FOR'] and r['step'] in ('chair B', 'finished') for r in rows):
+                break
+            time.sleep(0.01)
     if os.environ.get('PHASE1_SLEEP'):
         import time
         pathlib.Path(os.environ['CHILD_PID']).write_text(str(os.getpid()))
         time.sleep(60)
+    if args[0].endswith(os.environ.get('OPUS_CAP_PR', 'never')) and os.environ.get('CAP_AFTER'):
+        # Slow phase 1: hold the usage-limit failure until the CAP_AFTER ballot reaches CAP_AFTER_STEP.
+        import time
+        run_json = pathlib.Path(os.environ['FIXTURE_ROOT'])/'tmp/council/stack/run.json'
+        for _ in range(2000):
+            rows = json.loads(run_json.read_text()).get('prs', []) if run_json.exists() else []
+            if any(r['ballot'] == os.environ['CAP_AFTER'] and r['step'] == os.environ.get('CAP_AFTER_STEP', 'chair A') for r in rows):
+                break
+            time.sleep(0.01)
     if args[0].endswith(os.environ.get('OPUS_CAP_PR', 'never')):
         (d/'voter-opus.fail').write_text('failed')
         (d/'voter-opus.err').write_text(os.environ.get('OPUS_ERR', ''))
@@ -167,6 +196,14 @@ else:
         ballot = dest.parent
     else:
         ballot = pathlib.Path(re.search(r'Ballot directory: (\\S+)\\. Follow', prompt)[1])
+    if 'Round A.' in prompt and ballot.name.endswith(os.environ.get('CHAIR_A_HOLD_PR','never')):
+        # Slow chair A: hold until the CHAIR_A_HOLD_FOR ballot is finished, so its phase 1 has already run.
+        run_json = root/'tmp/council/stack/run.json'
+        for _ in range(2000):
+            rows = json.loads(run_json.read_text()).get('prs', []) if run_json.exists() else []
+            if any(r['ballot'] == os.environ['CHAIR_A_HOLD_FOR'] and r['step'] == 'finished' for r in rows):
+                break
+            time.sleep(0.01)
     if ballot.name.endswith(os.environ.get('NO_RESULT_PR','never')):
         sys.exit(0)
     if ballot.name.endswith(os.environ.get('TIMEOUT_PR','never')):
@@ -282,9 +319,11 @@ def test_runner(tmp: Path, mod) -> None:
     ids = [line.split(':')[0] for line in got.stdout.splitlines()]
     check([i for i in ids if i in ('p-1', 'p-2', 'p-3')] == ['p-1', 'p-2', 'p-3'], 'dry run bottom-up ballot ids')
     check(ids.index('p-stack-stack') < ids.index('p-1'), 'dry run lists the whole-stack ballot before per-PR ballots')
-    check('wave cap: 2 (default)' in got.stdout and 'wave 1: p-stack-stack' in got.stdout
-          and 'wave 2: p-1, p-2' in got.stdout and 'wave 3: p-3' in got.stdout,
-          f'dry run shows the cap and wave plan ({got.stdout})')
+    # Per-PR ballots no longer run in batches, so the dry run shows the cap and one launch order.
+    check('in-flight cap: 2 (default)' in got.stdout
+          and 'launch order: p-stack-stack alone, then p-1, p-2, p-3 bottom up, refilled as slots free' in got.stdout
+          and 'wave' not in got.stdout,
+          f'dry run shows the in-flight cap and launch order ({got.stdout})')
     check('p-1: done; steps: none' in got.stdout, 'dry run recognizes done')
     check(not f.calls(), 'dry run launches no chair or council')
     check({p.name for p in (f.root / 'tmp/council/stack').iterdir()} == {'stack.json','stack.md','dry-run.md'}, 'dry run writes only stack and preview artifacts')
@@ -294,18 +333,22 @@ def test_runner(tmp: Path, mod) -> None:
     check([r['outcome'] for r in rows] == ['reused','ok','ok'], 'full run outcomes')
     check({p.name: (p.stat().st_mtime_ns, p.read_bytes()) for p in ballot.iterdir()} == snapshot, 'reused ballot untouched')
     council = [c[1] for c in f.calls() if c[0] == 'council']
-    expected = []
+    # Reused p-1 frees its slot at once, so p-3 runs beside p-2; compare each ballot's own calls.
     for n in (2,3):
         rest = ['--pr',str(n),'--repo',str(f.repo),'--fable-overflow','cursor']
-        expected += [[f'p-{n}','--dry-run',*rest],[f'p-{n}',*rest],[f'p-{n}','--findings']]
-    check(council == expected, 'exact phase 1 council arguments and findings commands')
+        expected = [[f'p-{n}','--dry-run',*rest],[f'p-{n}',*rest],[f'p-{n}','--findings']]
+        check([c for c in council if c[0] == f'p-{n}'] == expected, f'exact phase 1 council arguments and findings commands for p-{n}')
+    check(len(council) == 6, f'only p-2 and p-3 call council ({council})')
     chairs = [c[1] for c in f.calls() if c[0] == 'cursor']
     check(all(c[:10] == ['-p','--model','test-chair','--output-format','stream-json','-f','--trust','--approve-mcps','--workspace',str(f.repo)] for c in chairs), 'chair argument shape')
     cursor_rows = [c for c in f.calls() if c[0] == 'cursor']
     check(cursor_rows and all(c[2] == '1' for c in cursor_rows), 'every chair process sees CONCLAVE_CHAIR=1')
     phase1 = [c for c in f.calls() if c[0] == 'council' and '--findings' not in c[1]]
     check(phase1 and all(c[3] is None for c in phase1), 'runner phase 1 does not see CONCLAVE_CHAIR')
-    check(chairs[1][10:12] == ['--resume','test-session'] and chairs[3][10:12] == ['--resume','test-session'], 'round B resumes round A sessions')
+    # p-2 and p-3 overlap now, so match round B by prompt, not by position.
+    round_b = [c for c in chairs if 'Round B.' in c[-1]]
+    check(len(round_b) == 2 and all(c[10:12] == ['--resume','test-session'] for c in round_b)
+          and not any('--resume' in c for c in chairs if 'Round A.' in c[-1]), 'round B resumes round A sessions')
     check(all(not mod.FORBIDDEN.search(prompt_outside_repo(c[-1], str(ROOT), str(f.repo))) for c in chairs),
           'chair prompts contain no model or vendor words')
     shallow = 'Do not pass --depth, --shallow-*, or --unshallow to git.'
@@ -331,11 +374,13 @@ def test_runner(tmp: Path, mod) -> None:
     check(f.invoke(*PER_PR, '--wave-cap', '1').returncode == 0, 'overflow fixture completes')
     check([r['claude_flags'] for r in f.record()['prs']] == [['--fable-overflow','cursor'], ['--claude-model','cursor-fable'], ['--claude-model','cursor-fable']], 'overflow sticks for every later ballot')
     f = Fixture(tmp, 'sticky-cap-2')
-    f.env['OVERFLOW_PR'] = '-1'
+    # A freed slot now starts p-3 as soon as p-2 finishes, which could beat p-1's phase 1.
+    # Holding p-2's phase 1 until p-1 passes its phase 1 keeps p-3 after the overflow.
+    f.env.update(OVERFLOW_PR='-1', WAIT_PR='-2', WAIT_FOR='p-1')
     # p-2 runs beside p-1, so its flags depend on timing; only p-1 and p-3 are fixed.
     flags = [r['claude_flags'] for r in f.record()['prs']] if f.invoke(*PER_PR).returncode == 0 else []
     check(len(flags) == 3 and flags[0] == ['--fable-overflow','cursor'] and flags[2] == ['--claude-model','cursor-fable'],
-          f'cap 2: overflow in wave 1 sticks for wave 2 ({flags})')
+          f'cap 2: a ballot started after the overflow was seen runs on Cursor ({flags})')
     f = Fixture(tmp, 'posting')
     f.env['POST_PR'] = '-2'
     check(f.invoke(*PER_PR).returncode == 0 and bool(f.record()['prs'][1]['POSTED?']), 'gh pr comment tool call marks POSTED?')
@@ -1170,7 +1215,8 @@ def test_whole_stack(tmp: Path, mod) -> None:
     check(f'{name}: new;' in kept.stdout and 'After ballots' not in kept.stdout,
           'waves --no-reconcile dry run still shows the whole-stack ballot')
     only = f.invoke('--dry-run', '--reconcile-only')
-    check(name not in only.stdout and 'wave' not in only.stdout, 'waves --reconcile-only dry run has no ballot and no waves')
+    check(name not in only.stdout and 'wave' not in only.stdout and 'in-flight' not in only.stdout
+          and 'launch order' not in only.stdout, 'waves --reconcile-only dry run has no ballot and no launch plan')
 
     got = f.invoke()
     check(got.returncode == 0, f'fix 5 full run includes the whole-stack ballot ({got.stderr})')
@@ -1202,7 +1248,8 @@ def test_whole_stack(tmp: Path, mod) -> None:
     check(all(not mod.FORBIDDEN.search(prompt_outside_repo(p, str(ROOT), str(f.repo))) for p in pr_briefs),
           'waves (b) per-PR prompts with stack findings carry no model or vendor words')
     waves = f.record()['waves']
-    check([w['ballots'] for w in waves] == [[name], ['p-1', 'p-2'], ['p-3']]
+    # Each waves entry is now one launch gate, not one batch.
+    check([w['ballots'] for w in waves] == [[name], ['p-1'], ['p-2'], ['p-3']]
           and all(w['precheck'] == 'inconclusive' for w in waves),
           f'waves run.json records each wave; the empty seat-usage stub is inconclusive ({waves})')
     check('inconclusive' in got.stderr and 'launching anyway' in got.stderr,
@@ -1360,9 +1407,10 @@ def test_waves(tmp: Path, mod) -> None:
         got = f.invoke(*PER_PR, *extra)
         calls = f.calls()
         rec = f.record() if got.returncode == 0 else {}
-        plan = [[f'p-{n}' for n in range(i + 1, min(i + cap, 3) + 1)] for i in range(0, 3, cap)]
+        # Each waves entry is now one launch gate, so there is one entry per ballot whatever the cap.
+        plan = [['p-1'], ['p-2'], ['p-3']]
         check(got.returncode == 0 and rec['wave_cap'] == cap and [w['ballots'] for w in rec['waves']] == plan,
-              f'waves (c) {label} plans waves of {cap} ({got.stderr.strip()} {rec.get("waves")})')
+              f'waves (c) {label} gates each launch with cap {cap} ({got.stderr.strip()} {rec.get("waves")})')
         peak = most_at_once(calls)
         check(peak <= cap and (cap == 3 or peak == cap), f'waves (c) {label} never runs more than {cap} at once ({peak})')
         if label == 'default':
@@ -1399,22 +1447,37 @@ def test_waves(tmp: Path, mod) -> None:
     check(seat == [['--route', 'lineup', '--json', '--kind', 'review']], f'waves (d) pre-check asks the review lineup route ({seat})')
     check('pre-check blocked' in (f.root / 'tmp/council/stack/run.md').read_text(), 'waves (d) run.md records the pre-check')
 
-    # (d) a passing wave, then a capped one; rerun resumes.
+    # (d) two launches pass, then the third is capped while both are in flight; rerun resumes.
+    # Cap 3 so the third pre-check runs at once, while p-1 and p-2 hold in phase 1.
     f = Fixture(tmp, 'waves-mid')
-    seat_route(f, SEAT_OK, SEAT_ASK)
-    got = f.invoke(*PER_PR)
+    seat_route(f, SEAT_OK, SEAT_OK, SEAT_ASK)
+    f.env['PHASE1_HOLD'] = '0.5'
+    got = f.invoke(*PER_PR, '--wave-cap', '3')
     rec = f.record()
-    check(got.returncode == 1 and [w['precheck'] for w in rec['waves']] == ['ok', 'blocked']
+    calls = f.calls()
+    blocked_at = [i for i, c in enumerate(calls) if c[0] == 'seat'][-1]
+    finished_at = [i for i, c in enumerate(calls) if c[0] == 'finish']
+    check(got.returncode == 1 and [w['precheck'] for w in rec['waves']] == ['ok', 'ok', 'blocked']
           and [r['outcome'] for r in rec['prs']][:2] == ['ok', 'ok']
-          and rec['prs'][2]['outcome'].startswith('failed: not started; seats capped')
-          and not any(c[0] == 'council' and c[1][0] == 'p-3' for c in f.calls()),
-          f"waves (d) a passing wave launches and the capped next wave does not ({rec['waves']})")
+          and rec['prs'][2]['outcome'].startswith('failed: not started; seats capped (')
+          and rec['reconcile'] == 'failed: not started; seats capped'
+          and not any(c[0] == 'council' and c[1][0] == 'p-3' for c in calls)
+          and ['start', 'p-3'] not in calls
+          and not any('tmp/council/p-3' in c[1][-1] for c in calls if c[0] == 'cursor'),
+          f"waves (d) a capped launch starts nothing more and running ballots finish ok ({rec['waves']} {rec['prs']})")
+    check(len(finished_at) == 2 and blocked_at < min(finished_at),
+          f'waves (d) the block came while both ballots were in flight ({blocked_at}, {finished_at})')
+    line = [l for l in got.stderr.splitlines() if 'not launched' in l]
+    check(len(line) == 1 and 'p-3' in line[0] and 'rerun the same command' in line[0],
+          f'waves (d) one stderr line names the ballot that did not launch ({got.stderr.strip()})')
     seat_route(f, SEAT_OK)
-    got = f.invoke(*PER_PR)
+    got = f.invoke(*PER_PR, '--wave-cap', '3')
     rec = f.record()
+    rerun = [c[1][0] for c in f.calls()[len(calls):] if c[0] == 'council']
     check(got.returncode == 0 and [r['outcome'] for r in rec['prs']] == ['reused', 'reused', 'ok']
-          and [w['precheck'] for w in rec['waves']] == ['not needed', 'ok'],
-          f"waves (d) rerun resumes and reuses finished ballots ({rec['waves']} {got.stderr.strip()})")
+          and [w['precheck'] for w in rec['waves']] == ['not needed', 'not needed', 'ok']
+          and rerun and set(rerun) == {'p-3'},
+          f"waves (d) rerun resumes and reuses finished ballots ({rec['waves']} {rerun} {got.stderr.strip()})")
 
     # (d) a wave of chair-only ballots spends no seat, so a capped route does not block it.
     f = Fixture(tmp, 'waves-chair-only')
@@ -1426,7 +1489,8 @@ def test_waves(tmp: Path, mod) -> None:
         (b / 'findings.json').write_text(json.dumps({'findings': []}))
     got = f.invoke(*PER_PR, '--no-reconcile')
     rec = f.record()
-    check(got.returncode == 0 and [w['precheck'] for w in rec['waves']] == ['not needed', 'not needed']
+    # One gate per launch now, so three entries instead of two batches.
+    check(got.returncode == 0 and [w['precheck'] for w in rec['waves']] == ['not needed'] * 3
           and not any(c[0] == 'council' for c in f.calls()),
           f"waves (d) chair-only ballots are not blocked by a capped route ({rec['waves']} {got.stderr.strip()})")
 
@@ -1476,6 +1540,217 @@ def test_waves(tmp: Path, mod) -> None:
           and rec['reconcile'] == 'failed: not started; seats capped'
           and [w['ballots'] for w in rec['waves']] == [['p-stack-stack']],
           f"waves (d) a capped whole-stack wave starts nothing ({rec.get('whole_stack')} {rec.get('waves')})")
+
+
+def bare_runner(mod, cap: int, count: int, ballot, precheck):
+    """A Runner with only what per_pr_waves needs; ballot and pre-check are stubs."""
+    r = mod.Runner.__new__(mod.Runner)
+    r.args = mod.argparse.Namespace(wave_wait=0)
+    r.cap, r.poll, r.max_capped, r.lock = cap, 60.0, False, threading.RLock()
+    r.record = {'prs': [{'ballot': f'p-{n}', 'state': 'new', 'outcome': 'pending'} for n in range(1, count + 1)],
+                'waves': []}
+    r.save = lambda: None
+    r.precheck = precheck
+    r.ballot_run = ballot
+    return r
+
+
+def run_in_thread(runner) -> tuple[threading.Thread, list]:
+    result: list = []
+    thread = threading.Thread(target=lambda: result.append(runner.per_pr_waves()), daemon=True)
+    thread.start()
+    return thread, result
+
+
+def test_rolling(mod) -> None:
+    ok = lambda: ('ok', 'two voters')
+    # A slow first ballot does not hold the third: B's freed slot starts C while A still runs.
+    release, c_started = threading.Event(), threading.Event()
+    started: list[str] = []
+
+    def ballot(row: dict) -> None:
+        started.append(row['ballot'])
+        if row['ballot'] == 'p-1':
+            release.wait(10)
+        if row['ballot'] == 'p-3':
+            c_started.set()
+        row['outcome'] = 'ok'
+
+    r = bare_runner(mod, 2, 3, ballot, ok)
+    with redirect_stderr(io.StringIO()):
+        thread, result = run_in_thread(r)
+        third = c_started.wait(5)
+        held = not release.is_set()
+        release.set()
+        thread.join(10)
+    check(third and held and started == ['p-1', 'p-2', 'p-3'],
+          f'rolling: the third ballot starts while a slow first one still runs ({third}, {held}, {started})')
+    check(result == [''] and [p['outcome'] for p in r.record['prs']] == ['ok'] * 3
+          and [w['ballots'] for w in r.record['waves']] == [['p-1'], ['p-2'], ['p-3']],
+          f"rolling: every ballot finishes and each launch has its own gate ({result}, {r.record['waves']})")
+
+    # Peak in flight never passes the cap. The first cap ballots meet at a barrier, so the window fills.
+    for cap in (1, 2, 3):
+        lock, gate = threading.Lock(), threading.Barrier(cap, timeout=5)
+        now, peak, order = [0], [0], []
+
+        def counted(row: dict) -> None:
+            with lock:
+                now[0] += 1
+                peak[0] = max(peak[0], now[0])
+                order.append(row['ballot'])
+                first = len(order) <= cap
+            if first:
+                gate.wait()
+            with lock:
+                now[0] -= 1
+            row['outcome'] = 'ok'
+
+        r = bare_runner(mod, cap, 5, counted, ok)
+        with redirect_stderr(io.StringIO()):
+            r.per_pr_waves()
+        check(peak[0] == cap and sorted(order) == [f'p-{n}' for n in range(1, 6)] and not gate.broken,
+              f'rolling: cap {cap} peaks at {cap} in flight across 5 ballots ({peak[0]}, {order})')
+
+    # A block mid-run: no new ballot starts, the running one finishes ok, the rest are closed.
+    release, blocked = threading.Event(), threading.Event()
+    answers = iter([('ok', 'two voters'), ('ok', 'two voters'), ('blocked', 'every pool capped')])
+    started = []
+
+    def precheck() -> tuple[str, str]:
+        answer = next(answers)
+        if answer[0] == 'blocked':
+            blocked.set()
+        return answer
+
+    def slow_first(row: dict) -> None:
+        started.append(row['ballot'])
+        if row['ballot'] == 'p-1':
+            release.wait(10)
+        row['outcome'] = 'ok'
+
+    r = bare_runner(mod, 2, 4, slow_first, precheck)
+    err = io.StringIO()
+    with redirect_stderr(err):
+        thread, result = run_in_thread(r)
+        saw_block = blocked.wait(5)
+        # p-1 is still running, so nothing is closed until it finishes.
+        early = [p['outcome'] for p in r.record['prs']]
+        release.set()
+        thread.join(10)
+    capped = 'failed: not started; seats capped (every pool capped)'
+    check(saw_block and early == ['pending', 'ok', 'pending', 'pending'],
+          f'rolling: the block comes while p-1 runs and closes nothing yet ({early})')
+    check(result == ['failed: not started; seats capped'] and started == ['p-1', 'p-2']
+          and [p['outcome'] for p in r.record['prs']] == ['ok', 'ok', capped, capped]
+          and [w['precheck'] for w in r.record['waves']] == ['ok', 'ok', 'blocked'],
+          f"rolling: after a block running ballots finish ok and later rows say seats capped ({result}, {r.record['prs']})")
+    line = [l for l in err.getvalue().splitlines() if 'not launched' in l]
+    check(len(line) == 1 and 'p-3' in line[0] and 'rerun the same command' in line[0],
+          f'rolling: one stderr line names the ballot that did not launch ({err.getvalue().strip()})')
+
+    # A row that needs no voters is not held by a capped pre-check.
+    r = bare_runner(mod, 2, 2, lambda row: row.update(outcome='reused'), lambda: ('blocked', 'every pool capped'))
+    for row in r.record['prs']:
+        row['state'] = 'done'
+    with redirect_stderr(io.StringIO()):
+        result = r.per_pr_waves()
+    check(result == '' and [w['precheck'] for w in r.record['waves']] == ['not needed', 'not needed'],
+          f"rolling: finished rows skip the pre-check ({r.record['waves']})")
+
+
+def test_max_cap_rolling(tmp: Path, mod) -> None:
+    """Cap 2: p-1's slow phase 1 hits the usage limit after p-2 freed a slot and p-3 launched."""
+    reason = f'failed: {mod.MAX_CAPPED}'
+    # p-3 is held in chair A, or in its dry run, until p-1's phase 1 has set the cap.
+    holds = {'chair A': dict(CHAIR_A_HOLD_PR='-3', CHAIR_A_HOLD_FOR='p-1'),
+             'dry run': dict(DRY_HOLD_PR='-3', DRY_HOLD_FOR='p-1', CAP_AFTER_STEP='phase 1')}
+    for where, hold in holds.items():
+        f = Fixture(tmp, 'max-cap-rolling-' + where.replace(' ', '-'))
+        f.env.update(OPUS_CAP_PR='-1', CAP_AFTER='p-3', OPUS_JSON='{"is_error":true,"result":"Claude usage limit reached"}', **hold)
+        proc = f.invoke('--no-whole-stack', '--no-reconcile', '--wave-cap', '2')
+        rows = f.record()['prs']
+        voters = [c[1][0] for c in f.calls() if c[0] == 'council' and '--dry-run' not in c[1] and '--findings' not in c[1]]
+        check(proc.returncode == 1 and rows[1]['outcome'] == 'ok' and rows[0]['outcome'].startswith('failed: phase 1 exit'),
+              f"rolling cap ({where}): p-1 fails on the limit and p-2 finishes ({proc.returncode}, {[r['outcome'] for r in rows]}, {proc.stderr[-300:]})")
+        check(sorted(voters) == ['p-1', 'p-2'] and rows[2]['outcome'] == reason,
+              f"rolling cap ({where}): p-3 launched before the cap starts no phase 1 and is marked not started ({voters}, {rows[2]['outcome']})")
+
+
+def test_rolling_cap_closes_queue(mod) -> None:
+    """The cap lands while p-3 runs, so p-4 and p-5 are never launched and close like the old batch join did."""
+    reason = f'failed: {mod.MAX_CAPPED}'
+    release, capped = threading.Event(), threading.Event()
+    started: list[str] = []
+
+    def ballot(row: dict) -> None:
+        started.append(row['ballot'])
+        if row['ballot'] == 'p-1':
+            release.wait(10)
+            with r.lock:
+                r.max_capped = True
+            capped.set()
+        if row['ballot'] == 'p-3':
+            capped.wait(10)
+        row['outcome'] = 'ok'
+
+    r = bare_runner(mod, 2, 5, ballot, lambda: ('ok', 'two voters'))
+    r.record['prs'][3]['state'] = 'done'
+    with redirect_stderr(io.StringIO()):
+        thread, result = run_in_thread(r)
+        while 'p-3' not in started and thread.is_alive():
+            time.sleep(0.01)
+        release.set()
+        thread.join(10)
+    check(result == [''] and started == ['p-1', 'p-2', 'p-3']
+          and [p['outcome'] for p in r.record['prs']] == ['ok', 'ok', 'ok', reason, reason],
+          f"rolling cap: no ballot launches after the cap and the rest are not started ({result}, {started}, {r.record['prs']})")
+
+
+def test_rolling_cap_after_inconclusive_precheck(mod) -> None:
+    """The cap lands while p-3's pre-check runs and comes back inconclusive: p-3 does not launch and says so."""
+    reason = f'failed: {mod.MAX_CAPPED}'
+    release, capped, entered = threading.Event(), threading.Event(), threading.Event()
+    calls, started = [0], []
+
+    def precheck() -> tuple[str, str]:
+        calls[0] += 1
+        if calls[0] < 3:
+            return 'ok', 'two voters'
+        entered.set()
+        capped.wait(10)
+        return 'inconclusive', 'seat-usage timed out after 25s'
+
+    def ballot(row: dict) -> None:
+        started.append(row['ballot'])
+        if row['ballot'] == 'p-1':
+            release.wait(10)
+            with r.lock:
+                r.max_capped = True
+            capped.set()
+        row['outcome'] = 'ok'
+
+    r = bare_runner(mod, 2, 3, ballot, precheck)
+    err = io.StringIO()
+    with redirect_stderr(err):
+        thread, result = run_in_thread(r)
+        saw = entered.wait(5)
+        release.set()
+        thread.join(10)
+    third = r.record['waves'][2]
+    check(saw and result == [''] and started == ['p-1', 'p-2'] and 'launching anyway' not in err.getvalue()
+          and third['precheck'] == 'not started' and third['message'] == mod.MAX_CAPPED
+          and r.record['prs'][2]['outcome'] == reason,
+          f"inconclusive cap: a declined ballot is recorded not started and prints no launch warning ({started}, {third}, {err.getvalue()!r})")
+
+    calls[0], started[:] = 0, []
+    r = bare_runner(mod, 2, 3, lambda row: row.update(outcome='ok'),
+                    lambda: ('inconclusive', 'seat-usage timed out after 25s'))
+    err = io.StringIO()
+    with redirect_stderr(err):
+        r.per_pr_waves()
+    check(err.getvalue().count('launching anyway') == 3 and [w['precheck'] for w in r.record['waves']] == ['inconclusive'] * 3,
+          f'inconclusive cap: a launched ballot keeps the warning and the inconclusive record ({err.getvalue()!r})')
 
 
 def test_stale_head(tmp: Path) -> None:
@@ -1682,6 +1957,10 @@ def main() -> None:
         test_shallow_repo(tmp)
         test_whole_stack(tmp, mod)
         test_waves(tmp, mod)
+        test_rolling(mod)
+        test_max_cap_rolling(tmp, mod)
+        test_rolling_cap_closes_queue(mod)
+        test_rolling_cap_after_inconclusive_precheck(mod)
         test_stale_head(tmp)
         test_stack_ballot_name(tmp)
         test_detach(tmp)

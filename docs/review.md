@@ -607,9 +607,9 @@ On 2026-10-02 one work pull request was 1 of a 4-PR stack and the ballot reviewe
 
 ## Stack review
 
-`scripts/stack-run.py` first runs one whole-stack ballot on the combined diff, to the end. Then it reviews every PR in the stack, bottom up, one `kind: review` ballot per PR, in waves of at most two. Each per-PR brief lists what the whole-stack ballot already found. Then one reconciliation pass checks every finding against the top of the stack. Issue #19 chose the per-PR shape (option 3, 2026-10-03).
+`scripts/stack-run.py` first runs one whole-stack ballot on the combined diff, to the end. Then it reviews every PR in the stack, bottom up, one `kind: review` ballot per PR, at most two in flight. A finished ballot frees its slot at once, and the next one starts. Each per-PR brief lists what the whole-stack ballot already found. Then one reconciliation pass checks every finding against the top of the stack. Issue #19 chose the per-PR shape (option 3, 2026-10-03).
 
-The order and the waves come from one night when a whole-stack ballot and nine per-PR ballots started at once. Three seat pools hit their limits within minutes. Six ballots could not be judged, and the early per-PR ballots ran without the whole-stack findings.
+The order and the cap come from one night when a whole-stack ballot and nine per-PR ballots started at once. Three seat pools hit their limits within minutes. Six ballots could not be judged, and the early per-PR ballots ran without the whole-stack findings.
 
 ```
 scripts/stack-run.py --repo ~/code/app --pr 101 \
@@ -625,28 +625,28 @@ scripts/stack-run.py --repo ~/code/app --pr 101 \
 | `--prefix P` | Ballot ids are `<P>-<N>`. Default: the repo directory name. |
 | `--context FILE` | Shared context for every chair, copied to `context.md` in the stack directory. Without it and without an existing `context.md`, a context chair writes one from `--ticket`. |
 | `--ticket KEY` | The Linear ticket the context chair reads. |
-| `--wave-cap 1\|2\|3` | Per-PR ballots per wave. Default: `CONCLAVE_WAVE_CAP` (`COUNCIL_WAVE_CAP` is the alias), else 2. A bad value is an error. Each fetch checks the oid gh already returned with `git cat-file`. Parallel ballots do not read `FETCH_HEAD`. |
+| `--wave-cap 1\|2\|3` | Most per-PR ballots in flight at once. Default: `CONCLAVE_WAVE_CAP` (`COUNCIL_WAVE_CAP` is the alias), else 2. A bad value is an error. Each fetch checks the oid gh already returned with `git cat-file`. Parallel ballots do not read `FETCH_HEAD`. |
 | `--jobs 1\|2` | Deprecated alias for `--wave-cap`. `--wave-cap` wins over it, and it wins over the environment. |
-| `--wave-wait S` | When a wave's seat pre-check fails, check again every 60 seconds for up to S seconds. Default 0: stop at once. |
+| `--wave-wait S` | When a ballot's seat pre-check fails, check again every 60 seconds for up to S seconds. Default 0: stop at once. |
 | `--chair-model ID` | Default: the resolver's builder id (newest Grok Fast at high). `auto` and composer ids are refused. |
 | `--chair-timeout S` | Seconds per chair process. Default 3600. A timeout kills the chair and fails that step. |
-| `--dry-run` | Print the plan: the wave cap, the waves, and each ballot's steps. No chair, no voters, and no pre-check. |
+| `--dry-run` | Print the plan: the in-flight cap, the launch order, and each ballot's steps. No chair, no voters, and no pre-check. |
 | `--reconcile-only` | Run only the pass. No ballot runs, the whole-stack ballot included. |
 | `--no-reconcile` | Skip the pass. The whole-stack ballot still runs first. |
 | `--no-whole-stack` | Skip the whole-stack ballot. Per-PR ballots run with no stack-level findings in their briefs. |
 | `--detach` | Re-exec this command under `setsid` and `nohup`. Write the pid and log path into the stack directory, wait until the first ballot step starts, print them, and exit. A shorter flag is rejected. |
 
-### Waves and the seat pre-check
+### In-flight window and the seat pre-check
 
-The whole-stack ballot is wave 1, alone. Per-PR ballots follow in waves of at most `--wave-cap`, bottom up. A wave ends before the next one starts. A Fable overflow seen in one wave holds for every later wave.
+The whole-stack ballot runs first, alone, to the end. Per-PR ballots follow bottom up, at most `--wave-cap` in flight. A finished ballot frees its slot at once, and the next one starts. A slow ballot does not hold the others back. A Fable overflow seen in one ballot's phase 1 holds for every ballot whose phase 1 starts later.
 
-Before each wave, the whole-stack wave included, the runner asks `seat-usage --route lineup --json --kind review`. That is the route `conclave.sh` seats a review from. `scripts/lineup.py` reads the answer. The wave starts when the route gives at least two different voters, as a normal lineup or a downgrade. The wave does not start when the route asks for a human, gives fewer than two voters, or prints JSON that cannot be read. The message carries the route's reason and skipped codes.
+Before each ballot starts, the whole-stack ballot included, the runner asks `seat-usage --route lineup --json --kind review`. That is the route `conclave.sh` seats a review from. `scripts/lineup.py` reads the answer. The ballot starts when the route gives at least two different voters, as a normal lineup or a downgrade. It does not start when the route asks for a human, gives fewer than two voters, or prints JSON that cannot be read. The message carries the route's reason and skipped codes.
 
-A missing `seat-usage`, a nonzero exit, empty output, or no answer within 25 seconds is inconclusive. The runner prints one warning and starts the wave. `conclave.sh` then falls back to its fixed default. A wave with no voters to launch is not checked: every ballot in it is finished, blocked, or needs only a chair (judge and decide).
+A missing `seat-usage`, a nonzero exit, empty output, or no answer within 25 seconds is inconclusive. The runner prints one warning and starts the ballot. `conclave.sh` then falls back to its fixed default. A ballot with no voters to launch is not checked: it is finished, blocked, or needs only a chair (judge and decide).
 
-When a wave does not start, no later wave starts either. With `--wave-wait S`, the runner checks again every 60 seconds until the route passes or S seconds pass. Each per-PR row that did not start reads `failed: not started; seats capped (<reason>)`. The reconciliation reads `failed: not started; seats capped`. One line on stderr names the wave and the reason. The runner exits 1. Rerun the same command to resume. Finished ballots are reused.
+When the pre-check blocks, no new ballot starts. Ballots already running finish; they are not stopped. With `--wave-wait S`, the runner checks again every 60 seconds until the route passes or S seconds pass. Each per-PR row that did not start reads `failed: not started; seats capped (<reason>)`. The reconciliation reads `failed: not started; seats capped`. One line on stderr names the ballot that did not start and the reason. The runner exits 1. Rerun the same command to resume. Finished ballots are reused. A failed ballot does not stop the others; it is that row's outcome.
 
-`run.json` keeps a `waves` list: the wave number, its ballots, the pre-check result (`ok`, `blocked`, `inconclusive`, `skipped`, or `not needed`), and the message. `run.md` shows the same list.
+`run.json` keeps a `waves` list. Each entry is now one launch, not one batch: a number, the ballot it gated, the pre-check result (`ok`, `blocked`, `inconclusive`, `skipped`, `not needed`, or `not started` when a usage limit stopped the launch after the pre-check), and the message. `run.md` shows the same list. The flag and setting names keep the word wave.
 
 `CONCLAVE_WAVE_PRECHECK=0` skips the pre-check. It is for tests and for an escape when the route is wrong. `CONCLAVE_WAVE_POLL` sets the seconds between checks; tests use it.
 
@@ -673,7 +673,7 @@ Each cursor-agent chair the runner starts has `CONCLAVE_CHAIR=1` in its environm
 
 One chair per ballot keeps each chair's context to one PR. The whole-stack ballot is a separate chair before the per-PR ballots. No per-PR session resumes it.
 
-A failed per-PR ballot does not stop the stack. A failed whole-stack ballot does: no per-PR ballot starts (see "Whole-stack ballot"). A failed seat pre-check stops the stack too (see "Waves and the seat pre-check"). When the Opus coverage leg fails on a usage limit, the whole Claude subscription is capped, so the runner starts no further ballot and skips the reconciliation. The runner exits 1 when any ballot, the reconciliation, or the whole-stack ballot failed. Rerun the same command to resume; finished ballots are not redone, and earlier `POSTED?` hits are kept. `run.json` and `run.md` in the stack directory record each ballot: state, outcome, chair and phase 1 seconds, the Fable flags, and the Fable percent read before phase 1.
+A failed per-PR ballot does not stop the stack. A failed whole-stack ballot does: no per-PR ballot starts (see "Whole-stack ballot"). A failed seat pre-check stops the stack too (see "In-flight window and the seat pre-check"). When the Opus coverage leg fails on a usage limit, the whole Claude subscription is capped, so the runner starts no further ballot and skips the reconciliation. The runner exits 1 when any ballot, the reconciliation, or the whole-stack ballot failed. Rerun the same command to resume; finished ballots are not redone, and earlier `POSTED?` hits are kept. `run.json` and `run.md` in the stack directory record each ballot: state, outcome, chair and phase 1 seconds, the Fable flags, and the Fable percent read before phase 1.
 
 The runner flags `POSTED?` when a chair's stream shows a GitHub write (`gh pr` or `gh issue` writes, a writing `gh api` call including a method glued to `-X` and a GraphQL mutation read from `-f query=@file`, a `curl` write to the GitHub API including `--json` and `--data`, `git push` including global options such as `-C`, `--no-pager`, and `-c`) or a Linear or Notion tool that is not a read. A `bash` or `sh` command that names a local script is scanned for those writes. If that script file is missing, the command is flagged. Text from a read tool is ignored. A Linear or Notion tool is classified by that tool's own name, not by words in a file it read. It does not undo it. Hits from the context and reconcile chairs appear under the `run.md` table. Chairs post nothing.
 
