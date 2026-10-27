@@ -626,6 +626,41 @@ def load_findings(path: Path, *, audit: bool = False) -> dict:
     return doc
 
 
+# What cited_code holds (finding_context sets f["cited_context"]): how to name
+# it to Jev, and what reading it cannot show. A finding never expanded holds
+# the chair's quote only.
+CITED_CONTEXT = {
+    finding_context.FUNCTION_AND_CALLER: (
+        "the enclosing function and one caller, read from the repo",
+        "",
+    ),
+    finding_context.FUNCTION_ONLY: (
+        "the enclosing function, read from the repo; no caller is shown",
+        "any caller of the function",
+    ),
+    finding_context.WINDOW: (
+        "the lines around the cited line, read from the repo; no enclosing "
+        "function was found, so the rest of the function is not shown",
+        "the enclosing function beyond these lines",
+    ),
+    finding_context.CHAIR_QUOTE_KEPT: (
+        "the chair's own quote; it was not read from the repo",
+        "the repo code around the quote",
+    ),
+    finding_context.CHAIR_QUOTE_ONLY: (
+        "the chair's quote only; the code was not read from the repo",
+        "the repo code around the quote",
+    ),
+}
+
+
+def cited_context(f: dict) -> tuple[str, str]:
+    """(what cited_code holds, what it cannot show) for this finding."""
+    return CITED_CONTEXT.get(
+        f.get("cited_context"), CITED_CONTEXT[finding_context.CHAIR_QUOTE_ONLY]
+    )
+
+
 def verification_line(doc: dict, f: dict) -> str:
     """What was done to check this finding at the reviewed head. Facts only."""
     at = str(doc.get("verified_at") or "")[:8]
@@ -635,12 +670,13 @@ def verification_line(doc: dict, f: dict) -> str:
             f"executed{where}. The evidence is the command that was run and its "
             "real output."
         )
+    what, _ = cited_context(f)
     if at:
         return (
             f"checked at head {at} by reading; no runnable repro was found. "
-            "The cited code below was read from the repo at that commit."
+            f"The cited code below is {what}."
         )
-    return "none: read-only, no run was made."
+    return f"none: read-only, no run was made. The cited code below is {what}."
 
 
 def build_findings_state(doc: dict) -> str:
@@ -693,20 +729,24 @@ def findings_questions(doc: dict) -> dict:
                 ),
             }
         else:
-            how = (
-                f"{fid} was checked by reading. Its cited_code in state is the "
-                "enclosing function and one caller, read from the repo. "
+            what, missing = cited_context(f)
+            at = str(doc.get("verified_at") or "")[:8]
+            checked = (
+                f"{fid} was checked at head {at} by reading"
+                if at
+                else f"{fid} was not run and no verification was recorded"
             )
+            how = f"{checked}. Its cited_code in state is {what}. "
+            not_shown = f" The cited code does not show {missing}." if missing else ""
             criteria = {
                 "post": (
-                    "The cited code (function and caller) shows the stated "
-                    "failure happens under reachable inputs; the finding "
-                    "should be reported."
+                    "The cited code shows the stated failure happens under "
+                    "reachable inputs; the finding should be reported."
                 ),
                 "hold": (
                     "Plausible but unproven: the failure depends on behaviour "
                     "not shown in the cited code, or on input state that "
-                    "reading cannot establish. Name what is missing."
+                    f"reading cannot establish. Name what is missing.{not_shown}"
                 ),
                 "drop": (
                     "The cited code does not support the failure, the trigger "
@@ -1480,6 +1520,8 @@ def _expand_cited_code(d: Path, doc: dict, header: dict, repo: str) -> None:
     if not repo or not head:
         why = "no --repo" if not repo else "no head commit in header.json"
         notes = [f"{f['id']}: not expanded ({why})" for f in doc["findings"]]
+        for f in doc["findings"]:
+            f["cited_context"] = finding_context.CHAIR_QUOTE_ONLY
     else:
         notes = finding_context.expand_findings(doc, repo, head)
     (d / "cited-code-notes.txt").write_text("\n".join(notes) + "\n", encoding="utf-8")

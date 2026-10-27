@@ -193,14 +193,49 @@ def brief_hash(ballot: Path) -> str:
     return hashlib.sha256((ballot / 'brief.md').read_bytes()).hexdigest()
 
 
-def findings_verified_at(ballot: Path, oid: str) -> bool:
-    """True when findings.json says the at-head verification ran at oid."""
+_jev_judge = None
+_jev_judge_lock = threading.Lock()
+
+
+def findings_rejection(ballot: Path) -> str:
+    """Why `--findings` would reject findings.json, or '' when it accepts it."""
+    global _jev_judge
+    with _jev_judge_lock:
+        if _jev_judge is None:
+            spec = importlib.util.spec_from_file_location('jev_judge', ROOT / 'scripts/jev-judge.py')
+            assert spec and spec.loader
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _jev_judge = mod
+    try:
+        header = json.loads(read(ballot / 'header.json') or '{}')
+    except ValueError:
+        header = {}
+    audit = isinstance(header, dict) and header.get('kind') == 'audit'
+    try:
+        _jev_judge.load_findings(ballot / 'findings.json', audit=audit)
+    except SystemExit as exc:
+        return str(exc.code) or 'rejected'
+    except (OSError, ValueError) as exc:
+        return f'unreadable: {exc}'
+    return ''
+
+
+def findings_stamp(ballot: Path, oid: str) -> str:
+    """'verified', 'rejected: <why>', or 'absent' for findings.json at oid.
+
+    The stamp counts only when the findings command would accept the file, so
+    a stamped file it rejects is rewritten rather than reused forever.
+    """
     try:
         doc = json.loads(read(ballot / 'findings.json') or 'null')
     except ValueError:
-        return False
-    return (isinstance(doc, dict) and isinstance(doc.get('findings'), list)
-            and str(doc.get('verified_at') or '').lower() == oid.lower())
+        return 'absent'
+    if not (isinstance(doc, dict) and isinstance(doc.get('findings'), list)
+            and str(doc.get('verified_at') or '').lower() == oid.lower()):
+        return 'absent'
+    why = findings_rejection(ballot)
+    return f'rejected: {why}' if why else 'verified'
 
 
 def state(ballot: Path) -> str:
@@ -981,9 +1016,13 @@ class Runner:
             findings_cmd = shlex.join([self.council, row["ballot"], "--findings"])
             if (ballot / 'judgment.md').exists():
                 instructions = 'judgment.md already exists: skip findings.json and the findings command; do phase 4 only. '
-            elif head and findings_verified_at(ballot, head):
+            elif head and (stamp := findings_stamp(ballot, head)) == 'verified':
                 instructions = ('findings.json is already written and verified at the reviewed head (Round B1). '
                                 f'Do not rewrite it or rerun a repro. Run {findings_cmd}. ')
+            elif head and stamp.startswith('rejected: '):
+                instructions = (f'findings.json is stamped verified_at {head[:8]} but the findings command rejects it '
+                                f'({stamp[len("rejected: "):]}). Rewrite findings.json in the Findings file schema, '
+                                f'keeping each verified result that is valid, then run {findings_cmd}. ')
             else:
                 instructions = f'Write findings.json in the Findings file schema, then run {findings_cmd}. '
             span = ''
@@ -1093,8 +1132,12 @@ class Runner:
         if not oid:
             row['verify'] = 'skipped: no head_oid in header.json'
             return session
-        if findings_verified_at(ballot, oid):
+        stamp = findings_stamp(ballot, oid)
+        if stamp == 'verified':
             row['verify'] = 'reused'
+            return session
+        if stamp.startswith('rejected: '):
+            row.pop('verify', None)
             return session
         repo = str(self.repo)
         if not commit_exists(repo, oid):
@@ -1126,9 +1169,11 @@ class Runner:
             finally:
                 self.command(['git', '-C', repo, 'worktree', 'prune'], cleanup=True)
                 shutil.rmtree(scratch, ignore_errors=True)
-        if not findings_verified_at(ballot, oid):
+        stamp = findings_stamp(ballot, oid)
+        if stamp == 'absent':
             raise RuntimeError(f'verify pass did not write findings.json with verified_at {oid[:8]}')
-        row['verify'] = 'ok'
+        if stamp == 'verified':
+            row['verify'] = 'ok'
         return sid or session
 
     def reconcile(self, prs: list[dict]) -> None:

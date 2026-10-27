@@ -1055,7 +1055,9 @@ In a stack run this is Round B1, a chair resumed from Round A that writes
 `findings.json` in that worktree and does not run the gate. The runner checks
 that `findings.json` carries `verified_at` equal to the ballot's `head_oid` and
 fails the ballot when it does not. Round B then runs `--findings` and does phase
-4. A rerun with a verified `findings.json` does not verify again. With no
+4. A rerun with a verified `findings.json` does not verify again. The stamp
+counts only when `jev-judge.py`'s findings check accepts the file: a stamped file
+it rejects is not reused, and Round B is told the reason and rewrites it. With no
 `head_oid` in `header.json`, or a head that is not in the repo, the runner skips
 B1 (`verify: skipped: <reason>` in `run.json`) and Round B writes `findings.json`
 as before. The stack-top reconciliation below is a separate, later question:
@@ -1115,9 +1117,16 @@ finding whose quote is under 20 lines, `jev-judge.py` reads `file` at `head_oid`
 from the repo (`--repo`, or the current directory when `conclave.sh --findings` is
 run inside it) and replaces the quote with the enclosing function, padded to at
 least 20 lines and windowed to at most about 80, plus one caller found with
-`git grep` (a non-test caller first). The chair's quote stays at the top. The
-text is capped at 6000 characters. When the repo or head is missing, the quote is
-left as written. `cited-code-notes.txt` in the ballot says what each finding got.
+`git grep` (a non-test caller first; pytest's `test_*.py` counts as a test).
+The chair's quote stays at the top. The whole text, quote included, is capped at
+6000 characters, and so is a chair quote of 20 lines or more. When the repo or
+head is missing, or the cited line is outside the file, the quote is left as
+written. `cited-code-notes.txt` in the ballot says what each finding got.
+
+The question and the `verification:` line name what `cited_code` holds: the
+function and one caller, the function with no caller, the lines around the cited
+line when no enclosing function was found, or the chair's quote when nothing was
+read. The `hold` criterion names the piece that is not shown.
 
 `post` means eligible for a drafted comment. The chair still withholds a
 read-only `post` they do not agree with, and shows both verdicts. Where Jev

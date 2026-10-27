@@ -33,7 +33,19 @@ _DEF_PATTERNS = [
     ),
 ]
 _CLOSERS = {"end", "}", "};", ")", "end)", "});", "]"}
-_TEST_PATH = re.compile(r"(^|/)(spec|specs|test|tests|__tests__)/|_spec\.|_test\.|\.test\.|\.spec\.|(^|/)test-[^/]*$")
+_TEST_PATH = re.compile(
+    r"(^|/)(spec|specs|test|tests|__tests__)/|_spec\.|_test\.|\.test\.|\.spec\.|(^|/)test-[^/]*$"
+    r"|(^|/)test_[^/]*\.py$"
+)
+# Plain, unquoted git output whatever the user's config says.
+_PLAIN = ("-c", "color.ui=never", "-c", "core.quotePath=false")
+
+# What cited_code holds after expansion, so the Jev text can say only that.
+FUNCTION_AND_CALLER = "function_and_caller"
+FUNCTION_ONLY = "function_only"
+WINDOW = "window"
+CHAIR_QUOTE_KEPT = "chair_quote_kept"
+CHAIR_QUOTE_ONLY = "chair_quote_only"
 
 
 def _git(repo: str, *args: str) -> str | None:
@@ -67,8 +79,12 @@ def _def_end(lines: list[str], start: int) -> int:
     base = _indent(lines[start])
     depth = lines[start].count("(") - lines[start].count(")")
     sig = start
+    # A multi-line signature: the body starts after the parens close. Parens
+    # inside strings are counted too, so never walk into the next definition.
     while depth > 0 and sig + 1 < len(lines) and sig - start < 40:
-        sig += 1  # a multi-line signature: the body starts after the parens close
+        if _def_name(lines[sig + 1]) is not None:
+            break
+        sig += 1
         depth += lines[sig].count("(") - lines[sig].count(")")
     end = sig
     for i in range(sig + 1, len(lines)):
@@ -131,7 +147,7 @@ def _function_window(lines: list[str], start: int, end: int, at: int) -> tuple[s
 
 
 def _read_at(repo: str, head: str, path: str) -> list[str] | None:
-    blob = _git(repo, "show", f"{head}:{path}")
+    blob = _git(repo, *_PLAIN, "show", f"{head}:{path}")
     if blob is None or len(blob) > MAX_FILE_BYTES or "\0" in blob:
         return None
     return blob.splitlines()
@@ -139,12 +155,13 @@ def _read_at(repo: str, head: str, path: str) -> list[str] | None:
 
 def _find_caller(repo: str, head: str, name: str, path: str, def_line: int) -> tuple[str, int] | None:
     pat = rf"(^|[^A-Za-z0-9_$]){re.escape(name)}([^A-Za-z0-9_$]|$)"
-    out = _git(repo, "grep", "-n", "-I", "-E", "-e", pat, head, "--")
+    # --no-color too: a color.grep=always setting outranks color.ui=never.
+    out = _git(repo, *_PLAIN, "grep", "--no-color", "-n", "-I", "-E", "-e", pat, head, "--")
     if not out:
         return None
     best: tuple[int, str, int] | None = None
     for raw in out.splitlines():
-        m = re.match(r"^[0-9a-f]{40}:(.+?):(\d+):(.*)$", raw)
+        m = re.match(r"^[0-9a-fA-F]{40}:(.+?):(\d+):(.*)$", raw)
         if not m:
             continue
         p, n, text = m.group(1), int(m.group(2)), m.group(3)
@@ -160,19 +177,33 @@ def _find_caller(repo: str, head: str, name: str, path: str, def_line: int) -> t
     return (best[1], best[2]) if best else None
 
 
-def expand(repo: str, head: str, path: str, line: int, quoted: str) -> tuple[str, str]:
-    """Return (cited_code, status). status is "expanded" or the reason it was not."""
+def _cap(text: str) -> str:
+    if len(text) <= MAX_CHARS:
+        return text
+    tail = "\n  ... cut at the size limit ..."
+    return text[: MAX_CHARS - len(tail)].rstrip() + tail
+
+
+def expand(repo: str, head: str, path: str, line: int, quoted: str) -> tuple[str, str, str]:
+    """Return (cited_code, status, kind).
+
+    status is "expanded" or the reason it was not. kind is one of the
+    FUNCTION_AND_CALLER .. CHAIR_QUOTE_ONLY constants: what cited_code holds.
+    """
     if not repo or not head:
-        return quoted, "no repo or head"
+        return quoted, "no repo or head", CHAIR_QUOTE_ONLY
     if _git(repo, "cat-file", "-e", f"{head}^{{commit}}") is None:
-        return quoted, f"head {head[:8]} not in repo"
+        return quoted, f"head {head[:8]} not in repo", CHAIR_QUOTE_ONLY
     lines = _read_at(repo, head, path)
     if lines is None:
-        return quoted, f"{path} not readable at {head[:8]}"
+        return quoted, f"{path} not readable at {head[:8]}", CHAIR_QUOTE_ONLY
     if not lines:
-        return quoted, f"{path} is empty"
-    at = min(max(line - 1, 0), len(lines) - 1)
+        return quoted, f"{path} is empty", CHAIR_QUOTE_ONLY
+    if line < 1 or line > len(lines):
+        return quoted, f"line {line} is outside the file ({len(lines)} lines)", CHAIR_QUOTE_ONLY
+    at = line - 1
     found = enclosing_def(lines, line)
+    kind = WINDOW
     blocks = []
     caller_note = ""
     if found is None:
@@ -185,6 +216,7 @@ def expand(repo: str, head: str, path: str, line: int, quoted: str) -> tuple[str
         start, end, name = found
         body, lo, hi = _function_window(lines, start, end, at)
         blocks.append(f"{path}:{lo + 1}-{hi + 1} (enclosing `{name}`, at head {head[:8]})\n{body}")
+        kind = FUNCTION_ONLY
         hit = _find_caller(repo, head, name, path, start + 1)
         if hit is None:
             caller_note = f"caller: none found for `{name}` in the repo at head {head[:8]}"
@@ -199,22 +231,27 @@ def expand(repo: str, head: str, path: str, line: int, quoted: str) -> tuple[str
                 blocks.append(
                     f"caller of `{name}`: {cpath}:{clo + 1}-{chi + 1}\n" + _numbered(clines, clo, chi, c_at)
                 )
+                kind = FUNCTION_AND_CALLER
     if caller_note:
         blocks.append(caller_note)
     text = "\n\n".join(blocks)
-    if len(text) > MAX_CHARS:
-        text = text[: MAX_CHARS - 40].rstrip() + "\n  ... cut at the size limit ..."
     if quoted.strip():
         text = f"quoted by the chair:\n{quoted.strip()}\n\nread from the repo:\n{text}"
-    return text, "expanded"
+    return _cap(text), "expanded", kind
 
 
 def expand_findings(doc: dict, repo: str, head: str) -> list[str]:
-    """Replace each short cited_code in place. Returns one status line per finding."""
+    """Replace each short cited_code in place. Returns one status line per finding.
+
+    Sets f["cited_context"] to what cited_code now holds (see expand).
+    """
     notes = []
     for f in doc["findings"]:
         quoted = str(f["cited_code"])
+        f["cited_context"] = CHAIR_QUOTE_ONLY
         if len(quoted.splitlines()) >= MIN_LINES:
+            f["cited_code"] = _cap(quoted)
+            f["cited_context"] = CHAIR_QUOTE_KEPT
             notes.append(f"{f['id']}: kept (chair quote has {len(quoted.splitlines())} lines)")
             continue
         try:
@@ -222,7 +259,8 @@ def expand_findings(doc: dict, repo: str, head: str) -> list[str]:
         except (TypeError, ValueError):
             notes.append(f"{f['id']}: not expanded (line is not a number)")
             continue
-        text, status = expand(repo, head, str(f["file"]), line, quoted)
+        text, status, kind = expand(repo, head, str(f["file"]), line, quoted)
+        f["cited_context"] = kind
         if status == "expanded":
             f["cited_code"] = text
             notes.append(f"{f['id']}: expanded to {len(text.splitlines())} lines")

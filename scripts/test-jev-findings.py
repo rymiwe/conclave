@@ -298,6 +298,143 @@ def test_old_shape(tmp: Path) -> None:
     check("def refund(order)" in s, "and the code is still expanded")
 
 
+TS_METHOD = (
+    "export class Payments {\n  refund(order: Order) {\n    if (order.locked) return 0\n"
+    + "".join(f"    const pad_{i} = {i}\n" for i in range(25))
+    + "    ledger.credit(order.account, amount - fee)\n    return amount\n  }\n}\n"
+)
+
+
+def section_of(state: str, fid: str) -> str:
+    return state.split(f"## {fid}\n", 1)[1].split("\n## ", 1)[0]
+
+
+def test_how_matches_expansion(tmp: Path) -> None:
+    """The question and verification line say what cited_code really holds."""
+    judge = load("jev_judge3", "jev-judge.py")
+    repo, head = fixture_repo(tmp)
+    (repo / "app/payments.ts").write_text(TS_METHOD)
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "ts")
+    head = git(repo, "rev-parse", "HEAD")
+    credit = TS_METHOD.splitlines().index("    ledger.credit(order.account, amount - fee)") + 1
+    findings = [
+        finding(id="fn"),
+        finding(id="win", file="app/payments.ts", line=credit, cited_code="ledger.credit(order.account, amount - fee)"),
+        finding(id="gone", file="app/missing.rb"),
+        finding(id="kept", cited_code="x\n" * 25),
+    ]
+    for verified_at in (head, None):
+        seen: list = []
+        stub_jev(judge, seen)
+        d = ballot(tmp, f"how-{bool(verified_at)}", head, [dict(f) for f in findings], verified_at)
+        run_gate(judge, d, repo)
+        q, state = seen[0]["questions"], seen[0]["state"]
+        fn, win, gone, kept = (q[k]["instructions"] for k in ("fn", "win", "gone", "kept"))
+        check("enclosing function and one caller" in fn, f"function plus caller is named when both were read ({bool(verified_at)})")
+        check("enclosing function and one caller" not in win and "no enclosing function was found" in win
+              and "enclosing function beyond these lines" in q["win"]["criteria"]["hold"],
+              f"a +-10 line window is called a window and the hold names the missing function ({bool(verified_at)})")
+        for fid, text in (("gone", gone), ("kept", kept)):
+            check("read from the repo" not in text.replace("not read from the repo", "")
+                  and "enclosing function" not in text and "repo code around the quote" in q[fid]["criteria"]["hold"],
+                  f"{fid}: a chair quote is not described as code read from the repo ({bool(verified_at)})")
+        for fid in ("win", "gone", "kept"):
+            line = section_of(state, fid).split("verification: ", 1)[1].splitlines()[0]
+            check("enclosing function and one caller" not in line
+                  and "read from the repo at that commit" not in line,
+                  f"{fid}: the verification line follows the expansion result ({line[:90]!r})")
+        if verified_at:
+            check(fn.startswith("Should") and f"checked at head {head[:8]} by reading" in fn,
+                  "a verified read finding says where it was checked")
+        else:
+            check(all("checked" not in q[k]["instructions"] for k in q),
+                  "no verified_at: no question claims the finding was checked")
+
+
+def test_caller_grep_is_plain(tmp: Path) -> None:
+    """color.ui=always, an uppercase head, and a non-ASCII caller path still find the caller."""
+    fc = load("finding_context2", "finding_context.py")
+    repo, head = fixture_repo(tmp)
+    git(repo, "config", "color.ui", "always")
+    git(repo, "config", "color.grep", "always")
+    doc = {"findings": [finding()]}
+    fc.expand_findings(doc, str(repo), head)
+    check("caller of `refund`: app/settle.rb" in doc["findings"][0]["cited_code"],
+          "color.ui=always does not hide the caller")
+    doc = {"findings": [finding()]}
+    fc.expand_findings(doc, str(repo), head.upper())
+    check("caller of `refund`: app/settle.rb" in doc["findings"][0]["cited_code"],
+          "an uppercase head still finds the caller")
+    git(repo, "mv", "app/settle.rb", "app/caf\u00e9_caller.rb")
+    git(repo, "commit", "-q", "-m", "rename")
+    head = git(repo, "rev-parse", "HEAD")
+    doc = {"findings": [finding()]}
+    fc.expand_findings(doc, str(repo), head)
+    text = doc["findings"][0]["cited_code"]
+    check("caller of `refund`: app/caf\u00e9_caller.rb" in text and "payments.refund(order)" in text
+          and "not readable" not in text, "a non-ASCII caller path is read back")
+
+
+def test_signature_walk_stops_at_definition() -> None:
+    fc = load("finding_context3", "finding_context.py")
+    src = 'def format_token(prefix="("):\n    return prefix + "x"\n\ndef innocent():\n    return 1\n'.splitlines()
+    got = fc.enclosing_def(src, 2)
+    check(got is not None and got[2] == "format_token" and got[1] < 3,
+          f"a paren inside a string does not swallow the next function ({got})")
+    check(fc.enclosing_def(src, 5) is not None and fc.enclosing_def(src, 5)[2] == "innocent",
+          "the next function is its own definition")
+
+
+def test_pytest_caller_ranks_last(tmp: Path) -> None:
+    fc = load("finding_context4", "finding_context.py")
+    repo = tmp / "py"
+    (repo / "pkg").mkdir(parents=True)
+    (repo / "pkg/refunds.py").write_text("def refund(order):\n    return order\n")
+    (repo / "pkg/test_refund.py").write_text("from pkg.refunds import x\nrefund(1)\n")
+    (repo / "pkg/util.py").write_text("import x\n\n\nrefund(2)\n")
+    git(repo, "init", "-q", "-b", "main")
+    git(repo, "-c", "user.email=t@e", "-c", "user.name=T", "add", ".")
+    git(repo, "-c", "user.email=t@e", "-c", "user.name=T", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "f")
+    head = git(repo, "rev-parse", "HEAD")
+    doc = {"findings": [finding(file="pkg/refunds.py", line=2, cited_code="return order")]}
+    fc.expand_findings(doc, str(repo), head)
+    text = doc["findings"][0]["cited_code"]
+    check("caller of `refund`: pkg/util.py" in text, f"a pytest test_*.py caller ranks after product code ({re.findall(r'caller of .*', text)})")
+
+
+def test_line_outside_file(tmp: Path) -> None:
+    fc = load("finding_context5", "finding_context.py")
+    repo, head = fixture_repo(tmp)
+    doc = {"findings": [finding(line=500)]}
+    notes = fc.expand_findings(doc, str(repo), head)
+    n = len(RUBY.splitlines())
+    check(doc["findings"][0]["cited_code"] == finding()["cited_code"]
+          and notes == [f"f1: not expanded (line 500 is outside the file ({n} lines))"],
+          f"a cited line past the end keeps the chair quote and says why ({notes})")
+    doc = {"findings": [finding(line=0)]}
+    notes = fc.expand_findings(doc, str(repo), head)
+    check("line 0 is outside the file" in notes[0], f"line 0 is outside the file too ({notes})")
+
+
+def test_cap_after_quote(tmp: Path) -> None:
+    fc = load("finding_context6", "finding_context.py")
+    repo, head = fixture_repo(tmp)
+    (repo / "app/wide.rb").write_text("def wide\n" + "".join(f"  v{i} = '{'w' * 90}'\n" for i in range(75)) + "end\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "wide")
+    head = git(repo, "rev-parse", "HEAD")
+    quote = "".join(f"  q{i} {'q' * 76}\n" for i in range(19))
+    doc = {"findings": [finding(file="app/wide.rb", line=40, cited_code=quote)]}
+    fc.expand_findings(doc, str(repo), head)
+    got = len(doc["findings"][0]["cited_code"])
+    check(got <= fc.MAX_CHARS, f"the cap holds after the chair quote is prepended ({got} chars)")
+    doc = {"findings": [finding(cited_code=("k" * 400 + "\n") * 25)]}
+    fc.expand_findings(doc, str(repo), head)
+    got = len(doc["findings"][0]["cited_code"])
+    check(got <= fc.MAX_CHARS, f"a kept quote of 20+ lines is capped too ({got} chars)")
+
+
 def main() -> None:
     os.environ.setdefault("CONCLAVE_JEV_OP", "/bin/false")
     with tempfile.TemporaryDirectory(prefix="jev-findings-") as raw:
@@ -306,6 +443,14 @@ def main() -> None:
         test_expansion(tmp / "a")
         test_state_and_gate(tmp / "b")
         test_old_shape(tmp / "c")
+        for name in ("d", "e", "f", "g", "h"):
+            (tmp / name).mkdir()
+        test_how_matches_expansion(tmp / "d")
+        test_caller_grep_is_plain(tmp / "e")
+        test_signature_walk_stops_at_definition()
+        test_pytest_caller_ranks_last(tmp / "f")
+        test_line_outside_file(tmp / "g")
+        test_cap_after_quote(tmp / "h")
     print(f"{'FAILED' if FAILED else 'all passed'}: {FAILED} failed")
     sys.exit(1 if FAILED else 0)
 

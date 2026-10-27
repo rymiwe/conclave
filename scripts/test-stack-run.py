@@ -242,7 +242,8 @@ class Fixture:
         self.repo.mkdir(parents=True)
         scripts = self.root / 'scripts'
         scripts.mkdir(parents=True)
-        for name in ('stack-run.py', 'review-stack.py', 'conclave_env.py', 'review-kind.sh', 'lineup.py'):
+        for name in ('stack-run.py', 'review-stack.py', 'conclave_env.py', 'review-kind.sh', 'lineup.py',
+                     'jev-judge.py', 'audit_gate.py', 'finding_context.py'):
             shutil.copyfile(SCRIPTS / name, scripts / name)
         self.bin = self.base / 'bin'
         write_exe(self.bin / 'gh', GH)
@@ -538,6 +539,27 @@ def test_verify_before_jev(tmp: Path, mod) -> None:
     got = f2.invoke('--pr', '2', *PER_PR)
     check(got.returncode == 0, f'resume with a verified findings.json exits zero ({got.stderr})')
     check(not any(c[0] == 'verify-chair' and c[1] == 'p-2' for c in f2.calls()), 'a verified findings.json is not verified again')
+
+    # A stamped findings.json the findings command rejects is not reused: round B rewrites it.
+    f5 = Fixture(tmp, 'verify-rejected')
+    oid = f5.reconcile_repo()
+    f5.env['HEADER_OID'] = oid
+    b = f5.ballot(2)
+    (b / 'blind').mkdir()
+    (b / 'blind/leg-A.md').write_text('report')
+    (b / 'errors.md').write_text('(none)\n')
+    (b / 'header.json').write_text(json.dumps({'kind': 'review', 'head_oid': oid}))
+    (b / 'brief.md').write_text('kind: review\ndifficulty: high\n')
+    receipt(b)
+    (b / 'findings.json').write_text(json.dumps({'verified_at': oid, 'findings': [{'id': 'f1', 'claim': 'c', 'file': 'a.rb',
+        'line': 1, 'cited_code': 'one', 'evidence': 'no run was made', 'repro_executed': True, 'legs': {'A': 'found'}}]}))
+    got = f5.invoke('--pr', '2', *PER_PR)
+    b2 = [c[1][-1] for c in f5.calls() if c[0] == 'cursor' and f'Round B. Ballot directory: {b}.' in c[1][-1]]
+    row = next(r for r in f5.record()['prs'] if r.get('ballot', '').endswith('p-2') or r.get('number') == 2)
+    check(len(b2) == 1 and 'already written and verified' not in b2[0] and 'Rewrite findings.json' in b2[0]
+          and 'holds no command or output' in b2[0], f'round B is told to rewrite a stamped file the gate rejects ({len(b2)} prompts)')
+    check(row.get('verify') != 'reused', f'a rejected stamp is not recorded as reused ({row.get("verify")})')
+    check(got.returncode == 0, f'the rerun recovers once round B rewrites findings.json ({got.stderr[-200:]})')
 
     # A verify chair that writes no stamp fails the ballot before any gate call.
     f3 = Fixture(tmp, 'verify-nostamp')
