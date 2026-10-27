@@ -2801,7 +2801,7 @@ EOF
 }
 
 review_print_result() {
-  local v noun_r noun_v
+  local v noun_r noun_v packet_log note
   review_count_reports
   if [ "$REVIEW_REPORTS_PRESENT" -lt "$REVIEW_REPORTS_EXPECTED" ]; then
     noun_r="reports"
@@ -2825,9 +2825,24 @@ review_print_result() {
     printf '\n'
     cat "$DIR/voter-argon.partial"
     printf 'Full list: tmp/council/%s/voter-argon.partial\n\n' "$ID"
-  elif grep -q 'mode=split' "$DIR/voter-argon.packet.txt" 2>/dev/null; then
-    printf '\nNote: the argon packet was split in two (source, then specs and tests), nothing cut.\n'
-    printf '%s\n\n' "$(cat "$DIR/voter-argon.packet.txt")"
+  elif [ -s "$DIR/voter-argon.packet.txt" ]; then
+    packet_log="$(cat "$DIR/voter-argon.packet.txt")"
+    note=""
+    # .partial is removed when no packet returned a report, so a cut or split
+    # without it is either clean (a report exists) or skipped (none does).
+    case "$packet_log" in
+      *mode=split*files_cut=0)
+        if [ -s "$DIR/voter-argon.md" ]; then
+          note="the argon packet was split in two (source, then specs and tests), nothing cut."
+        else
+          note="the argon packet was split in two, and no packet was reviewed (Argon skipped)."
+        fi
+        ;;
+      *files_cut=0) ;;
+      *) [ -s "$DIR/voter-argon.md" ] \
+        || note="files were cut from the argon packet, and no packet was reviewed (Argon skipped)." ;;
+    esac
+    [ -z "$note" ] || printf '\nNote: %s\n%s\n\n' "$note" "$packet_log"
   fi
   if [ "$REVIEW_REPORTS_PRESENT" -lt "$REVIEW_REPORTS_EXPECTED" ]; then
     printf 'Review %s phase 1 stopped. Reports on disk were kept.\n' "$ID"

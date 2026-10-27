@@ -645,6 +645,54 @@ review_count_reports() {{ REVIEW_REPORTS_PRESENT=0; REVIEW_REPORTS_EXPECTED=1; R
 review_print_result 2>&1
 """).stdout
         check("PARTIAL" not in summary, f"{name}: the phase-1 summary does not say Argon reviewed a partial packet")
+        check("nothing cut" not in summary and "files were cut" in summary and "no packet was reviewed" in summary,
+              f"{name}: the phase-1 summary states the cut and the skip "
+              f"({[l for l in summary.splitlines() if l.startswith('Note:')]!r})")
+
+
+def one_line_diff(path: str, nbytes: int) -> bytes:
+    head = f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -0,0 +1 @@\n".encode()
+    return head + b"+" + b"x" * nbytes + b"\n"
+
+
+def test_split_one_side_cannot_fit(work: Path):
+    """Gate A5 repro: the spec side is one 400 KB line, so only the source side fits."""
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import argon_packet
+    diff = one_line_diff("app/user.rb", 20_000) + one_line_diff("spec/fixtures/blob.json", 400_000)
+    out = work / "plan"
+    try:
+        res = argon_packet.plan(b"B" * 6000 + b"\n", diff, 150_000, out)
+    except argon_packet.PacketOverCap as exc:
+        check(False, f"one side fits: plan writes that packet instead of failing ({exc})")
+        return
+    shown = [[f["path"] for f in p["files"]] for p in res["packets"]]
+    texts = [(out / p["path"]).read_text(encoding="utf-8") for p in res["packets"]]
+    check(shown == [["app/user.rb"]] and len(list(out.glob("packet-*.md"))) == 1,
+          f"one side fits: the source packet is written alone ({res['mode']} {shown})")
+    check([c["path"] for c in res["cut"]] == ["spec/fixtures/blob.json"]
+          and "spec/fixtures/blob.json" in texts[0] and "+++ b/spec/fixtures/blob.json" not in texts[0],
+          "the side that does not fit is named as cut in the packet coverage note")
+    check("spec/fixtures/blob.json" in res["warning"] and "packet 2" not in texts[0],
+          f"the cut side is in the warning that becomes .partial ({res['warning'][:120]!r})")
+
+    sub = work / "leg"
+    sub.mkdir()
+    repo = make_repo(sub, {"app/user.rb": 20_000, "spec/fixtures/blob.json": 10})
+    (repo / "spec/fixtures/blob.json").write_text("x" * 400_000 + "\n", encoding="utf-8")
+    ballot = sub / "ballot"
+    ballot.mkdir()
+    (ballot / "voter-argon.brief.md").write_text("B" * 6000 + "\n", encoding="utf-8")
+    proc = run_bash(STUB + f"""
+DIR={ballot}; ID=pkt; REPO={repo}; ERRORS_FILE={ballot}/errors.md; : >"$ERRORS_FILE"; DRY_RUN=0; KIND=review
+review_run_argon {repo}
+echo rc=$?
+""", {"TMPDIR": str(sub), "FAIL_PACKET": "0"})
+    partial = read(ballot / "voter-argon.partial")
+    check("rc=0" in proc.stdout and not (ballot / "voter-argon.fail").exists()
+          and "FINDING-FROM-CALL-1" in read(ballot / "voter-argon.md"),
+          f"one side fits: the leg runs Argon on it ({read(ballot / 'voter-argon.fail').strip()!r})")
+    check("spec/fixtures/blob.json" in partial, f"one side fits: .partial names the cut side ({partial[:120]!r})")
 
 
 def test_max_bytes_not_positive_int(work: Path):
@@ -665,7 +713,8 @@ TESTS = [test_small, test_split_clean, test_split_with_generated, test_large, te
          test_cut_path_cannot_forge_coverage, test_stale_skip_split, test_stale_skip_cut,
          test_stale_skip_this_run_fails, test_diff_config_pinned, test_packet_never_over_cap,
          test_packet_cannot_fit_fails, test_count_line_leaves_room_for_a_file, test_no_file_fits_fails,
-         test_cut_then_skip_leaves_no_partial, test_max_bytes_not_positive_int]
+         test_cut_then_skip_leaves_no_partial, test_max_bytes_not_positive_int,
+         test_split_one_side_cannot_fit]
 
 
 def main():

@@ -348,12 +348,35 @@ def plan(brief: bytes, diff: bytes, max_bytes: int, out_dir: Path) -> dict:
         b_label = "the specs and tests"
         a_other = "The specs and tests are in packet 2 and are not shown here."
         b_other = "The changed source files are in packet 1 and are not shown here."
-        data_a, cut_a = build_packet(brief, [by["source"], gen], max_bytes, a_other, f"packet 1 of 2, {a_label}")
-        data_b, cut_b = build_packet(brief, [by["spec"]], max_bytes, b_other, f"packet 2 of 2, {b_label}")
-        packets.append((data_a, by["source"] + gen, cut_a, a_label))
-        packets.append((data_b, by["spec"], cut_b, b_label))
-        result["mode"] = "split"
-        result["cut"] = sorted(cut_a + cut_b, key=lambda s: s.index)
+        a_groups, b_groups = [by["source"], gen], [by["spec"]]
+        built, errors = {}, []
+        for side, groups, other, label in (("a", a_groups, a_other, f"packet 1 of 2, {a_label}"),
+                                           ("b", b_groups, b_other, f"packet 2 of 2, {b_label}")):
+            try:
+                built[side] = build_packet(brief, groups, max_bytes, other, label)
+            except PacketOverCap as exc:
+                errors.append(str(exc))
+        if not built:
+            raise PacketOverCap(f"neither half of the split fits: {'; '.join(errors)}")
+        if len(built) == 2:
+            (data_a, cut_a), (data_b, cut_b) = built["a"], built["b"]
+            packets.append((data_a, by["source"] + gen, cut_a, a_label))
+            packets.append((data_b, by["spec"], cut_b, b_label))
+            result["mode"] = "split"
+            result["cut"] = sorted(cut_a + cut_b, key=lambda s: s.index)
+        else:
+            # One half fits and the other cannot fit even alone: send the half that
+            # fits, with the other half's files in its coverage list as not reviewed.
+            if "a" in built:
+                groups, missing = a_groups, by["spec"]
+                other = "The specs and tests did not fit in a packet of their own and were not sent."
+            else:
+                groups, missing = b_groups, by["source"] + gen
+                other = "The changed source files did not fit in a packet of their own and were not sent."
+            data, cut = build_packet(brief, groups + [missing], max_bytes, other, "")
+            packets.append((data, [s for g in groups for s in g] + missing, cut, ""))
+            result["mode"] = "cut"
+            result["cut"] = cut
     else:
         data, cut = build_packet(brief, [by["source"], by["spec"], by["generated"]],
                                  max_bytes, "", "")
