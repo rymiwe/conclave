@@ -317,4 +317,37 @@ out="$("$ROOT/scripts/merge-gate.sh" merge "$PR" "$T/nowhere" 2>&1)"; rc=$?
 [ "$rc" = 3 ] && ok "no gate dir refused" || bad "no gate dir rc $rc"
 has "no gate dir: reason" "$out" "no gate answer at"
 
+# Verdict parsing: the value must end at end of line or a non-lowercase character.
+parse_of() { printf '%s\n' "$1" > "$T/parse.md"; python3 "$ROOT/scripts/merge_gate.py" parse "$T/parse.md"; }
+GLUED=$'approve\n\nFindings:\nNone.\n\none_way: noThe start-order stress run was killed after it deadlocked, so it produced no result.'
+has "glued 'one_way: noThe ...' parses as no" "$(parse_of "$GLUED")" '"one_way": "no"'
+has "glued parse has no error" "$(parse_of "$GLUED")" '"error": null'
+for w in nothing nope none noted yesterday; do
+  v="$(parse_of $'approve\none_way: '"$w")"
+  hasnt "one_way: $w is not a verdict" "$v" '"one_way": "no"'
+  hasnt "one_way: $w is not yes" "$v" '"one_way": "yes"'
+  has "one_way: $w is unparseable" "$v" "unparseable one_way line: 'one_way: $w'"
+done
+has "plain one_way: yes parses" "$(parse_of $'approve\none_way: yes\none_way_at: a.sql:1 x')" '"one_way": "yes"'
+has "plain one_way: no parses" "$(parse_of $'approve\none_way: no')" '"one_way": "no"'
+has "bold **one_way: no** parses" "$(parse_of $'approve\n**one_way: no**')" '"one_way": "no"'
+has "uppercase value one_way: NO is unparseable" "$(parse_of $'approve\none_way: NO')" "unparseable one_way line: 'one_way: NO'"
+
+# cursor-agent joins assistant turns with no separator in its result string.
+asst() { jq -cn --arg t "$1" '{type:"assistant",message:{role:"assistant",content:[{type:"text",text:$t}]}}'; }
+C1='I will read the diff before judging it.'
+C2=$'approve\n\nFindings:\nNone.\n\none_way: no'
+{ echo '{"type":"system"}'; asst "$C1"; asst "$C2"
+  jq -cn --arg r "$C1$C2" '{type:"result",subtype:"success",is_error:false,result:$r}'; } > "$T/two.jsonl"
+python3 "$ROOT/scripts/merge_gate.py" cursor-result "$T/two.jsonl" "$T/two.md" > /dev/null
+[ "$(sed -n 1p "$T/two.md")" = "$C1" ] && ok "two assistant chunks: first chunk on its own line" || bad "two chunks line 1: $(sed -n 1p "$T/two.md")"
+[ "$(sed -n 2p "$T/two.md")" = approve ] && ok "two assistant chunks: approve on its own line" || bad "two chunks line 2: $(sed -n 2p "$T/two.md")"
+has "two assistant chunks: verdict parses" "$(python3 "$ROOT/scripts/merge_gate.py" parse "$T/two.md")" '"one_way": "no"'
+{ asst "something else"; jq -cn '{type:"result",is_error:false,result:"the result string"}'; } > "$T/mismatch.jsonl"
+python3 "$ROOT/scripts/merge_gate.py" cursor-result "$T/mismatch.jsonl" "$T/mismatch.md" > /dev/null
+[ "$(cat "$T/mismatch.md")" = "the result string" ] && ok "assistant text that is not the result falls back to the result" || bad "mismatch: $(cat "$T/mismatch.md")"
+{ asst "$C1"; asst "$C2"; jq -cn '{type:"result",is_error:true,result:"boom"}'; } > "$T/err.jsonl"
+python3 "$ROOT/scripts/merge_gate.py" cursor-result "$T/err.jsonl" "$T/err.md" > /dev/null 2>&1; rc=$?
+[ "$rc" = 1 ] && ok "error result with assistant text is no answer" || bad "error result rc $rc"
+
 exit "$fail"

@@ -43,7 +43,10 @@ LABEL = "one-way"
 REFUSED = 3
 # A directive is a line whose first token is one_way: or one_way_at: (colon
 # required). A garbled value after the colon is unparseable; prose is not a directive.
-VERDICT = re.compile(r"^one_way\s*:(.*)$", re.I)
+VERDICT = re.compile(r"^(?i:one_way)\s*:(.*)$")
+# The value is lowercase yes|no and ends at end of line or a non-lowercase
+# character, so a glued "no" + "The ..." parses and nothing, nope, none do not.
+VALUE = re.compile(r"\s*(yes|no)(?![a-z])")
 DIRECTIVE_AT = re.compile(r"^one_way_at\s*:", re.I)
 ITEM = re.compile(r"^one_way_at\s*:\s*(\S+:\d+)\s*(.*)$", re.I)
 
@@ -76,9 +79,9 @@ def parse(text: str) -> dict:
             continue
         m = VERDICT.match(line)
         if m:
-            v = m.group(1).strip().lower()
-            if v in ("yes", "no"):
-                values.append(v)
+            v = VALUE.match(m.group(1))
+            if v:
+                values.append(v.group(1))
             else:
                 bad.append(line)
         # Anything else that only mentions one_way (prose, a bullet) is ignored.
@@ -222,8 +225,14 @@ def pick(route_json: str) -> tuple[dict | None, str]:
 
 
 def cursor_result(stream: str, md: str) -> int:
-    """The last cursor-agent `result` event that is not an error and has text."""
+    """The last cursor-agent `result` event that is not an error and has text.
+
+    cursor-agent joins the assistant turns in `result` with no separator, which
+    glues the verdict onto the prose before it. When the assistant events' text
+    is exactly that string, rejoin it with newlines.
+    """
     r = ""
+    chunks: list[str] = []
     try:
         lines = Path(stream).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as e:
@@ -234,10 +243,25 @@ def cursor_result(stream: str, md: str) -> int:
             e = json.loads(line)
         except ValueError:
             continue
-        if (isinstance(e, dict) and e.get("type") == "result" and e.get("is_error") is False
+        if not isinstance(e, dict):
+            continue
+        if e.get("type") == "assistant":
+            chunks += _assistant_text(e)
+        elif (e.get("type") == "result" and e.get("is_error") is False
                 and isinstance(e.get("result"), str) and e["result"].strip()):
             r = e["result"]
+    if chunks and "".join(chunks) == r:
+        r = "\n".join(chunks)
     return _answer(r, md)
+
+
+def _assistant_text(e: dict) -> list[str]:
+    msg = e.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if not isinstance(content, list):
+        return []
+    return [c["text"] for c in content
+            if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str)]
 
 
 def claude_result(out: str, md: str) -> int:
