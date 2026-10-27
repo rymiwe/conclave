@@ -5,7 +5,7 @@
     merge_gate.py parse <gate.md>
     merge_gate.py merge <pr_url> <out_dir>
     merge_gate.py pick <gate-route.json>
-    merge_gate.py cursor-result|claude-result|plain-result <reviewer output> <gate.md>
+    merge_gate.py cursor-result|claude-result|plain-result|muse-result <reviewer output> <gate.md>
 
 The reviewer ends its answer with `one_way: yes` or `one_way: no`, and on yes
 one `one_way_at: <file>:<line> <what>` line per step a git revert cannot undo.
@@ -25,9 +25,10 @@ list, else reviewers[0].runner. When the route asked, named no reviewer, has
 no argv list (an older seat-usage), or the model or argv is unsafe, it prints
 one line saying why and exits 3.
 
-cursor-result, claude-result, and plain-result write the reviewer's answer to
-gate.md from a cursor-agent stream, a claude JSON result, or a plain file, and
-exit 1 when there is no answer.
+cursor-result, claude-result, plain-result, and muse-result write the
+reviewer's answer to gate.md from a cursor-agent stream, a claude JSON result,
+a plain file, or a `muse exec --json` JSONL stream, and exit 1 when there is
+no answer.
 """
 from __future__ import annotations
 
@@ -250,12 +251,59 @@ def claude_result(out: str, md: str) -> int:
 
 
 def plain_result(src: str, md: str) -> int:
-    """A file that holds the answer as is (codex --output-last-message, muse stdout)."""
+    """A file that holds the answer as is (codex --output-last-message)."""
     try:
         r = Path(src).read_text(encoding="utf-8", errors="replace")
     except OSError:
         r = ""
     return _answer(r, md)
+
+
+def muse_result(src: str, md: str) -> int:
+    """The answer inside a `muse exec --json` JSONL stream.
+
+    muse-usage.py keeps the joined run.output.delta text, and the last
+    run.terminal.* text when the deltas are empty. Plain stdout stays as is.
+    """
+    try:
+        text = Path(src).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    return _answer(_muse_answer(text), md)
+
+
+def _muse_answer(text: str) -> str:
+    parts: list[str] = []
+    terminal = ""
+    saw = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("{"):
+            continue
+        try:
+            rec = json.loads(stripped)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        kind = rec.get("payload_type")
+        payload = rec.get("payload")
+        if not isinstance(kind, str) or not isinstance(payload, dict):
+            continue
+        chunk = payload.get("text")
+        if not isinstance(chunk, str):
+            continue
+        saw = True
+        if kind == "run.output.delta":
+            parts.append(chunk)
+        elif kind.startswith("run.terminal."):
+            terminal = chunk
+    if not saw:
+        return text
+    joined = "".join(parts)
+    if joined.strip():
+        return joined
+    return terminal if terminal.strip() else joined
 
 
 def _answer(r: str, md: str) -> int:
@@ -284,9 +332,9 @@ def main(argv: list[str]) -> int:
             return REFUSED
         print(json.dumps(picked))
         return 0
-    if len(argv) == 3 and argv[0] in ("cursor-result", "claude-result", "plain-result"):
+    if len(argv) == 3 and argv[0] in ("cursor-result", "claude-result", "plain-result", "muse-result"):
         return {"cursor-result": cursor_result, "claude-result": claude_result,
-                "plain-result": plain_result}[argv[0]](argv[1], argv[2])
+                "plain-result": plain_result, "muse-result": muse_result}[argv[0]](argv[1], argv[2])
     print(__doc__.split("\n\n")[1], file=sys.stderr)
     return 2
 

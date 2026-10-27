@@ -166,7 +166,7 @@ A
           --prompt-file "$P/PROMPT.md" --max-model-steps 8 < /dev/null ) > "$raw" 2> "$err"
       ec=$?
       echo "$name exit=$ec"
-      python3 "$ROOT/scripts/merge_gate.py" plain-result "$raw" "$out/gate.md" || ec=1 ;;
+      python3 "$ROOT/scripts/merge_gate.py" muse-result "$raw" "$out/gate.md" || ec=1 ;;
   esac
   python3 "$ROOT/scripts/merge_gate.py" parse "$out/gate.md" > "$out/gate-verdict.json"
   cat "$out/gate-verdict.json"

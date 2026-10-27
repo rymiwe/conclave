@@ -66,7 +66,12 @@ A
 cat > "$T/bin/muse" <<'A'
 #!/usr/bin/env bash
 "$(dirname "$0")/logargv" muse "$@"
-cat "$FAKE_REPLY"
+# muse exec --json is JSONL. The answer is joined run.output.delta text.
+if [ -n "${FAKE_MUSE_TERMINAL:-}" ]; then
+  jq -cn --rawfile r "$FAKE_REPLY" '{payload_type:"run.terminal.done",payload:{text:$r}}'
+  exit 0
+fi
+jq -cn --rawfile r "$FAKE_REPLY" '{payload_type:"run.output.delta",payload:{text:$r}}'
 A
 # The router stub logs its argv and prints $FAKE_ROUTE (exit $FAKE_ROUTE_RC).
 cat > "$T/bin/seat-usage" <<'S'
@@ -209,6 +214,13 @@ passes muse muse
 has "muse: --disable-shell" "$run_log" "--disable-shell"
 has "muse: --disable-write" "$run_log" "--disable-write"
 has "muse: model" "$run_log" "--model muse-wonder-2 "
+has "muse: answer is not the JSONL wrapper" "$(cat "$T/muse/out/gate.md")" "approve"
+hasnt "muse: gate.md is not a JSON line" "$(cat "$T/muse/out/gate.md")" "payload_type"
+FAKE_MUSE_TERMINAL=1 FAKE_ROUTE="$(route muse meta muse-wonder-2 '["muse","exec","--model","muse-wonder-2"]')" \
+  run museterm "$ANSWER"
+passes museterm muse
+has "muse terminal: answer comes from run.terminal" "$(cat "$T/museterm/out/gate.md")" "one_way: no"
+hasnt "muse terminal: gate.md is not a JSON line" "$(cat "$T/museterm/out/gate.md")" "payload_type"
 
 # 2. one_way: yes -> refused, names the reason and the file:line, no merge.
 run yes $'approve\n\nFindings:\nNone.\n\n**one_way: yes**\none_way_at: db/migrate/002_drop.sql:3 drops column users.email'
