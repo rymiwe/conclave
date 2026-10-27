@@ -60,6 +60,11 @@ if '-X' in args:
         print(json.dumps({'id': 77, 'html_url': 'https://github.com/example/widgets/pull/7#discussion_r77'}))
     elif base.endswith('/comments') and '/reviews/' not in base:
         req = json.loads(sys.stdin.read())
+        nth = os.environ.get('GH_FILE_FAIL_NTH')
+        sent = (state / 'file-comments.jsonl')
+        if nth and (len(sent.read_text().splitlines()) if sent.exists() else 0) == int(nth) - 1:
+            sys.stderr.write('HTTP 502 Bad Gateway\\n')
+            sys.exit(1)
         with (state / 'file-comments.jsonl').open('a') as out:
             out.write(json.dumps(req) + '\\n')
         print(json.dumps({'id': 8100, 'html_url': 'https://github.com/example/widgets/pull/7#discussion_r8100'}))
@@ -100,6 +105,9 @@ elif base == repo + '/reviews/900/comments':
         for i, c in enumerate(req['comments'])]
     print(json.dumps(rows))
 elif base == repo + '/reviews/900':
+    if os.environ.get('GH_REVIEW_GONE'):
+        sys.stderr.write('HTTP 404 Not Found\\n')
+        sys.exit(1)
     req = json.loads((state / 'posted-request.json').read_text())
     print(json.dumps({'id': 900, 'state': 'COMMENTED', 'commit_id': req['commit_id'],
                       'body': req['body'],
@@ -1695,6 +1703,85 @@ def test_verdict(root: Path) -> None:
           f'findings moved outside the diff are zero labeled findings ({verdict_line(proc)!r} labels={labels} {proc.stderr.strip()})')
 
 
+def test_resume_keeps_published_comments(root: Path) -> None:
+    """A published file-level comment must stay in the payload, and in the record, until the run completes."""
+    failed, soft = soft_checks()
+    one = {'finding': 'f1', 'path': 'app/widget.rb', 'line': 40, 'body': '**Advisory:** first file note.'}
+    two = {'finding': 'f4', 'path': 'app/widget.rb', 'line': 41, 'body': '**Advisory:** second file note.'}
+
+    def file_rows(f: Fixture) -> list[dict]:
+        log = f.state / 'file-comments.jsonl'
+        return [json.loads(line) for line in log.read_text().splitlines() if line] if log.is_file() else []
+
+    def partial(name: str) -> Fixture:
+        f = Fixture(root / name)
+        inline_only(f, [one, two])
+        first = f.post('--human-verdict', 'COMMENT', env={'GH_FILE_FAIL_NTH': '2'})
+        soft(first.returncode != 0 and '502' in first.stderr and len(file_rows(f)) == 1
+             and (f.council / 'demo-1/post-7.pending.json').is_file()
+             and not (f.council / 'demo-1/posted.json').exists(),
+             f'{name}: the first file comment posts, the second fails, the receipt is left '
+             f'({first.returncode} {first.stderr.strip()} file comments={len(file_rows(f))})')
+        return f
+
+    f = partial('resume-dropped')
+    inline_only(f, [two])
+    posts = f.posts()
+    receipt = (f.council / 'demo-1/post-7.pending.json').read_text()
+    for flags in (['--dry-run'], ['--human-verdict', 'COMMENT']):
+        proc = f.post(*flags)
+        soft(proc.returncode != 0 and 'demo-1:f1' in proc.stderr and 'missing from the payload' in proc.stderr
+             and f.posts() == posts and len(file_rows(f)) == 1
+             and (f.council / 'demo-1/post-7.pending.json').read_text() == receipt
+             and not (f.council / 'demo-1/posted.json').exists(),
+             f'resume {" ".join(flags)} with the first file comment dropped is refused, naming it, '
+             f'with posts unchanged ({proc.returncode} {proc.stderr.strip()} posts={f.posts()}, was {posts})')
+
+    f = partial('resume-changed')
+    inline_only(f, [{**one, 'body': '**Advisory:** first file note, reworded.'}, two])
+    posts = f.posts()
+    proc = f.post('--human-verdict', 'COMMENT')
+    soft(proc.returncode != 0 and 'demo-1:f1' in proc.stderr and 'different text' in proc.stderr
+         and f.posts() == posts and len(file_rows(f)) == 1
+         and not (f.council / 'demo-1/posted.json').exists(),
+         f'resume with the first file comment reworded is refused, naming it, with posts unchanged '
+         f'({proc.returncode} {proc.stderr.strip()} posts={f.posts()}, was {posts})')
+
+    f = partial('resume-both-problems')
+    inline_only(f, [{**two, 'body': '**Advisory:** second file note, reworded.'}])
+    posts = f.posts()
+    proc = f.post('--human-verdict', 'COMMENT')
+    soft(proc.returncode != 0 and 'demo-1:f1' in proc.stderr and f.posts() == posts,
+         f'a missing published comment is refused even when another comment is not yet posted '
+         f'({proc.returncode} {proc.stderr.strip()})')
+
+    f = partial('resume-unchanged')
+    posts = f.posts()
+    proc = f.post('--human-verdict', 'COMMENT')
+    recorded = {}
+    if (f.council / 'demo-1/posted.json').is_file():
+        recorded = json.loads((f.council / 'demo-1/posted.json').read_text())['reviews']['7']['findings']
+    soft(proc.returncode == 0 and len(file_rows(f)) == 2 and f.posts() == posts + 1
+         and sorted(recorded) == ['demo-1:f1', 'demo-1:f4']
+         and all(recorded[k].get('comment_id') == 8100 and recorded[k].get('url') for k in recorded)
+         and not (f.council / 'demo-1/post-7.pending.json').exists(),
+         f'an unchanged resume sends only the second comment and posted.json holds both '
+         f'({proc.returncode} {proc.stderr.strip()} file comments={len(file_rows(f))} '
+         f'posts={f.posts()}, was {posts} recorded={sorted(recorded)})')
+
+    f = partial('resume-review-gone')
+    posts = f.posts()
+    receipt = (f.council / 'demo-1/post-7.pending.json').read_text()
+    proc = f.post('--human-verdict', 'COMMENT', env={'GH_REVIEW_GONE': '1'})
+    soft(proc.returncode != 0 and 'demo-1:f1' in proc.stderr and 'not deleting the receipt' in proc.stderr
+         and f.posts() == posts and len(file_rows(f)) == 1
+         and (f.council / 'demo-1/post-7.pending.json').read_text() == receipt,
+         f'a receipt that lists a published comment is not deleted when its review is gone, and nothing posts '
+         f'({proc.returncode} {proc.stderr.strip()} posts={f.posts()}, was {posts})')
+    if failed:
+        raise SystemExit(f'FAIL {len(failed)} resume check(s)')
+
+
 def main() -> None:
     only = sys.argv[1:]
     if only:
@@ -1729,6 +1816,7 @@ def main() -> None:
         test_stale_cited_code(root)
         test_own_pr_comment_event(root)
         test_default_is_preview(root)
+        test_resume_keeps_published_comments(root)
     print('all post-review checks passed')
 
 

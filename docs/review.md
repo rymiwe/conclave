@@ -1783,7 +1783,12 @@ script calls the posting helper. When the human says post:
    the review again. A rerun whose commit, review body, or inline comments
    differ from that stored request stops, and it does not record the new
    payload as posted. A rerun also stops when the text of an already posted
-   file-level comment or reply changed.
+   file-level comment or reply changed, or when a published file-level
+   comment is missing from the payload. The error names each finding, and
+   nothing is posted. A receipt that lists a published comment is never
+   deleted, even when its review is gone from GitHub: the run stops and the
+   receipt stays. Every published file-level comment is carried into
+   `posted.json` before the receipt is removed.
    After the replies are sent it writes `tmp/council/<id>/posted.json`:
    the review id and url, `plan_verdict`, and each comment's url keyed by
    `<ballot>:<finding>`. A file-level comment is `posted_as: "file"` with

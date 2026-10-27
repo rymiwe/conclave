@@ -98,7 +98,9 @@ different commit, body, or inline comment is not posted and is not recorded
 as posted. Two replies to the same comment are refused. A reply or
 file-level comment that already succeeded is not sent again. A rerun checks
 that text before it sends anything else, including on a dry run, and stops
-if the text changed.
+if the text changed, or if a file-level comment the receipt lists as published
+is missing from the payload. A receipt that lists a published comment is never
+deleted, and every published file-level comment is carried into posted.json.
 """
 from __future__ import annotations
 
@@ -263,6 +265,20 @@ def write_receipt(path: Path, data: dict) -> None:
     tmp.replace(path)
 
 
+def published_on(receipt: object) -> list[str]:
+    """What a pending receipt says is already on GitHub: file-level comments and replies."""
+    if not isinstance(receipt, dict):
+        return []
+    held: list[str] = []
+    for item in receipt.get("file_comments_posted") or []:
+        if isinstance(item, dict):
+            held.append(f"file-level comment {item.get('finding')} on {item.get('path')}")
+    for item in receipt.get("replies_posted") or []:
+        if isinstance(item, dict):
+            held.append(f"reply to comment {item.get('in_reply_to')}")
+    return held
+
+
 def same_id(left: object, right: object) -> bool:
     if left is None or right is None:
         return False
@@ -416,6 +432,13 @@ def main() -> int:
         if review_on_github(repo, args.pr, review_id):
             resume = pending
         else:
+            # A receipt that lists a published comment is the only record of it.
+            # A rerun would post it again, so the receipt stays and nothing posts.
+            held = published_on(pending)
+            if held:
+                die(f"review {review_id} is no longer on GitHub, but pending receipt {pending_path} "
+                    f"lists published comment(s): {'; '.join(held)}; not posting again and not "
+                    "deleting the receipt. Check the pull request, then remove the receipt by hand")
             pending_path.unlink()
 
     head = gh_json(["api", f"repos/{repo}/pulls/{args.pr}"])
@@ -883,10 +906,22 @@ def main() -> int:
             posted_body = sent.get(reply["in_reply_to"])
             if posted_body is not None and posted_body != reply["body"]:
                 die(f"reply to comment {reply['in_reply_to']} was already posted with different text")
-        for fc in file_comments:
-            done = files_sent.get(fc["key"])
-            if done is not None and (done.get("path") != fc["path"] or done.get("body") != fc["body"]):
-                die(f"file-level comment {fc['key']} on {fc['path']} was already posted with different text")
+        # Every comment the receipt says is published must still be in the payload,
+        # unchanged. A payload that forgets one would drop it from posted.json, and
+        # a later run could post it a second time under the same account.
+        now = {fc["key"]: fc for fc in file_comments}
+        problems: list[str] = []
+        for key, done in sorted(files_sent.items()):
+            fc = now.get(key)
+            if fc is None:
+                problems.append(f"file-level comment {key} on {done.get('path')} was already posted "
+                                "and is missing from the payload")
+            elif done.get("path") != fc["path"] or done.get("body") != fc["body"]:
+                problems.append(f"file-level comment {key} on {fc['path']} was already posted "
+                                "with different text")
+        if problems:
+            die("; ".join(problems) + "; nothing was posted. Restore the published comment(s) in the payload "
+                f"exactly as posted, or check {pending_path}")
     if not posting:
         print("review that --post would send:")
         print(json.dumps({
@@ -1003,6 +1038,12 @@ def main() -> int:
             stdin=json.dumps({"body": reply["body"]}),
         )
         remember_reply(reply["in_reply_to"], reply["body"])
+    # Published entries carry into posted.json before the receipt goes.
+    for key, done in files_sent.items():
+        entry = posted["reviews"][str(args.pr)]["findings"].setdefault(key, {
+            "posted_as": "file", "path": done.get("path"), "url": done.get("url") or review_url})
+        if done.get("comment_id") is not None:
+            entry.setdefault("comment_id", done["comment_id"])
     write_receipt(posted_path, posted)
     pending_path.unlink(missing_ok=True)
     print(f"posted: {review_url}")
