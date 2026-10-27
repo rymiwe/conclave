@@ -5,9 +5,20 @@
 #   scripts/merge-gate.sh merge  <pr_url> <out_dir>
 #
 # review asks `seat-usage --route review --cached --json --builder-vendor V`
-# for the reviewer and its launch argv (saved as gate-route.json). When the
-# route asks, fails, names none, or returns no argv list (a seat-usage older
-# than that contract), it refuses (exit 3, one line) before any reviewer runs.
+# for the reviewer and its launch argv (saved as gate-route.json). Before
+# that, it reads the PR commits and checks V against Co-authored-by trailers.
+# One named vendor must match V (grok counts as xai; Claude and an
+# @anthropic.com mailbox count as anthropic). Several named vendors, a known
+# vendor beside a co-author outside the known families, or a commits read that
+# fails, refuse (exit 3, one line) before seat-usage runs. No model trailer,
+# or only co-authors outside the known families, keeps V and prints one note.
+# gate-route.json then records vendor_source (trailer when a trailer matched
+# V, caller when V is the caller's value), and the review summary line says
+# the same. The PR author controls the trailers, so a match is a consistency
+# check on V and not proof of who built the PR. When the route asks,
+# fails, names none, returns no argv list (a seat-usage older than that
+# contract), or records a builder vendor and reviewer vendor that are missing
+# or the same, it refuses (exit 3, one line) before any reviewer runs.
 # It dispatches on the argv's first element (agy, cursor-agent, codex, claude,
 # muse) and runs that reviewer read-only from an empty temp dir, with the PR
 # description and the diff in the prompt, never the repo as a workspace. Any
@@ -21,9 +32,11 @@
 # one_way line) under <out_dir>.
 #
 # merge refuses, nonzero, when gate.md says one_way: yes, when its one_way
-# line is missing or unparseable, when the PR has the one-way label, or when
-# the labels cannot be read. Otherwise it runs gh pr merge --squash, pinned to
-# the reviewed head sha. See scripts/merge_gate.py.
+# line is missing or unparseable, when the PR has the one-way label, when
+# the labels cannot be read, or when gate-route.json is missing, unreadable,
+# or records no builder vendor, no reviewer vendor, or the same vendor for
+# both. Otherwise it runs gh pr merge --squash, pinned to the reviewed head
+# sha. See scripts/merge_gate.py.
 #
 # MERGE_GATE_GH (default /usr/local/bin/gh) and MERGE_GATE_SEAT_USAGE (default
 # seat-usage) override those binaries. MERGE_GATE_AGY, MERGE_GATE_CURSOR_AGENT,
@@ -45,13 +58,42 @@ newest() { # $1 = regex with one capture group for the version; reads IDs on std
 review() {
   [ "$#" -eq 6 ] || usage
   local repo=$1 base=$2 head=$3 pr=$4 out=$5 vendor=$6 picked model why name bin
+  local commits derived status listed source=caller
   mkdir -p "$out" || exit 1
   # A refusal must not leave an earlier verdict for merge to read.
   rm -f "$out/gate.md" "$out/gate-verdict.json" "$out/gate-head.txt" "$out/gate-route.json"
+  vendor=$(python3 "$ROOT/scripts/trailer_vendor.py" normalize "$vendor") \
+    || refuse "could not normalize builder vendor $6"
+  commits=$("$GH" pr view "$pr" --json commits 2> "$out/gate-commits.err") \
+    || { why=$(head -n 1 "$out/gate-commits.err"); refuse "could not read the PR commits for $pr${why:+: $why}"; }
+  derived=$(printf '%s' "$commits" | python3 "$ROOT/scripts/trailer_vendor.py" from-commits) \
+    || refuse "could not read the PR commits for $pr"
+  status=${derived%%$'\n'*}
+  listed=${derived#*$'\n'}
+  listed=${listed%%$'\n'*}
+  case "$status" in
+    ambiguous)
+      refuse "the PR commit trailers name several vendors or an unrecognised co-author ($listed), so no single builder vendor can be verified" ;;
+    unknown)
+      echo "merge-gate: note: co-author $listed names no known model family; builder vendor $vendor is the caller's" ;;
+    "")
+      echo "merge-gate: note: no model trailer on the PR commits; builder vendor $vendor is the caller's" ;;
+    "$vendor") source=trailer ;;
+    *)
+      refuse "builder vendor $vendor does not match the PR commit trailers ($status)" ;;
+  esac
   if ! "$SEAT_USAGE" --route review --cached --json --builder-vendor "$vendor" \
       > "$out/gate-route.json" 2> "$out/gate-route.err"; then
     why=$(grep -v '^\[seat-usage\]' "$out/gate-route.err" | head -n 1)
     refuse "seat-usage --route review failed: ${why:-no output}"
+  fi
+  # Record where the builder vendor came from, beside the vendors seat-usage recorded.
+  # A route that is not JSON is left as is for pick to refuse.
+  if jq --arg s "$source" 'if type == "array" then map(if type == "object" then . + {vendor_source: $s} else . end) elif type == "object" then . + {vendor_source: $s} else . end' \
+      "$out/gate-route.json" > "$out/gate-route.tmp" 2>/dev/null; then
+    mv "$out/gate-route.tmp" "$out/gate-route.json" || refuse "could not record vendor_source in gate-route.json"
+  else
+    rm -f "$out/gate-route.tmp"
   fi
   picked=$(python3 "$ROOT/scripts/merge_gate.py" pick "$out/gate-route.json") || refuse "$picked"
   local -a runner
@@ -87,7 +129,7 @@ review() {
     fi
     [ -n "$model" ] || refuse "cursor-agent models lists no $alias id"
   fi
-  echo "merge-gate: reviewer $model on $name (seat-usage --route review, builder vendor $vendor)"
+  echo "merge-gate: reviewer $model on $name (seat-usage --route review, builder vendor $vendor, vendor_source=$source)"
   GATE_TMP=$(mktemp -d) || exit 1
   trap 'rm -rf "$GATE_TMP"' EXIT
   local P=$GATE_TMP W=$GATE_TMP/ws

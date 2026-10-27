@@ -15,15 +15,18 @@ ignored, and a directive with a value other than yes/no is unparseable.
 
 merge fails closed. It refuses (exit 3, nothing merged) when the verdict is
 yes, missing, conflicting, or malformed, when gate-head.txt is missing, when
-the PR has the `one-way` label, or when gh cannot read the labels. Otherwise
-it runs `gh pr merge <pr> --squash --match-head-commit <reviewed sha>` and
-returns gh's exit code. MERGE_GATE_GH overrides the gh binary.
+the PR has the `one-way` label, when gh cannot read the labels, or when
+gate-route.json is missing, unreadable, or records no builder vendor, no
+reviewer vendor, or the same vendor for both. Every reason is printed.
+Otherwise it runs `gh pr merge <pr> --squash --match-head-commit <reviewed
+sha>` and returns gh's exit code. MERGE_GATE_GH overrides the gh binary.
 
 pick reads the `seat-usage --route review --json` output and prints one JSON
 line, {"model": ..., "runner": [argv...]}. The argv is the top-level `runner`
 list, else reviewers[0].runner. When the route asked, named no reviewer, has
-no argv list (an older seat-usage), or the model or argv is unsafe, it prints
-one line saying why and exits 3.
+no argv list (an older seat-usage), the model or argv is unsafe, or the
+recorded builder vendor and reviewer vendor are missing or the same, it prints
+one line saying why and exits 3. grok and xai are the same vendor.
 
 cursor-result, claude-result, plain-result, and muse-result write the
 reviewer's answer to gate.md from a cursor-agent stream, a claude JSON result,
@@ -38,6 +41,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+from trailer_vendor import normalize_vendor
 
 LABEL = "one-way"
 REFUSED = 3
@@ -174,6 +179,7 @@ def merge(pr: str, out_dir: str) -> int:
         reasons.append(f"cannot read the PR labels, so the one-way label is unknown: {err}")
     elif any(l.lower() == LABEL for l in labels):
         reasons.append(f"the PR has the `{LABEL}` label")
+    reasons.extend(route_file_reasons(out / "gate-route.json"))
     if reasons:
         print(f"merge-gate: REFUSED to merge {pr}", file=sys.stderr)
         for r in reasons:
@@ -223,7 +229,50 @@ def pick(route_json: str) -> tuple[dict | None, str]:
         return None, "seat-usage reviewer has no usable model id"
     if any(SHELL_META.search(p) for p in runner):
         return None, "seat-usage runner is not a launch command"
+    # An older route with no argv still reports that it is too old. This check
+    # is for a route we would otherwise launch.
+    conflict = vendor_conflict_reasons(rows)
+    if conflict:
+        return None, "; ".join(conflict)
     return {"model": model, "runner": runner}, ""
+
+
+def vendor_conflict_reasons(data: object) -> list[str]:
+    """Empty when the recorded builder and reviewer vendors differ.
+
+    grok and xai compare equal. A missing side is its own reason, so a route
+    that lacks both still lists both.
+    """
+    if isinstance(data, list):
+        row = data[0] if data and isinstance(data[0], dict) else {}
+    elif isinstance(data, dict):
+        row = data
+    else:
+        row = {}
+    builder = normalize_vendor(row.get("builder_vendor"))
+    reviewers = row.get("reviewers") if isinstance(row.get("reviewers"), list) else []
+    first = reviewers[0] if reviewers and isinstance(reviewers[0], dict) else {}
+    reviewer = normalize_vendor(first.get("vendor"))
+    reasons: list[str] = []
+    if not builder:
+        reasons.append("no recorded builder vendor (gate-route.json)")
+    if not reviewer:
+        reasons.append("no recorded reviewer vendor (gate-route.json)")
+    if not reasons and builder == reviewer:
+        reasons.append(
+            f"the recorded reviewer vendor {reviewer} is the builder's vendor {builder} (gate-route.json)"
+        )
+    return reasons
+
+
+def route_file_reasons(path: Path) -> list[str]:
+    if not path.is_file():
+        return [f"no gate-route.json at {path}"]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return ["gate-route.json is unreadable"]
+    return vendor_conflict_reasons(data)
 
 
 def cursor_result(stream: str, md: str) -> int:
