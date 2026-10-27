@@ -334,12 +334,25 @@ def load_anchors(ballot: Path) -> dict[str, dict] | None:
 
 
 def repo_and_pr(ballot: Path) -> tuple[str | None, int | None]:
-    """owner/name and pull number from the same pr: line as post-review."""
+    """owner/name and pull number from the pr: line post-review reads.
+
+    The chair runs this before --findings writes judgment.md, so a fresh
+    ballot has only header.json. Its "pr" is the same URL.
+    """
     judgment = ballot / "judgment.md"
-    if not judgment.is_file():
-        return None, None
-    for line in judgment.read_text(encoding="utf-8").splitlines():
-        match = PR_LINE.match(line)
+    if judgment.is_file():
+        for line in judgment.read_text(encoding="utf-8").splitlines():
+            match = PR_LINE.match(line)
+            if match:
+                return match.group(1), int(match.group(2))
+    header = ballot / "header.json"
+    if header.is_file():
+        try:
+            data = json.loads(header.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None, None
+        pr = data.get("pr") if isinstance(data, dict) else None
+        match = PR_LINE.match(f"pr: {pr}") if isinstance(pr, str) else None
         if match:
             return match.group(1), int(match.group(2))
     return None, None

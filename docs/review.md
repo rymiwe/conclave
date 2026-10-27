@@ -1193,7 +1193,7 @@ The chair replaces every `TODO(chair)` before drafting comments.
 
 On review kind with findings, `judgment.md` also ends with `## How each finding posts`, after the convergence table. It says the summary is only a short opener, then has one line per finding in `findings.json` order, with the same text as the **how it posts** line. The table columns do not change. `convergence.md` is still the table alone. Audit, design, and mixed output does not change.
 
-`anchors.json` comes from `python3 scripts/finding_anchor.py <ballot dir>`. The chair runs it after writing `findings.json` and before `--findings`. It reads `findings.json`, `stack.json`, and the `pr:` line in `judgment.md`, fetches each stack PR's `pulls/<n>/files`, and writes finding id to `{post_as, pr, path, line, reason}`. `post_as` is one of:
+`anchors.json` comes from `python3 scripts/finding_anchor.py <ballot dir>`. The chair runs it after writing `findings.json` and before `--findings`. It reads `findings.json`, `stack.json`, and the `pr:` line in `judgment.md` (a fresh ballot has no `judgment.md` yet, so it reads `pr` from `header.json`), fetches each stack PR's `pulls/<n>/files`, and writes finding id to `{post_as, pr, path, line, reason}`. `post_as` is one of:
 
 - `inline`: the line is a right-side line in the target PR's diff and the first line of `cited_code` is on it. With no `cited_code`, only the line is checked, and the result has `weak: true`.
 - `inline` on a later PR: the earliest PR in stack order whose diff has the cited code is later than the target. The line is that PR's own line, and the reason is `re-anchored: first introduced in #N`.

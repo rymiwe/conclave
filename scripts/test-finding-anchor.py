@@ -312,6 +312,44 @@ def test_target_missing_from_stack(tmp: Path) -> None:
           f"the cli marks the ballot unverified and fetches nothing ({proc.returncode} {proc.stderr.strip()} {anchors})")
 
 
+def test_fresh_ballot_has_no_judgment(tmp: Path) -> None:
+    """The gate's second-round finding: round B anchors before judgment.md exists."""
+    ballot = tmp / "fresh"
+    ballot.mkdir()
+    (ballot / "header.json").write_text(json.dumps({
+        "kind": "review", "pr": "https://github.com/example/widgets/pull/1"}), encoding="utf-8")
+    check(finding_anchor.repo_and_pr(ballot) == ("example/widgets", 1),
+          f"a ballot with only header.json gives its repo and PR ({finding_anchor.repo_and_pr(ballot)})")
+    (ballot / "header.json").write_text(json.dumps({"kind": "review", "pr": "none"}), encoding="utf-8")
+    check(finding_anchor.repo_and_pr(ballot) == (None, None), "a header with pr none gives no PR")
+
+    (ballot / "header.json").write_text(json.dumps({
+        "kind": "review", "pr": "https://github.com/example/widgets/pull/1"}), encoding="utf-8")
+    (ballot / "findings.json").write_text(json.dumps({"findings": [
+        {"id": "f1", "file": "app/svc.rb", "line": 126, "cited_code": "def stale_total"}]}), encoding="utf-8")
+    (ballot / "stack.json").write_text(json.dumps({"status": "stack", "prs": [
+        {"number": 1}, {"number": 2}, {"number": 3}]}), encoding="utf-8")
+    bin_dir = tmp / "bin-fresh"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text(textwrap.dedent(GH), encoding="utf-8")
+    (bin_dir / "gh").chmod(0o755)
+    patches = tmp / "patches-fresh"
+    patches.mkdir()
+    for pr in STACK:
+        rows = [{"filename": name, "patch": text} for name, text in pr["files"].items()]
+        (patches / f"{pr['number']}.json").write_text(json.dumps(rows), encoding="utf-8")
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+           "GH_LOG": str(tmp / "calls-fresh.jsonl"), "GH_PATCHES": str(patches)}
+    env.pop("CONCLAVE_GH", None)
+    env.pop("COUNCIL_GH", None)
+    proc = subprocess.run([sys.executable, str(SCRIPTS / "finding_anchor.py"), str(ballot)],
+                          env=env, text=True, capture_output=True)
+    anchors = json.loads((ballot / "anchors.json").read_text()) if (ballot / "anchors.json").is_file() else {}
+    check(proc.returncode == 0 and anchors.get("f1", {}).get("post_as") == "inline"
+          and anchors["f1"]["pr"] == 3 and anchors["f1"]["line"] == 126 and not (ballot / "judgment.md").exists(),
+          f"a fresh ballot with no judgment.md is anchored and re-anchored ({proc.returncode} {proc.stderr.strip()} {anchors})")
+
+
 def main() -> None:
     test_labels()
     test_right_lines_moved()
@@ -321,6 +359,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="finding-anchor-tests-") as raw:
         test_cli(Path(raw))
         test_target_missing_from_stack(Path(raw))
+        test_fresh_ballot_has_no_judgment(Path(raw))
     print("all finding-anchor checks passed")
 
 
