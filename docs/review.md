@@ -141,7 +141,8 @@ directory. Anything blocking exits 3 before a leg starts. `--dry-run` lists
 the repo's declared commands and runs none; the other checks run, the list goes
 under `preview/`, and a blocked plan exits 3. `CONCLAVE_PREFLIGHT=0` skips it. stack-run runs it once up front
 and sets `CONCLAVE_PREFLIGHT_DONE=1` for its phase 1 calls, which then check
-only their target. `CONCLAVE_STAGE_HOOK` runs a command on stage events. See
+only their target. `CONCLAVE_STAGE_HOOK` runs a command on stage events; never put a secret in
+it, because a chair can read its environment. See
 [`docs/preflight.md`](preflight.md).
 
 Phase 1 proves every worktree's `write-tree` equals the head tree, then checks

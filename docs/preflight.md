@@ -123,7 +123,9 @@ The event name and one JSON object are the last two arguments. The same two valu
 
 `CONCLAVE_STAGE_HOOK_TIMEOUT` sets the timeout in seconds. Default 30. A hook still running then is killed, with its process group.
 
-A hook that fails never breaks the run. That covers a missing or non-executable hook, a nonzero exit, a timeout, and an unparseable command line. One line goes to stderr, `stage-hook: <event> failed: <reason>`, and the same line with a timestamp is appended to `stage-hook.log` in the run directory. The hook command is never logged, because it may hold a token. An event name the emitter does not know is logged as `ignored: unknown event` and does nothing.
+A hook that fails never breaks the run. That covers a missing or non-executable hook, a nonzero exit, a timeout, and an unparseable command line. One line goes to stderr, `stage-hook: <event> failed: <reason>`, and the same line with a timestamp is appended to `stage-hook.log` in the run directory. The hook command is not logged, but that does not make it a place for a secret. An event name the emitter does not know is logged as `ignored: unknown event` and does nothing.
+
+Never put a secret in `CONCLAVE_STAGE_HOOK`: no token, key, or password on the command line. The variable stays in the run's environment, chairs and phase 1 `conclave.sh` processes inherit it, and a chair's model can read its own environment (`env`, `/proc/self/environ`). It cannot be stripped from chairs, because `post_plan_ready` fires from the chair's `conclave.sh --findings` call. Not being logged does not keep it secret. When the hook needs a credential, the hook fetches it itself at run time, for example from a secret manager (`op read`, a cloud secret store).
 
 Shell callers use `python3 scripts/stage_hook.py emit <event> --dir <run dir> --json '<payload>'`. `conclave.sh` checks the variable first and starts no process when it is unset. Python callers use `stage_hook.emit(event, payload, dir)`.
 

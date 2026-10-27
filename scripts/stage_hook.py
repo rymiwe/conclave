@@ -11,7 +11,9 @@ CONCLAVE_STAGE_HOOK_TIMEOUT seconds (default 30).
 
 A hook that is missing, not executable, exits non-zero, or times out logs one
 line to stderr and to stage-hook.log in the run dir. The hook command itself
-is never logged: it may hold a token. Payloads carry paths and counts only.
+is not logged, but it must never hold a secret: chairs inherit it and a
+chair's model can read its environment. A hook that needs a credential
+fetches it itself at run time. Payloads carry paths and counts only.
 See docs/preflight.md.
 """
 from __future__ import annotations
