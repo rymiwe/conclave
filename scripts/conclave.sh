@@ -1474,7 +1474,7 @@ review_resolved_builder_vendor() {
   # A brief author: of a known family still maps to its vendor.
   # Otherwise a PR commit trailer that names one model vendor. Ambiguous
   # trailers return the first vendor they name; review_append_author_args
-  # excludes the others by seat, so no named family reviews the PR.
+  # passes every one as --exclude-vendor, so no named family reviews the PR.
   if [ -n "${HEADER_AUTHOR:-}" ]; then
     review_author_vendor "$HEADER_AUTHOR" || true
     return 0
@@ -1484,17 +1484,6 @@ review_resolved_builder_vendor() {
   case "$REVIEW_PR_FACT_VENDOR" in
     anthropic|openai|xai|meta|google) printf '%s\n' "$REVIEW_PR_FACT_VENDOR" ;;
     ambiguous) printf '%s\n' "${REVIEW_PR_FACT_VENDORS%% *}" ;;
-  esac
-}
-
-review_vendor_seat() {
-  # seat-usage seat for a vendor, for --exclude-seat.
-  case "$1" in
-    anthropic) printf 'claude\n' ;;
-    openai) printf 'chatgpt\n' ;;
-    xai) printf 'grok\n' ;;
-    google) printf 'google\n' ;;
-    meta) printf 'muse\n' ;;
   esac
 }
 
@@ -1522,6 +1511,7 @@ review_append_author_args() {
   # subshell's assignments do not survive, so a later reseat would ask gh again.
   local -n _dest="$1"
   local author vendor
+  REVIEW_EXCLUDED_VENDORS=""
   if [ "${KIND:-}" = review ] && [ -z "${HEADER_AUTHOR:-}" ]; then
     review_pr_load_facts || true
   fi
@@ -1534,23 +1524,53 @@ review_append_author_args() {
   if [ -n "$vendor" ]; then
     _dest+=(--builder-vendor "$vendor")
   fi
-  # --builder-vendor takes one vendor. Ambiguous trailers can name several, so
-  # the rest are excluded by seat.
+  # --builder-vendor takes one vendor. Ambiguous trailers can name several.
+  # --exclude-vendor drops each one's families on every pool that serves them.
+  # review_check_excluded_vendors stops the review when that did not happen.
   if [ -z "${HEADER_AUTHOR:-}" ] && [ "$REVIEW_PR_FACT_VENDOR" = ambiguous ]; then
-    local extra seat
-    for extra in ${REVIEW_PR_FACT_VENDORS#* }; do
-      [ "$extra" = "$vendor" ] && continue
-      seat="$(review_vendor_seat "$extra")"
-      if [ -z "$seat" ]; then
-        # No seat means it cannot be excluded. Stop rather than fail open.
-        echo "conclave: refused: no seat for vendor '$extra' named by ambiguous PR trailers; stopping the review" >&2
-        exit 3
-      fi
-      _dest+=(--exclude-seat "$seat")
+    local named
+    for named in $REVIEW_PR_FACT_VENDORS; do
+      _dest+=(--exclude-vendor "$named")
     done
+    REVIEW_EXCLUDED_VENDORS="$REVIEW_PR_FACT_VENDORS"
   fi
   # This call is done. A later re-seat may ask gh if this one failed.
   REVIEW_PR_FACT_SKIP=""
+}
+
+review_check_excluded_vendors() {
+  # $1 is seat-usage stdout, $2 its stderr file. Returns 3 after one refusal
+  # line when a vendor ambiguous trailers named was not excluded. seat-usage
+  # exits 2 on a vendor it does not know. One too old for --exclude-vendor
+  # ignores the flag, so its lineup must report each vendor as skipped.
+  [ -n "${REVIEW_EXCLUDED_VENDORS:-}" ] || return 0
+  local unknown missing
+  unknown="$(sed -n 's/^unknown vendor \([^;]*\);.*/\1/p' "$2" | head -n 1)"
+  if [ -n "$unknown" ]; then
+    echo "conclave: refused: seat-usage does not know vendor '$unknown' named by ambiguous PR trailers; stopping the review" >&2
+    return 3
+  fi
+  [ -n "$1" ] || return 0
+  # shellcheck disable=SC2086
+  missing="$(python3 - "$1" $REVIEW_EXCLUDED_VENDORS <<'PY'
+import json, sys
+try:
+    doc = json.loads(sys.argv[1])
+except ValueError:
+    sys.exit(0)
+row = doc[0] if isinstance(doc, list) and doc else doc
+skipped = row.get("skipped") if isinstance(row, dict) else None
+done = {(i.get("vendor"), i.get("code")) for i in skipped or [] if isinstance(i, dict)}
+for vendor in sys.argv[2:]:
+    if (vendor, "excluded_vendor") not in done and (vendor, "builder_vendor") not in done:
+        print(vendor)
+        break
+PY
+)"
+  if [ -n "$missing" ]; then
+    echo "conclave: refused: seat-usage did not report excluding vendor '$missing' named by ambiguous PR trailers (needs seat-usage with --exclude-vendor); stopping the review" >&2
+    return 3
+  fi
 }
 
 review_map_voter() {
@@ -1624,7 +1644,8 @@ lineup_parse_voters() {
 }
 
 load_lineup_ballot() {
-  # Never stops the run. The control plane already ran the lineup.
+  # Stops the run (exit 3) only when ambiguous trailers named a vendor
+  # seat-usage did not exclude. The control plane already ran the lineup.
   # A brief author: header naming a known family passes --author, and on
   # review also --builder-vendor for that family. With no header, review
   # passes --builder-vendor only when a PR commit trailer names one model.
@@ -1660,7 +1681,14 @@ load_lineup_ballot() {
       args+=(--repo "$REPO")
     fi
   fi
-  raw="$("$bin" "${args[@]}" 2>/dev/null)" || raw=""
+  local err
+  err="$(mktemp)"
+  raw="$("$bin" "${args[@]}" 2>"$err")" || raw=""
+  if ! review_check_excluded_vendors "$raw" "$err"; then
+    rm -f "$err"
+    exit 3
+  fi
+  rm -f "$err"
   if [ -z "$raw" ]; then
     BALLOT_SOURCE=fallback
     BALLOT_SOURCE_NOTE="seat-usage failed"
