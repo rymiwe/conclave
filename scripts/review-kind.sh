@@ -2949,6 +2949,8 @@ review_dry_run() {
   fi
   printf 'Dry-run review lineup: tmp/council/%s/preview/lineup.md (ballot untouched)\n' "$ID"
   cat "$DIR/preview/lineup.md"
+  # A real launch stops at preflight before any voter runs, so the plan says so.
+  review_preflight plan
 }
 
 ballot_decide_unedited() {
@@ -3425,6 +3427,39 @@ EOF
   done
 }
 
+review_preflight() {
+  # Launch checks before any leg and before this ballot's old files are
+  # cleared: the target, the seat route, and the target repo's
+  # .conclave/preflight.json. Exit 3 when anything blocks. The parse lives
+  # in scripts/preflight.py. CONCLAVE_PREFLIGHT=0 skips it. Under stack-run
+  # (CONCLAVE_PREFLIGHT_DONE=1) only the target is checked. docs/preflight.md.
+  # "plan" is the dry run: written under preview/, no stage event, and the
+  # repo's declared commands are listed, not run. The other checks and their
+  # exit code match a real launch.
+  [ "$(conclave_env PREFLIGHT 1)" != 0 ] || return 0
+  local rc=0 where="$DIR"
+  local -a args=("--repo=$REPO" "--ballot=$ID")
+  if [ "${1:-}" = plan ]; then
+    where="$DIR/preview"
+    args+=(--plan)
+  fi
+  args+=("--dir=$where")
+  case "$REVIEW_MODE" in
+    pr) args+=("--pr=$FLAG_PR") ;;
+    refs) args+=("--base=$FLAG_BASE" "--head=$FLAG_HEAD") ;;
+  esac
+  # --voters wins over the route, so the route's seats are not checked.
+  if [ "${VOTERS_EXPLICIT:-0}" -eq 1 ]; then
+    args+=(--no-seats)
+  fi
+  python3 "$ROOT/scripts/preflight.py" "${args[@]}" || rc=$?
+  case "$rc" in
+    0) ;;
+    3) exit 3 ;;
+    *) die "preflight did not run (exit $rc); CONCLAVE_PREFLIGHT=0 skips it" ;;
+  esac
+}
+
 review_run() {
   voter_sandbox_check
   REVIEW_FAIL=0
@@ -3432,6 +3467,7 @@ review_run() {
   review_resolve_repo
   review_reject_shallow
   review_target_mode
+  review_preflight
   : >"$ERRORS_FILE"
   ballot_move_decide
   rm -f \

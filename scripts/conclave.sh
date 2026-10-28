@@ -3262,6 +3262,34 @@ run_jev_judge() {
   [ -s "$DIR/judgment.md" ]
 }
 
+stage_hook_on() {
+  # CONCLAVE_STAGE_HOOK wins when set, even empty; else COUNCIL_STAGE_HOOK.
+  [ -n "${CONCLAVE_STAGE_HOOK-${COUNCIL_STAGE_HOOK-}}" ]
+}
+
+stage_hook_emit() {
+  # $1 event, $2 payload JSON object. Nothing runs when no hook is set.
+  # A failing hook never fails the run. See docs/preflight.md.
+  stage_hook_on || return 0
+  python3 "$ROOT/scripts/stage_hook.py" emit "$1" --dir "$DIR" --json "$2" || true
+}
+
+stage_post_plan_ready() {
+  # post_plan_ready fires here, at the end of the review findings gate, once
+  # per --findings run, when judgment.md binds `comments to post`: at least
+  # one finding gated to post, and the chair drafts one comment for each.
+  # master has no post plan file yet. A change that adds one should keep this
+  # call, or move it to where the post plan is written. docs/preflight.md.
+  stage_hook_on || return 0
+  local line drafted payload
+  line="$(sed -n 's/^decision: //p' "$DIR/judgment.md" 2>/dev/null | head -n 1)"
+  [[ "$line" =~ ^comments\ to\ post\ \(([0-9]+)\ post ]] || return 0
+  drafted="${BASH_REMATCH[1]}"
+  [ "$drafted" -gt 0 ] || return 0
+  payload="$(python3 -c 'import json, sys; print(json.dumps({"ballot": sys.argv[1], "drafted": int(sys.argv[2]), "decision": "comments to post"}))' "$ID" "$drafted")" || return 0
+  stage_hook_emit post_plan_ready "$payload"
+}
+
 run_findings_mode() {
   # A failed rerun must not leave the previous gate's judgment in place.
   rm -f "$DIR/judgment.md" "$DIR/convergence.md"
@@ -3281,14 +3309,16 @@ PY
   fi
   if [ -n "$CANNED_JEV" ]; then
     cmd+=(--canned "$CANNED_JEV")
-    "${cmd[@]}"
-    return
+    "${cmd[@]}" || return
+    stage_post_plan_ready
+    return 0
   fi
   key="$(load_jev_api_key || true)"
   if [ -z "$key" ]; then
     die "jev: no API key (saved env empty and op read failed)"
   fi
-  env -u JEV_API_KEY TYPESAFE_API_KEY="$key" "${cmd[@]}"
+  env -u JEV_API_KEY TYPESAFE_API_KEY="$key" "${cmd[@]}" || return
+  stage_post_plan_ready
 }
 
 # Outcome record. One line per phase in runs.jsonl, joined by run_id.

@@ -71,6 +71,8 @@ def row(n):
             'baseRefName': 'main' if n == 1 else f'branch-{1 if os.environ.get("BRANCHED") else n-1}',
             'isCrossRepository': False, 'headRepositoryOwner': {'login': 'test'},
             'headRefOid': os.environ.get('TOP_OID', 'a' * 40)}
+if args[:2] == ['pr', 'view'] and args[2] == os.environ.get('MISSING_PR'):
+    sys.exit('no pull requests found')
 if args[:2] == ['repo', 'view']:
     data = {'defaultBranchRef': {'name': 'main'}}
 elif args[:2] == ['pr', 'view']:
@@ -91,7 +93,7 @@ COUNCIL = '''\
 #!/usr/bin/env python3
 import json, os, pathlib, sys
 args = sys.argv[1:]
-with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['council', args, os.environ.get('COUNCIL_CHAIR_MODEL'), os.environ.get('CONCLAVE_CHAIR')])+'\\n')
+with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['council', args, os.environ.get('COUNCIL_CHAIR_MODEL'), os.environ.get('CONCLAVE_CHAIR'), os.environ.get('CONCLAVE_PREFLIGHT_DONE')])+'\\n')
 d = pathlib.Path(os.environ['FIXTURE_ROOT'])/'tmp/council'/args[0]
 d.mkdir(parents=True, exist_ok=True)
 if '--dry-run' in args:
@@ -229,7 +231,8 @@ class Fixture:
         self.repo.mkdir(parents=True)
         scripts = self.root / 'scripts'
         scripts.mkdir(parents=True)
-        for name in ('stack-run.py', 'review-stack.py', 'conclave_env.py', 'review-kind.sh', 'lineup.py'):
+        for name in ('stack-run.py', 'review-stack.py', 'conclave_env.py', 'review-kind.sh', 'lineup.py',
+                     'preflight.py', 'stage_hook.py'):
             shutil.copyfile(SCRIPTS / name, scripts / name)
         self.bin = self.base / 'bin'
         write_exe(self.bin / 'gh', GH)
@@ -249,7 +252,8 @@ class Fixture:
                         COUNCIL_CURSOR_AGENT=str(self.bin / 'cursor-agent'),
                         COUNCIL_SEAT_USAGE=str(self.bin / 'seat-usage'),
                         COUNCIL_SEAT_JSON=str(self.seat), TMPDIR=str(self.temp))
-        for name in ('CHAIR', 'WAVE_CAP', 'WAVE_PRECHECK', 'WAVE_POLL'):
+        for name in ('CHAIR', 'WAVE_CAP', 'WAVE_PRECHECK', 'WAVE_POLL', 'PREFLIGHT', 'PREFLIGHT_DONE',
+                     'STAGE_HOOK', 'STAGE_HOOK_TIMEOUT'):
             self.env.pop(f'CONCLAVE_{name}', None)
             self.env.pop(f'COUNCIL_{name}', None)
 
@@ -298,6 +302,8 @@ class Fixture:
         self.git('commit','-m','fixture')
         oid = self.git('rev-parse','HEAD')
         self.git('update-ref','refs/pull/3/head', oid)
+        # The whole-stack ballot passes --base origin/main; preflight checks that it resolves.
+        self.git('update-ref','refs/remotes/origin/main', oid)
         self.git('remote','add','origin',str(self.repo))
         (self.repo / '.env').write_text('private local env\n')
         (self.repo / 'config').mkdir()
@@ -510,8 +516,12 @@ def test_linear_stack(tmp: Path, mod) -> None:
         f = Fixture(tmp, 'branched-' + str(len(list(tmp.iterdir()))))
         f.env['BRANCHED'] = '1'
         got = f.invoke('--pr','1',*flags)
-        check(got.returncode == 1 and '#3' in got.stderr and '#2' in got.stderr
-              and 'linear --prs' in got.stderr and not f.calls(), f'item 2 rejects siblings {flags}')
+        # A real launch reports the rejection through preflight (exit 3, stdout list);
+        # a dry run and --reconcile-only skip preflight and keep the old error (exit 1, stderr).
+        launch = '--dry-run' not in flags and '--reconcile-only' not in flags
+        out = got.stdout if launch else got.stderr
+        check(got.returncode == (3 if launch else 1) and '#3' in out and '#2' in out
+              and 'linear --prs' in out and not f.calls(), f'item 2 rejects siblings {flags}')
     f = Fixture(tmp, 'linear-explicit')
     check(f.invoke('--prs','1,2,3','--dry-run').returncode == 0, 'item 2 accepts linear explicit order')
 
@@ -569,7 +579,7 @@ def test_posted_resume(tmp: Path, mod) -> None:
     check(f.invoke(*PER_PR).returncode == 0 and len(f.record()['prs'][0]['POSTED?']) == 1,
           'item 8 repeated hit union keeps order without duplicates')
     previous = f.record()
-    check(f.invoke('--prs','1,3',*PER_PR).returncode == 1 and
+    check(f.invoke('--prs','1,3',*PER_PR).returncode == 3 and
           f.record()['prs'] == previous['prs'] and f.record()['POSTED?'] == previous['POSTED?'],
           'item 8 invalid stack on resume preserves earlier POSTED history')
 
@@ -1357,6 +1367,10 @@ def seat_route(f: Fixture, *answers: str) -> None:
     seq = f.base / 'seat-seq.txt'
     seq.write_text('\n'.join(answers) + '\n')
     f.env['SEAT_SEQ'] = str(seq)
+    # These fixtures test the per-wave gate: its answer order, polling and records.
+    # Preflight would take the first answer and stop a capped run before any wave.
+    # test_preflight_stack covers preflight's own seat check.
+    f.env['CONCLAVE_PREFLIGHT'] = '0'
 
 
 def most_at_once(calls: list) -> int:
@@ -1557,9 +1571,13 @@ def bare_runner(mod, cap: int, count: int, ballot, precheck):
     r = mod.Runner.__new__(mod.Runner)
     r.args = mod.argparse.Namespace(wave_wait=0)
     r.cap, r.poll, r.max_capped, r.lock = cap, 60.0, False, threading.RLock()
-    r.record = {'prs': [{'ballot': f'p-{n}', 'state': 'new', 'outcome': 'pending'} for n in range(1, count + 1)],
+    r.record = {'prs': [{'pr': n, 'ballot': f'p-{n}', 'state': 'new', 'outcome': 'pending'}
+                        for n in range(1, count + 1)],
                 'waves': []}
     r.save = lambda: None
+    # Stage events are recorded, not run: (event, ballot, outcome or None).
+    r.events = []
+    r.stage = lambda event, **fields: r.events.append((event, fields.get('ballot'), fields.get('outcome')))
     r.precheck = precheck
     r.ballot_run = ballot
     return r
@@ -1715,6 +1733,11 @@ def test_rolling_cap_closes_queue(mod) -> None:
     check(result == [''] and started == ['p-1', 'p-2', 'p-3']
           and [p['outcome'] for p in r.record['prs']] == ['ok', 'ok', 'ok', reason, reason],
           f"rolling cap: no ballot launches after the cap and the rest are not started ({result}, {started}, {r.record['prs']})")
+    check(sorted(e[1] for e in r.events if e[0] == 'ballot_started') == ['p-1', 'p-2', 'p-3']
+          and sorted((e[1], e[2]) for e in r.events if e[0] == 'ballot_done') == [('p-1', 'ok'), ('p-2', 'ok'), ('p-3', 'ok')]
+          and all(r.events.index(('ballot_started', b, None)) < [e[:2] for e in r.events].index(('ballot_done', b))
+                  for b in ('p-1', 'p-2', 'p-3')),
+          f'rolling cap: launched ballots fire ballot_started then ballot_done; p-4 and p-5 fire neither ({r.events})')
 
 
 def test_rolling_cap_after_inconclusive_precheck(mod) -> None:
@@ -1761,6 +1784,252 @@ def test_rolling_cap_after_inconclusive_precheck(mod) -> None:
         r.per_pr_waves()
     check(err.getvalue().count('launching anyway') == 3 and [w['precheck'] for w in r.record['waves']] == ['inconclusive'] * 3,
           f'inconclusive cap: a launched ballot keeps the warning and the inconclusive record ({err.getvalue()!r})')
+
+HOOK = '''\
+#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ['HOOK_LOG'], 'a') as f:
+    f.write(json.dumps({'argv': sys.argv[1:], 'event': os.environ.get('CONCLAVE_STAGE_EVENT'),
+                        'payload': os.environ.get('CONCLAVE_STAGE_PAYLOAD')}) + '\\n')
+'''
+
+
+def arm_hook(f: Fixture) -> Path:
+    """Point CONCLAVE_STAGE_HOOK at a stub that records argv and env. Returns its log."""
+    write_exe(f.bin / 'hook', HOOK)
+    log = f.base / 'hook.jsonl'
+    f.env.update(CONCLAVE_STAGE_HOOK=f"{f.bin / 'hook'} --from-test", HOOK_LOG=str(log))
+    return log
+
+
+def hook_calls(log: Path) -> list[dict]:
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+def test_preflight_stack(tmp: Path, mod) -> None:
+    def needs(f: Fixture) -> Path:
+        return f.root / 'tmp/council/stack/needs-human.md'
+
+    # (1) A PR gh cannot find stops the run before any chair or ballot.
+    f = Fixture(tmp, 'preflight-missing-pr')
+    log = arm_hook(f)
+    f.env['MISSING_PR'] = '2'
+    got = f.invoke(*PER_PR)
+    text = needs(f).read_text() if needs(f).is_file() else ''
+    check(got.returncode == 3 and not f.calls(),
+          f'preflight stack-run: a missing PR exits 3 before any chair or ballot ({got.returncode} {got.stderr.strip()})')
+    check('## Blocking\n\n1. PR #2 not found' in text and text in got.stdout,
+          f'preflight stack-run: needs-human.md names the PR and matches stdout ({text!r})')
+    events = hook_calls(log)
+    payload = json.loads(events[0]['payload']) if events else {}
+    check([e['event'] for e in events] == ['preflight_failed']
+          and events[0]['argv'][:2] == ['--from-test', 'preflight_failed']
+          and json.loads(events[0]['argv'][2]) == payload,
+          f'preflight stack-run: preflight_failed fires once, event and payload as the last two args ({events})')
+    check(payload.get('stack_id') == 'stack' and payload.get('blocking') == 1
+          and payload.get('needs_file') == str(needs(f)) and payload.get('dir') == str(needs(f).parent),
+          f'preflight stack-run: preflight_failed payload has stack_id, dir, needs_file, blocking ({payload})')
+
+    # (1) The whole-stack base ref does not resolve.
+    f = Fixture(tmp, 'preflight-bad-ref')
+    f.reconcile_repo()
+    f.git('update-ref', '-d', 'refs/remotes/origin/main')
+    got = f.invoke()
+    text = needs(f).read_text() if needs(f).is_file() else ''
+    check(got.returncode == 3 and not f.calls() and 'ref origin/main does not resolve' in text,
+          f'preflight stack-run: an unresolvable whole-stack base exits 3 before any chair ({got.returncode} {text!r})')
+
+    # (1) A stack walk that rejects the stack is a blocking item: needs-human.md is
+    # rewritten (a stale list does not survive), exit 3, preflight_failed fires.
+    for label, env, args, want in (
+            ('branched stack', {'BRANCHED': '1'}, ('--pr', '1'), 'stack breaks at #3'),
+            ('bad --prs order', {}, ('--prs', '2,1,3'), 'stack breaks at #1')):
+        f = Fixture(tmp, 'preflight-walk-' + label.replace(' ', '-').replace('--', ''))
+        f.env.update(env)
+        log = arm_hook(f)
+        needs(f).parent.mkdir(parents=True, exist_ok=True)
+        needs(f).write_text('# Needs from human\n\n## Blocking\n\n1. STALE item from an earlier run. Do: nothing\n')
+        got = f.invoke(*args)
+        text = needs(f).read_text() if needs(f).is_file() else ''
+        events = hook_calls(log)
+        check(got.returncode == 3 and not any(c[0] in ('council', 'cursor') for c in f.calls()),
+              f'preflight stack-run: a {label} exits 3 before any chair or ballot ({got.returncode} {got.stderr.strip()})')
+        check(want in text and 'linear --prs' in text and 'STALE' not in text and text in got.stdout,
+              f'preflight stack-run: a {label} rewrites needs-human.md with the rejection ({text!r})')
+        check([e['event'] for e in events] == ['preflight_failed']
+              and json.loads(events[0]['payload']).get('blocking', 0) >= 1,
+              f'preflight stack-run: a {label} fires preflight_failed once ({events})')
+
+    # (1) --prs starts above the bottom: PR 2's base is branch-1, PR 1's head, which its author
+    # controls. A command branch-1 adds to .conclave/preflight.json does not run; main's does.
+    f = Fixture(tmp, 'preflight-stacked-decl')
+    f.reconcile_repo()
+    evil, good = f.base / 'evil-marker', f.base / 'good-marker'
+    write_exe(f.bin / 'touch-evil', f'#!/bin/sh\n: >{evil}\n')
+    write_exe(f.bin / 'touch-good', f'#!/bin/sh\n: >{good}\n')
+    decl = f.repo / '.conclave/preflight.json'
+    decl.parent.mkdir()
+    fine = {'name': 'fine', 'command': ['touch-good'], 'needs': 'n'}
+    decl.write_text(json.dumps({'version': 1, 'checks': [fine]}))
+    f.git('add', '.conclave/preflight.json')
+    f.git('commit', '-m', 'declare')
+    f.git('update-ref', 'refs/remotes/origin/main', 'HEAD')
+    f.git('checkout', '-b', 'branch-1')
+    decl.write_text(json.dumps({'version': 1, 'checks': [fine, {'name': 'deps', 'command': ['touch-evil'], 'needs': 'n'}]}))
+    f.git('commit', '-am', 'lower PR adds a command')
+    f.git('update-ref', 'refs/remotes/origin/branch-1', 'HEAD')
+    f.git('checkout', 'main')
+    got = f.invoke(*PER_PR, '--prs', '2,3')
+    check(not evil.exists(), f'preflight stack-run: a command the lower PR adds to the declaration does not run '
+          f'({got.returncode} {got.stdout.strip()!r})')
+    check(good.exists() and 'preflight.json' not in got.stdout,
+          f'preflight stack-run: the default branch declaration runs instead ({got.returncode} {got.stdout.strip()!r})')
+
+    # CONCLAVE_PREFLIGHT=0 skips it: the old stack-walk failure, no list.
+    f = Fixture(tmp, 'preflight-off')
+    f.env.update(MISSING_PR='2', CONCLAVE_PREFLIGHT='0')
+    got = f.invoke(*PER_PR)
+    check(got.returncode == 1 and not f.calls() and not needs(f).exists() and 'Needs from human' not in got.stdout,
+          f'preflight stack-run: CONCLAVE_PREFLIGHT=0 skips every check ({got.returncode} {got.stdout.strip()})')
+    f = Fixture(tmp, 'preflight-off-flag')
+    f.env['CONCLAVE_PREFLIGHT'] = '0'
+    check(f.invoke(*PER_PR, '--prs', '1').returncode == 0
+          and all(c[4] is None for c in f.calls() if c[0] == 'council'),
+          'preflight stack-run: with preflight off, phase 1 gets no CONCLAVE_PREFLIGHT_DONE')
+
+    # (8) holistic_done, then ballot_started and ballot_done per per-PR ballot; the handoff flag reaches phase 1 only.
+    f = Fixture(tmp, 'preflight-events')
+    f.reconcile_repo()
+    log = arm_hook(f)
+    got = f.invoke('--no-reconcile')
+    events = hook_calls(log)
+    payloads = [json.loads(e['payload']) for e in events]
+    names = [e['event'] for e in events]
+    check(got.returncode == 0 and names[:1] == ['holistic_done'] and names.count('holistic_done') == 1
+          and names.count('ballot_started') == 3 and names.count('ballot_done') == 3 and 'wave_done' not in names,
+          f'preflight stack-run: holistic_done once, then ballot_started and ballot_done per per-PR ballot ({names} {got.stderr.strip()})')
+    check(payloads and payloads[0].get('ballot') == 'p-stack-stack' and payloads[0].get('outcome') == 'ok',
+          f'preflight stack-run: holistic_done payload names the ballot and outcome ({payloads[:1]})')
+    started = {p.get('ballot'): (i, p) for i, p in enumerate(payloads) if p.get('event') == 'ballot_started'}
+    done = {p.get('ballot'): (i, p) for i, p in enumerate(payloads) if p.get('event') == 'ballot_done'}
+    waves = f.record()['waves']
+    wave_of = {w['ballots'][0]: w['wave'] for w in waves}
+    check(set(started) == set(done) == {'p-1', 'p-2', 'p-3'}
+          and all(started[b][0] < done[b][0] for b in started)
+          and all(started[b][1].get('wave') == done[b][1].get('wave') == wave_of[b] for b in started)
+          and all(started[b][1].get('pr') == done[b][1].get('pr') == int(b[2:]) for b in started)
+          and all(done[b][1].get('outcome') == 'ok' and 'outcome' not in started[b][1] for b in started),
+          f'preflight stack-run: each ballot fires ballot_started then ballot_done with its run.json wave, pr, and outcome ({payloads[1:]} {waves})')
+    # Rolling window (cap 2): the third ballot starts only after one of the first two is done.
+    check(started['p-3'][0] > min(done['p-1'][0], done['p-2'][0]) if {'p-1', 'p-2', 'p-3'} <= set(started) and {'p-1', 'p-2'} <= set(done) else False,
+          f'preflight stack-run: ballot_started for p-3 follows a ballot_done that freed its slot ({[(p.get("event"), p.get("ballot")) for p in payloads]})')
+    check(all(p.get('stack_id') == 'stack' and p.get('dir') == str(f.root / 'tmp/council/stack')
+              and p.get('event') == e['event'] == e['argv'][1] and str(p.get('ts', '')).endswith('Z')
+              for p, e in zip(payloads, events)),
+          'preflight stack-run: every payload has event, ts, stack_id, dir')
+    check(all('test-chair' not in e['payload']
+              and not mod.FORBIDDEN.search(prompt_outside_repo(e['payload'], str(ROOT), str(f.root))) for e in events),
+          'preflight stack-run: payloads carry no model or vendor names')
+    launches = [c for c in f.calls() if c[0] == 'council' and '--findings' not in c[1]]
+    findings = [c for c in f.calls() if c[0] == 'council' and '--findings' in c[1]]
+    check(launches and all(c[4] == '1' for c in launches) and findings and all(c[4] is None for c in findings),
+          'preflight stack-run: phase 1 conclave.sh sees CONCLAVE_PREFLIGHT_DONE=1; the chair --findings call does not')
+
+    # (9) Capped seats block at minute 0 with the same route call the wave gate makes.
+    f = Fixture(tmp, 'preflight-seats')
+    seat_route(f, SEAT_ASK)
+    f.env.pop('CONCLAVE_PREFLIGHT')
+    got = f.invoke(*PER_PR)
+    text = needs(f).read_text() if needs(f).is_file() else ''
+    check(got.returncode == 3 and not any(c[0] in ('council', 'cursor') for c in f.calls())
+          and 'seats capped' in text and 'every pool capped' in text and 'astra:capped' in text,
+          f'preflight stack-run: a capped seat route blocks before any chair ({got.returncode} {text!r})')
+    check([c[1] for c in f.calls() if c[0] == 'seat'] == [['--route', 'lineup', '--json', '--kind', 'review']],
+          'preflight stack-run: one seat-usage call, the same route the wave gate asks')
+    # (9) A resume that launches no voters is not stopped by a capped route: every scheduled
+    # ballot is done or needs decide, so the seat check is skipped, as the per-wave gate does.
+    # One ballot that still needs voters keeps the block.
+    def resume_states(f: Fixture, fresh: int | None) -> None:
+        for n in (1, 2, 3):
+            if n == fresh:
+                continue
+            b = f.ballot(n)
+            (b / 'judgment.md').write_text('head_oid: ' + 'a' * 40 + '\n')
+            (b / 'findings.json').write_text(json.dumps({'findings': []}))
+            if n == 2:
+                (b / 'decide.md').write_text('f1 \u2014 **what breaks, for whom**: TODO(chair)\n**recommend**: TODO(chair)\n')
+            else:
+                (b / 'decide.md').write_text('Already filled.\n')
+                (b / 'comments.md').write_text('Draft only.\n')
+    f = Fixture(tmp, 'preflight-resume-no-voters')
+    seat_route(f, SEAT_ASK)
+    f.env.pop('CONCLAVE_PREFLIGHT')
+    resume_states(f, None)
+    got = f.invoke(*PER_PR)
+    text = needs(f).read_text() if needs(f).is_file() else ''
+    rec = f.record() if (f.root / 'tmp/council/stack/run.json').is_file() else {}
+    check(got.returncode == 0 and 'seats capped' not in text and not any(c[0] == 'seat' for c in f.calls())
+          and [r['state'] for r in rec.get('prs', [])] == ['done', 'needs decide', 'done']
+          and [w['precheck'] for w in rec.get('waves', [])] == ['not needed'] * 3
+          and not any(c[0] == 'council' and '--findings' not in c[1] for c in f.calls()),
+          f'preflight stack-run: a --no-whole-stack resume with every ballot done or needs decide skips the seat check '
+          f'and runs despite an ask route ({got.returncode} {text!r} {got.stderr.strip()})')
+    f = Fixture(tmp, 'preflight-resume-one-new')
+    seat_route(f, SEAT_ASK)
+    f.env.pop('CONCLAVE_PREFLIGHT')
+    resume_states(f, 3)
+    got = f.invoke(*PER_PR)
+    text = needs(f).read_text() if needs(f).is_file() else ''
+    check(got.returncode == 3 and not any(c[0] in ('council', 'cursor') for c in f.calls())
+          and 'seats capped' in text and 'every pool capped' in text,
+          f'preflight stack-run: a resume with one ballot needing voters still blocks on an ask route ({got.returncode} {text!r})')
+    f = Fixture(tmp, 'preflight-seats-wait')
+    seat_route(f, SEAT_ASK)
+    f.env.pop('CONCLAVE_PREFLIGHT')
+    f.env['CONCLAVE_WAVE_POLL'] = '0.1'
+    got = f.invoke(*PER_PR, '--prs', '1', '--wave-wait', '1')
+    check(got.returncode == 1 and 'the run waits for seats' in got.stdout
+          and f.record()['waves'][0]['precheck'] == 'blocked',
+          f'preflight stack-run: with --wave-wait capped seats only warn and the wave gate waits ({got.returncode} {got.stdout.strip()})')
+    # Preflight takes the first seat answer (clear). The wave-1 gate asks again and gets "ask".
+    f = Fixture(tmp, 'preflight-then-gate-ask')
+    seat_route(f, SEAT_OK, SEAT_ASK)
+    f.env.pop('CONCLAVE_PREFLIGHT')
+    got = f.invoke(*PER_PR, '--prs', '1')
+    text = needs(f).read_text() if needs(f).is_file() else ''
+    check([c[1] for c in f.calls() if c[0] == 'seat'] == [['--route', 'lineup', '--json', '--kind', 'review']] * 2,
+          'preflight stack-run: with preflight on, seat-usage is asked twice, once by preflight and once by the wave gate')
+    check('seats capped' not in text and got.returncode == 1 and f.record()['waves'][0]['precheck'] == 'blocked'
+          and not any(c[0] == 'council' for c in f.calls()),
+          f'preflight stack-run: preflight passes, then the wave-1 gate stops the wave with no ballot ({got.returncode} {text!r} {f.record()["waves"][0]})')
+    f = Fixture(tmp, 'preflight-seats-inconclusive')
+    got = f.invoke(*PER_PR, '--prs', '1')
+    check(got.returncode == 0 and 'seat check inconclusive' in got.stdout and '## Blocking\n\n(none)' in got.stdout,
+          f'preflight stack-run: an inconclusive seat check only warns ({got.returncode} {got.stdout.strip()})')
+
+    # stalled fires on a chair timeout.
+    f = Fixture(tmp, 'preflight-stalled')
+    log = arm_hook(f)
+    f.env['TIMEOUT_PR'] = '-1'
+    got = f.invoke(*PER_PR, '--prs', '1', '--chair-timeout', '1')
+    events = hook_calls(log)
+    stalled = [json.loads(e['payload']) for e in events if e['event'] == 'stalled']
+    dones = [json.loads(e['payload']) for e in events if e['event'] == 'ballot_done']
+    check(got.returncode == 1 and len(stalled) == 1 and stalled[0].get('ballot') == 'p-1'
+          and stalled[0].get('step') == 'chair_a' and stalled[0].get('seconds') == 1,
+          f'preflight stack-run: stalled fires once on a chair timeout with ballot, step, seconds ({stalled})')
+    check(len(dones) == 1 and dones[0].get('ballot') == 'p-1' and dones[0].get('outcome') == 'failed'
+          and 'timeout' not in json.dumps(dones),
+          f'preflight stack-run: ballot_done reports the failed outcome class, not the error text ({dones})')
+
+    # (6) A missing hook leaves the run's exit code alone and logs to stage-hook.log.
+    f = Fixture(tmp, 'preflight-hook-missing')
+    f.env['CONCLAVE_STAGE_HOOK'] = str(f.base / 'no-such-hook')
+    got = f.invoke(*PER_PR, '--prs', '1')
+    hook_log = f.root / 'tmp/council/stack/stage-hook.log'
+    check(got.returncode == 0 and hook_log.is_file() and 'ballot_started failed: not found' in hook_log.read_text()
+          and 'stage-hook: ballot_done failed: not found' in got.stderr,
+          f'preflight stack-run: a missing hook is logged and the run still exits 0 ({got.returncode} {got.stderr.strip()})')
 
 
 def test_stale_head(tmp: Path) -> None:
@@ -2004,6 +2273,7 @@ def main() -> None:
         test_max_cap_rolling(tmp, mod)
         test_rolling_cap_closes_queue(mod)
         test_rolling_cap_after_inconclusive_precheck(mod)
+        test_preflight_stack(tmp, mod)
         test_stale_head(tmp)
         test_stack_ballot_name(tmp)
         test_detach(tmp)
