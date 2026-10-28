@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge-gate helper: read the reviewer's answer, parse its one_way line, merge.
+"""Merge-gate helper: read the reviewer's answer, parse its verdict and one_way lines, merge.
 
     merge_gate.py extract <gate.stream.jsonl> <gate.md>
     merge_gate.py parse <gate.md>
@@ -13,8 +13,17 @@ Lines inside code fences are quotes and do not count. A line counts only when
 its first token is `one_way:` or `one_way_at:`; prose that mentions one_way is
 ignored, and a directive with a value other than yes/no is unparseable.
 
-merge fails closed. It refuses (exit 3, nothing merged) when the verdict is
-yes, missing, conflicting, or malformed, when gate-head.txt is missing, when
+The verdict is a line, outside code fences, that is exactly `approve`,
+`request-changes`, or `comment` (lowercase), alone on the line. It may end in
+one `.` or `:`, or carry a glued `Findings` / `Findings:` header
+(`approveFindings:`), and nothing else. A preamble before it is fine. A name
+that starts with the word (`approveRequest`, `commentOn`) is not a verdict. Prose that only mentions approve
+is not a verdict. No verdict line, or two different ones, records verdict null
+and a verdict_error. review writes the parse to gate-verdict.json.
+
+merge fails closed. It refuses (exit 3, nothing merged) unless gate-verdict.json
+records verdict approve and gate.md still parses to that same verdict. It also
+refuses when the one_way verdict is yes, missing, conflicting, or malformed, when gate-head.txt is missing, when
 the PR has the `one-way` label, when gh cannot read the labels, or when
 gate-route.json is missing, unreadable, or records no builder vendor, no
 reviewer vendor, or the same vendor for both. Every reason is printed.
@@ -54,6 +63,12 @@ VERDICT = re.compile(r"^(?i:one_way)\s*:(.*)$")
 # parses. Whitespace, a comma or a semicolon then more text, or a lowercase
 # letter is unparseable: nothing, nope, none, "no longer", "no, actually yes".
 VALUE = re.compile(r"\s*(yes|no)(?=\s*$|[.:)\]]|[A-Z])")
+# The reviewer's verdict: the word alone on its line, optionally followed by a
+# glued "Findings" / "Findings:" header (cursor-agent joins turns with no
+# separator) or one "." or ":", then end of line. Anything else after the word
+# ("approveRequest", "comment: a note", "approve, mostly") is not a verdict.
+VERDICTS = ("approve", "request-changes", "comment")
+VERDICT_WORD = re.compile(r"^(approve|request-changes|comment)(?:Findings:?|[.:])?\s*$")
 DIRECTIVE_AT = re.compile(r"^one_way_at\s*:", re.I)
 ITEM = re.compile(r"^one_way_at\s*:\s*(\S+:\d+)\s*(.*)$", re.I)
 
@@ -65,7 +80,12 @@ def _clean(line: str) -> str:
 
 
 def parse(text: str) -> dict:
-    """{"one_way": "yes"|"no"|None, "items": [...], "error": str|None}."""
+    """{"verdict", "verdict_error", "one_way", "items", "error"}.
+
+    verdict is approve|request-changes|comment or None with verdict_error set.
+    one_way is "yes"|"no" or None with error set.
+    """
+    verdicts: list[str] = []
     values: list[str] = []
     items: list[dict] = []
     bad: list[str] = []
@@ -77,6 +97,10 @@ def parse(text: str) -> dict:
         if fence:
             continue
         line = _clean(raw)
+        w = VERDICT_WORD.match(line)
+        if w:
+            verdicts.append(w.group(1))
+            continue
         m = ITEM.match(line)
         if m:
             items.append({"at": m.group(1), "what": m.group(2).strip()})
@@ -92,7 +116,14 @@ def parse(text: str) -> dict:
             else:
                 bad.append(line)
         # Anything else that only mentions one_way (prose, a bullet) is ignored.
-    out: dict = {"one_way": None, "items": items, "error": None}
+    out: dict = {"verdict": None, "verdict_error": None,
+                 "one_way": None, "items": items, "error": None}
+    if not verdicts:
+        out["verdict_error"] = "no approve|request-changes|comment line in the gate answer"
+    elif len(set(verdicts)) > 1:
+        out["verdict_error"] = "conflicting verdict lines: " + ", ".join(dict.fromkeys(verdicts))
+    else:
+        out["verdict"] = verdicts[0]
     if bad:
         out["error"] = "unparseable one_way line: " + "; ".join(repr(b) for b in bad)
     elif not values:
@@ -137,6 +168,27 @@ def extract(stream: str, md: str) -> int:
     return 0
 
 
+def verdict_reasons(path: Path, parsed: dict) -> list[str]:
+    """Empty only when gate-verdict.json records approve and gate.md agrees."""
+    if not path.is_file():
+        return [f"no gate-verdict.json at {path} (run merge-gate.sh review first)"]
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return ["gate-verdict.json is unreadable"]
+    recorded = rec.get("verdict") if isinstance(rec, dict) else None
+    if recorded is None:
+        why = rec.get("verdict_error") if isinstance(rec, dict) else None
+        return ["gate-verdict.json records no verdict" + (f": {why}" if why else "")]
+    if recorded not in VERDICTS:
+        return [f"gate-verdict.json records an unknown verdict {recorded!r}"]
+    if recorded != parsed["verdict"]:
+        return [f"gate-verdict.json says {recorded} but gate.md parses as {parsed['verdict']}"]
+    if recorded != "approve":
+        return [f"gate verdict is {recorded}, not approve"]
+    return []
+
+
 def pr_labels(gh: str, pr: str) -> tuple[list[str] | None, str]:
     try:
         p = subprocess.run([gh, "pr", "view", pr, "--json", "labels"],
@@ -163,6 +215,7 @@ def merge(pr: str, out_dir: str) -> int:
     else:
         v = parse(md.read_text(encoding="utf-8", errors="replace"))
         items = v["items"]
+        reasons.extend(verdict_reasons(out / "gate-verdict.json", v))
         if v["error"]:
             reasons.append(f"gate verdict is missing or unparseable: {v['error']}")
         elif v["one_way"] == "yes":
@@ -190,7 +243,7 @@ def merge(pr: str, out_dir: str) -> int:
               "unknown, needs Ryan's explicit yes in a separate PR. Nothing was merged.",
               file=sys.stderr)
         return REFUSED
-    print(f"merge-gate: one_way: no, no `{LABEL}` label; squash-merging {pr} at {head}", flush=True)
+    print(f"merge-gate: approve, one_way: no, no `{LABEL}` label; squash-merging {pr} at {head}", flush=True)
     return subprocess.run([gh, "pr", "merge", pr, "--squash",
                            "--match-head-commit", head]).returncode
 
@@ -396,7 +449,8 @@ def main(argv: list[str]) -> int:
     if len(argv) == 2 and argv[0] == "parse":
         print(json.dumps(parse(Path(argv[1]).read_text(encoding="utf-8", errors="replace"))
                          if Path(argv[1]).is_file() else
-                         {"one_way": None, "items": [], "error": f"no file {argv[1]}"}))
+                         {"verdict": None, "verdict_error": f"no file {argv[1]}",
+                          "one_way": None, "items": [], "error": f"no file {argv[1]}"}))
         return 0
     if len(argv) == 3 and argv[0] == "merge":
         return merge(argv[1], argv[2])

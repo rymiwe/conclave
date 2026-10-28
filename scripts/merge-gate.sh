@@ -29,9 +29,12 @@
 # muse reads --prompt-file. It writes gate-prompt.md, gate.stream.jsonl (the
 # reviewer's raw output), gate.err, gate.md (the reviewer's answer),
 # gate-head.txt (the reviewed head sha), and gate-verdict.json (the parsed
-# one_way line) under <out_dir>.
+# verdict line, approve / request-changes / comment, and the parsed one_way
+# line) under <out_dir>.
 #
-# merge refuses, nonzero, when gate.md says one_way: yes, when its one_way
+# merge refuses, nonzero, unless gate-verdict.json records verdict approve and
+# gate.md still parses to that verdict (a missing, null, or unknown verdict
+# refuses). It also refuses when gate.md says one_way: yes, when its one_way
 # line is missing or unparseable, when the PR has the one-way label, when
 # the labels cannot be read, or when gate-route.json is missing, unreadable,
 # or records no builder vendor, no reviewer vendor, or the same vendor for
