@@ -239,7 +239,11 @@ def resolve(
     # added line counts, and only when its whole text equals the cited line.
     # A context line was already there, and a substring is another line.
     # Only a later PR is a re-anchor. An earlier PR's line is not this PR's line.
+    # An earlier (or target) match does not end the scan: when a later PR adds
+    # the same line too, which one the finding means cannot be told, so it is
+    # flagged for the chair instead of posted on either.
     if path and needle:
+        earlier = None
         for number in order:
             patch = _patch(by_pr, number, path)
             if patch is None:
@@ -256,7 +260,17 @@ def resolve(
             if not found:
                 continue
             if not later(number):
-                break
+                if earlier is None:
+                    earlier = number
+                continue
+            if earlier is not None:
+                return result(
+                    "flag",
+                    None,
+                    None,
+                    f"#{earlier} and #{number} both add the cited line to {path}; "
+                    "the chair re-anchors by hand",
+                )
             if len(found) > 1:
                 where = ", ".join(str(n) for n in found)
                 return result(

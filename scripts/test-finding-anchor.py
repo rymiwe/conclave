@@ -443,12 +443,43 @@ def test_paginated_files() -> None:
     check(refused, "a non-list page is a GhError")
 
 
+def test_earlier_and_later_both_add() -> None:
+    """Gate-12 finding 1: an earlier PR's match stopped the scan, so a later PR's copy was never seen."""
+    pr1 = "@@ -1,1 +1,2 @@\n class Svc\n+  end\n"
+    pr2 = "@@ -5,2 +5,3 @@\n def b\n+  x = 1\n end\n"
+    pr3 = "@@ -124,2 +124,5 @@\n   def b\n   end\n+  def stale_total\n+    rows.sum\n+  end\n"
+    stack = [
+        {"number": 1, "files": {"app/svc.rb": pr1}},
+        {"number": 2, "files": {"app/svc.rb": pr2}},
+        {"number": 3, "files": {"app/svc.rb": pr3}},
+    ]
+    got = finding_anchor.resolve(
+        {"file": "app/svc.rb", "line": 128, "cited_code": "end"}, stack, 2, lambda path, line: None)
+    check(got["post_as"] == "flag" and got["pr"] is None and "#1" in got["reason"] and "#3" in got["reason"],
+          f"an earlier and a later PR that both add the line are flagged, naming both ({got})")
+
+    on_target = [
+        {"number": 2, "files": {"app/svc.rb": "@@ -1,1 +1,2 @@\n class Svc\n+  end\n"}},
+        {"number": 3, "files": {"app/svc.rb": pr3}},
+    ]
+    got = finding_anchor.resolve(
+        {"file": "app/svc.rb", "line": 128, "cited_code": "end"}, on_target, 2, lambda path, line: None)
+    check(got["post_as"] == "flag" and "#2" in got["reason"] and "#3" in got["reason"],
+          f"the target and a later PR that both add the line are flagged, naming both ({got})")
+
+    got = finding_anchor.resolve(
+        {"file": "app/svc.rb", "line": 128, "cited_code": "def stale_total"}, stack, 2, lambda path, line: None)
+    check(got["post_as"] == "inline" and got["pr"] == 3 and got["line"] == 126,
+          f"a line only a later PR adds still re-anchors there ({got})")
+
+
 def main() -> None:
     test_labels()
     test_right_lines_moved()
     test_resolve()
     test_how_it_posts()
     test_exact_added_lines_only()
+    test_earlier_and_later_both_add()
     test_paginated_files()
     with tempfile.TemporaryDirectory(prefix="finding-anchor-tests-") as raw:
         test_cli(Path(raw))
