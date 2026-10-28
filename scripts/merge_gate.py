@@ -410,13 +410,11 @@ def merge(pr: str, out_dir: str, flag: str | None = None) -> int:
               f"unknown, needs Ryan's explicit yes recorded in {out / ACK} by a bot other "
               "than the builder (see README). Nothing was merged.", file=sys.stderr)
         return REFUSED
-    if ack is None:
-        print(f"merge-gate: approve, one_way: no, no `{LABEL}` label; squash-merging {pr} at {head}", flush=True)
-        return subprocess.run([gh, "pr", "merge", pr, "--squash",
-                               "--match-head-commit", head]).returncode
-    print(f"merge-gate: approve, one_way: yes with Ryan's ack; squash-merging {pr} at {head}", flush=True)
-    rc = subprocess.run([gh, "pr", "merge", pr, "--squash", "--match-head-commit", head]).returncode
-    if rc != 0:
+    why = f"one_way: no, no `{LABEL}` label" if ack is None else "one_way: yes with Ryan's ack"
+    print(f"merge-gate: approve, {why}; squash-merging {pr} at {head}", flush=True)
+    rc = subprocess.run([gh, "pr", "merge", pr, "--squash",
+                         "--match-head-commit", head]).returncode
+    if rc != 0 or ack is None:
         return rc
     try:
         used = use_ack(out)

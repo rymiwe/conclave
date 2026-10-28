@@ -392,6 +392,13 @@ has "ack-ok: note names the source" "$note" "Practice Paul message m-42"
 has "ack-ok: note names the writer" "$note" "written by Practice Paul"
 has "ack-ok: note lists a one-way step" "$note" "app/mail.py:9 emails every user"
 has "ack-ok: stdout carries the note" "$merge_out" "Yes, merge #1"
+ack_merges=$(grep '^gh pr merge' "$FAKE_GH_LOG")
+[ "$(grep -c '^gh pr merge' "$FAKE_GH_LOG")" = 1 ] && ok "ack-ok: exactly one gh pr merge call" || bad "ack-ok: gh pr merge calls: $ack_merges"
+run onemerge-no $'approve\n\nFindings:\nNone.\n\none_way: no'
+no_merges=$(grep '^gh pr merge' "$FAKE_GH_LOG")
+[ "$(grep -c '^gh pr merge' "$FAKE_GH_LOG")" = 1 ] && ok "one_way: no: exactly one gh pr merge call" || bad "one_way: no: gh pr merge calls: $no_merges"
+[ -n "$ack_merges" ] && [ "$ack_merges" = "$no_merges" ] && ok "the ack path and the one_way: no path make the same gh pr merge call" \
+  || bad "merge calls differ: ack '$ack_merges' vs no '$no_merges'"
 
 amerge ack-ok
 ackrefused "ack-used" "acks/used/ holds 1 used ack, and a used ack cannot authorize a merge again"
