@@ -45,8 +45,10 @@ EOF2
     echo "conclave: checkout is behind $up by $behind and ahead by $ahead (diverged); not pulling. Reconcile by hand, or set ${skip_name}=1." >&2
     return 1
   fi
-  # Untracked-and-ignored files (tmp/council/**) do not show in --porcelain.
-  if [ -n "$(git -C "$dir" status --porcelain)" ]; then
+  # Untracked run output under tmp/ does not block, unless the pull would overwrite it.
+  if [ -n "$(git -C "$dir" status --porcelain --untracked-files=no)" ] ||
+    [ -n "$(git -C "$dir" ls-files --others --exclude-standard -- ':(top)' ':(top,exclude)tmp/')" ] ||
+    ! git -C "$dir" read-tree -n -u -m --exclude-per-directory=.gitignore HEAD "$up" >/dev/null 2>&1; then
     echo "conclave: checkout is behind $up by $behind but the working tree is dirty; not pulling. Commit or stash, or set ${skip_name}=1." >&2
     return 1
   fi
