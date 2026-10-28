@@ -335,6 +335,62 @@ has "no gate dir: reason" "$out" "no gate answer at"
 
 # Verdict parsing: the value must end at end of line or a non-lowercase character.
 parse_of() { printf '%s\n' "$1" > "$T/parse.md"; python3 "$ROOT/scripts/merge_gate.py" parse "$T/parse.md"; }
+# The reviewer's verdict word (approve / request-changes / comment) is recorded
+# in gate-verdict.json, and merge refuses unless that record says approve.
+run rc-verdict $'request-changes\n\nFindings:\n1. Severity: bug. File:line: f:2. Description: x. Suggestion: y.\n\none_way: no'
+has "request-changes: verdict recorded" "$(cat "$T/rc-verdict/out/gate-verdict.json")" '"verdict": "request-changes"'
+[ "$merge_rc" = 3 ] && ok "request-changes: merge rc 3" || bad "request-changes: merge rc $merge_rc"
+has "request-changes: reason" "$merge_out" "reason: gate verdict is request-changes, not approve"
+hasnt "request-changes: no gh pr merge" "$gh_log" "pr merge"
+run comment-verdict $'comment\n\nFindings:\nNone.\n\none_way: no'
+has "comment: verdict recorded" "$(cat "$T/comment-verdict/out/gate-verdict.json")" '"verdict": "comment"'
+[ "$merge_rc" = 3 ] && ok "comment: merge rc 3" || bad "comment: merge rc $merge_rc"
+hasnt "comment: no gh pr merge" "$gh_log" "pr merge"
+run approve-verdict $'approve\n\nFindings:\nNone.\n\none_way: no'
+has "approve: verdict recorded" "$(cat "$T/approve-verdict/out/gate-verdict.json")" '"verdict": "approve"'
+[ "$merge_rc" = 0 ] && ok "approve: merge rc 0" || bad "approve: merge rc $merge_rc"
+has "approve: gh pr merge at the reviewed sha" "$gh_log" "gh pr merge $PR --squash --match-head-commit $HEAD_SHA"
+# A gate-verdict.json with no verdict field (written before this field existed) refuses.
+d="$T/approve-verdict/out"
+jq -c 'del(.verdict)' "$d/gate-verdict.json" > "$d/v.tmp" && mv "$d/v.tmp" "$d/gate-verdict.json"
+: > "$FAKE_GH_LOG"
+out="$("$ROOT/scripts/merge-gate.sh" merge "$PR" "$d" 2>&1)"; rc=$?
+[ "$rc" = 3 ] && ok "no verdict field: merge rc 3" || bad "no verdict field: merge rc $rc"
+has "no verdict field: reason" "$out" "reason: gate-verdict.json records no verdict"
+hasnt "no verdict field: no gh pr merge" "$(cat "$FAKE_GH_LOG")" "pr merge"
+rm -f "$d/gate-verdict.json"; : > "$FAKE_GH_LOG"
+out="$("$ROOT/scripts/merge-gate.sh" merge "$PR" "$d" 2>&1)"; rc=$?
+[ "$rc" = 3 ] && ok "no gate-verdict.json: merge rc 3" || bad "no gate-verdict.json: merge rc $rc"
+has "no gate-verdict.json: reason" "$out" "reason: no gate-verdict.json at"
+hasnt "no gate-verdict.json: no gh pr merge" "$(cat "$FAKE_GH_LOG")" "pr merge"
+# An answer with no verdict line, or two different ones, records null and refuses.
+run noverdict $'Findings:\nNone.\n\none_way: no'
+has "no verdict line: verdict null" "$(cat "$T/noverdict/out/gate-verdict.json")" '"verdict": null'
+[ "$merge_rc" = 3 ] && ok "no verdict line: merge rc 3" || bad "no verdict line: merge rc $merge_rc"
+has "no verdict line: reason" "$merge_out" "no approve|request-changes|comment line in the gate answer"
+hasnt "no verdict line: no gh pr merge" "$gh_log" "pr merge"
+run twoverdicts $'approve\n\nFindings:\nNone.\n\nrequest-changes\n\none_way: no'
+[ "$merge_rc" = 3 ] && ok "conflicting verdicts: merge rc 3" || bad "conflicting verdicts: merge rc $merge_rc"
+has "conflicting verdicts: reason" "$merge_out" "conflicting verdict lines: approve, request-changes"
+# A gate-verdict.json that disagrees with gate.md refuses.
+run edited $'request-changes\n\nFindings:\nNone.\n\none_way: no'
+d="$T/edited/out"
+jq -c '.verdict = "approve"' "$d/gate-verdict.json" > "$d/v.tmp" && mv "$d/v.tmp" "$d/gate-verdict.json"
+: > "$FAKE_GH_LOG"
+out="$("$ROOT/scripts/merge-gate.sh" merge "$PR" "$d" 2>&1)"; rc=$?
+[ "$rc" = 3 ] && ok "edited gate-verdict.json: merge rc 3" || bad "edited gate-verdict.json: merge rc $rc"
+has "edited gate-verdict.json: reason" "$out" "gate-verdict.json says approve but gate.md parses as request-changes"
+hasnt "edited gate-verdict.json: no gh pr merge" "$(cat "$FAKE_GH_LOG")" "pr merge"
+# Verdict line parsing, the same rules as the one_way value.
+has "preamble then approve on its own line" "$(parse_of $'I will read the diff first.\napprove\n\none_way: no')" '"verdict": "approve"'
+has "bold **approve** parses" "$(parse_of $'**approve**\none_way: no')" '"verdict": "approve"'
+has "glued approveFindings: parses" "$(parse_of $'approveFindings:\nNone.\none_way: no')" '"verdict": "approve"'
+has "fenced approve does not count" "$(parse_of $'```\napprove\n```\none_way: no')" '"verdict": null'
+for l in 'I approve of this' 'approved' 'approve, mostly' 'Approve' 'request-changes please'; do
+  has "'$l' is not a verdict" "$(parse_of "$l"$'\none_way: no')" '"verdict": null'
+done
+has "verdict error leaves one_way error alone" "$(parse_of $'approve\none_way: no')" '"error": null'
+
 GLUED=$'approve\n\nFindings:\nNone.\n\none_way: noThe start-order stress run was killed after it deadlocked, so it produced no result.'
 has "glued 'one_way: noThe ...' parses as no" "$(parse_of "$GLUED")" '"one_way": "no"'
 has "glued parse has no error" "$(parse_of "$GLUED")" '"error": null'
