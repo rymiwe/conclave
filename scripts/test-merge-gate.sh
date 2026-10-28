@@ -25,7 +25,12 @@ case "$1 $2 $*" in
   "pr view "*"--json labels"*) [ -n "${FAKE_GH_LABELS_FAIL:-}" ] && { echo "HTTP 401" >&2; exit 1; }
     printf '{"labels":[%s]}\n' "${FAKE_LABELS:-}";;
   "pr view "*) echo "Title: t"; echo; echo "body";;
-  "pr merge "*) echo "merged";;
+  "pr merge "*) # FAKE_PR_HEAD is the PR's current head; a different --match-head-commit fails as GitHub does.
+    m=""; prev=""; for a in "$@"; do [ "$prev" = --match-head-commit ] && m=$a; prev=$a; done
+    if [ -n "${FAKE_PR_HEAD:-}" ] && [ "$m" != "$FAKE_PR_HEAD" ]; then
+      echo "GraphQL: Head branch was modified. Review and try the merge again. (mergePullRequest)" >&2; exit 1
+    fi
+    echo "merged";;
   *) echo "unexpected gh $*" >&2; exit 9;;
 esac
 G
@@ -332,6 +337,17 @@ hasnt "unreadable labels: no gh pr merge" "$gh_log" "pr merge"
 out="$("$ROOT/scripts/merge-gate.sh" merge "$PR" "$T/nowhere" 2>&1)"; rc=$?
 [ "$rc" = 3 ] && ok "no gate dir refused" || bad "no gate dir rc $rc"
 has "no gate dir: reason" "$out" "no gate answer at"
+# The PR head moved after the gate: gh refuses --match-head-commit, merge exits
+# nonzero, and nothing reports merged. FAKE_PR_HEAD is the PR's current head.
+MOVED=0123456789abcdef0123456789abcdef01234567
+FAKE_PR_HEAD=$MOVED run headmoved $'approve\n\nFindings:\nNone.\n\none_way: no'
+has "head moved: gh pr merge pinned to the reviewed sha" "$gh_log" "gh pr merge $PR --squash --match-head-commit $HEAD_SHA"
+[ "$merge_rc" != 0 ] && ok "head moved: merge exits nonzero ($merge_rc)" || bad "head moved: merge rc $merge_rc"
+has "head moved: gh's refusal is shown" "$merge_out" "Head branch was modified"
+hasnt "head moved: nothing reports merged" "$merge_out" "merged"
+FAKE_PR_HEAD=$HEAD_SHA run headsame $'approve\n\nFindings:\nNone.\n\none_way: no'
+[ "$merge_rc" = 0 ] && ok "head unchanged: merge rc 0" || bad "head unchanged: merge rc $merge_rc"
+has "head unchanged: merged" "$merge_out" "merged"
 
 # Verdict parsing: the value must end at end of line or a non-lowercase character.
 parse_of() { printf '%s\n' "$1" > "$T/parse.md"; python3 "$ROOT/scripts/merge_gate.py" parse "$T/parse.md"; }
