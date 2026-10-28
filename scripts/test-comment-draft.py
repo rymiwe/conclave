@@ -212,6 +212,24 @@ def main() -> None:
         else:
             raise SystemExit("FAIL two repro files were accepted")
 
+        outside = directory / "outside"
+        outside.mkdir()
+        (outside / "f7.rb").write_text("puts 'outside'\n", encoding="utf-8")
+        (repro / "f7.rb").symlink_to(outside / "f7.rb")
+        linked_dir = directory / "linked-ballot"
+        linked_dir.mkdir()
+        (linked_dir / "repro").symlink_to(outside, target_is_directory=True)
+        for where, run_dir in (("a symlinked repro file", ballot), ("a symlinked repro directory", linked_dir)):
+            try:
+                found = comment_draft.find_repro(run_dir, "f7")
+            except comment_draft.UnsafeRepro as exc:
+                check(str(exc) == "repro for f7 not inlined: path is a symlink or resolves outside the run directory",
+                      f"{where} is refused with the note")
+            except AttributeError:
+                raise SystemExit(f"FAIL {where} was returned for inlining (no UnsafeRepro)")
+            else:
+                raise SystemExit(f"FAIL {where} was returned for inlining: {found}")
+
         reply = comment_draft.draft_comment(
             "**Requested:** please fix\n**Question:** why\n",
             kind="reply",
@@ -318,6 +336,17 @@ def main() -> None:
             proc = subprocess.run([sys.executable, str(checker), str(target)], capture_output=True, text=True)
         check(proc.returncode != 0 and "council" in proc.stdout, "the same words outside a fence still fail")
 
+    tables = {
+        "one column": "Note.\n\n| Note |\n| --- |\n| counts deleted items |\n",
+        "one column, aligned": "| Note |\n|:---:|\n| x |\n",
+        "one column, no outer pipes": "Note |\n--- |\nx |\n",
+        "two columns": "| a | b |\n| --- | --- |\n| 1 | 2 |\n",
+        "two columns, no outer pipes": "a | b\n--- | ---\n1 | 2\n",
+    }
+    for name, text in tables.items():
+        check(comment_draft.summary_has_table(text), f"a {name} table separator is caught")
+    for name, text in {"a bare rule": "Note.\n\n---\n\nMore.\n", "a dash list": "- --- x\n"}.items():
+        check(not comment_draft.summary_has_table(text), f"{name} is not a table")
     print("ok comment draft")
 
 

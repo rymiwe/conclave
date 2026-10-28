@@ -6,14 +6,14 @@ repro/<finding-id>.<ext> (repro/f1.rb). The comment for that finding gets one
 collapsed details block. A finding with no file there gets no block.
 
 Labels (**Requested:**, **Advisory:**, **Informational:**, and the legacy
-**Question:**) belong only on new inline comments: at the start of one, and
-only when the pull request is someone else's. A reply never keeps one. The
-review summary never opens with one, and a bullet inside the summary loses
-one while SUMMARY_BULLETS_MAY_HAVE_LABELS is False (the setting since
-2026-10-23). This module strips labels on a reply, strips a label that opens
-the summary and every summary bullet label, and requires a new inline comment in
-someone else's pull request to start with one. It does not enforce the absence
-of labels on an inline comment on your own pull request.
+**Question:**) belong only on new inline comments, at the start of one.
+Every new inline comment needs one, on your own pull request and on
+someone else's. A reply never keeps one. The review summary never opens
+with one, and a bullet inside the summary loses one while
+SUMMARY_BULLETS_MAY_HAVE_LABELS is False (the setting since 2026-10-23).
+This module strips labels on a reply and strips a label that opens the
+summary and every summary bullet label. The check that a new inline
+comment is missing its label lives in check-comment-labels.py.
 
 GitHub rejects a review comment body longer than 65536 characters. A script
 that does not fit is truncated inside the fence, with a note after the fence.
@@ -38,6 +38,18 @@ from pathlib import Path
 
 # GitHub's review-comment body limit, in characters.
 GITHUB_COMMENT_LIMIT = 65536
+# The review summary is a short opener. Each finding posts as its own
+# comment. These limits apply to the payload body before an outside-diff
+# block or a repro block is appended. post-review.py refuses a longer one,
+# and one with a markdown table.
+SUMMARY_OPENER_MAX_CHARS = 600
+SUMMARY_OPENER_MAX_LINES = 6
+# A separator row has at least one pipe, so a bare `---` rule is not a table.
+# The lookahead requires it. One column is `| --- |`, `| --- ` or `--- |`.
+_TABLE_SEP = re.compile(
+    r"^\s*(?=[^|]*\|)\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)*\|?\s*$"
+)
+_DETAILS_BLOCK = re.compile(r"<details>.*?</details>", re.S)
 
 # Info string GitHub highlights, keyed by the filename extension.
 _LANG = {
@@ -62,6 +74,9 @@ _LANG = {
 
 # Question is no longer drafted. It still counts, so an old draft is labeled
 # and a reply that still carries it is stripped.
+# The labels a new inline or file-level comment may open with when it posts.
+# post-review.py and check-comment-labels.py both read this tuple, so they agree.
+POST_LABELS = ("**Requested:**", "**Advisory:**", "**Informational:**")
 LABEL_RE = re.compile(r"\*\*(?:Requested|Advisory|Informational|Question):\*\*[ \t]*")
 
 # A summary bullet is a line that, after optional indentation, has a list
@@ -80,6 +95,15 @@ EXT = re.compile(r"\.[A-Za-z0-9]+")
 
 class ReproError(ValueError):
     """The repro directory does not match repro/<finding-id>.<ext>."""
+
+
+class UnsafeRepro(ValueError):
+    """The repro is a symlink, sits under one, or resolves outside the ballot directory.
+
+    The caller drops the inline and keeps the message as its note. Not a
+    ReproError, so a caller that stops on a malformed repro directory does
+    not stop here.
+    """
 
 
 def _links():
@@ -261,6 +285,45 @@ def adopt_hand_block(body: str, filename: str, marker: str) -> str:
         return f"{body[:start]}{marker}\n{body[start:]}"
 
 
+def summary_opener_text(body: str) -> str:
+    """Summary prose before an outside-diff block or a repro block.
+
+    A hand-written details block is a repro, so it does not count toward
+    the opener limits. body_findings are attached later and are not in body yet.
+    """
+    text = _DETAILS_BLOCK.sub("", prose_without_repro(body))
+    marker = "**Outside this diff**"
+    at = text.find(marker)
+    if at >= 0:
+        text = text[:at]
+    return text.strip()
+
+
+def summary_has_table(text: str) -> bool:
+    """True when text has a markdown table separator row."""
+    return any(_TABLE_SEP.match(line) for line in text.splitlines())
+
+
+def summary_opener_problems(body: str) -> list[str]:
+    """Refusals for a summary that is not a short opener. Each names a count."""
+    text = summary_opener_text(body)
+    found: list[str] = []
+    chars = len(text)
+    if chars > SUMMARY_OPENER_MAX_CHARS:
+        found.append(
+            f"summary opener is {chars} characters; the limit is {SUMMARY_OPENER_MAX_CHARS}"
+        )
+    rows = [line for line in text.splitlines() if line.strip()]
+    if len(rows) > SUMMARY_OPENER_MAX_LINES:
+        found.append(
+            f"summary opener is {len(rows)} non-empty lines; "
+            f"the limit is {SUMMARY_OPENER_MAX_LINES}"
+        )
+    if summary_has_table(text):
+        found.append("summary opener contains a markdown table")
+    return found
+
+
 def prose_without_repro(body: str) -> str:
     """Comment text with repro blocks removed.
 
@@ -364,7 +427,10 @@ def find_repro(ballot_dir: Path, finding_id: str) -> Path | None:
     """The one file repro/<finding-id>.<ext>, or None when the directory is absent.
 
     Two files for one finding is an error. The id is f<digits>, so f1 never
-    matches f10.
+    matches f10. A match that is a symlink, under a symlinked repro
+    directory, or whose real path is outside ballot_dir raises UnsafeRepro,
+    so a link to a file outside the run is never read into a comment. A hard
+    link, and a file swapped for a link after this check, are not caught.
     """
     if not FINDING_ID.fullmatch(finding_id):
         raise ReproError(f"bad finding id {finding_id!r}")
@@ -373,7 +439,9 @@ def find_repro(ballot_dir: Path, finding_id: str) -> Path | None:
         return None
     matches = []
     for path in directory.iterdir():
-        if not path.is_file():
+        # A symlink still counts when its target is missing or a directory,
+        # so it gets the UnsafeRepro note below instead of vanishing.
+        if not (path.is_file() or path.is_symlink()):
             continue
         if path.stem != finding_id:
             continue
@@ -385,7 +453,13 @@ def find_repro(ballot_dir: Path, finding_id: str) -> Path | None:
     if len(matches) > 1:
         names = ", ".join(sorted(path.name for path in matches))
         raise ReproError(f"more than one repro for {finding_id}: {names}")
-    return matches[0]
+    found = matches[0]
+    if (directory.is_symlink() or found.is_symlink()
+            or not found.resolve().is_relative_to(ballot_dir.resolve())):
+        raise UnsafeRepro(
+            f"repro for {finding_id} not inlined: path is a symlink or resolves outside the run directory"
+        )
+    return found
 
 
 def _outside_fences(text: str, start: int, end: int) -> bool:

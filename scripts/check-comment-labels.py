@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Flag a summary that opens with a label, a labeled summary bullet, a labeled
-reply, or an unlabeled new inline comment on someone else's PR.
+reply, or an unlabeled new inline comment on any PR.
 
   scripts/check-comment-labels.py <payload.json> [--pr-author LOGIN] [--reviewer LOGIN]
 
@@ -9,7 +9,10 @@ A comment without it is a new inline comment. The review summary is payload
 "body". It must not open with a label. A reply must not carry one.
 
 **Requested:**, **Advisory:**, **Informational:**, and the legacy **Question:**
-all count as a label. A label inside a fenced script does not.
+all count as a label on a summary, a reply, and a bullet. A label inside a
+fenced script does not. A new inline comment may open only with the first
+three. One that opens with **Question:** is flagged, the same as post-review.py
+refuses it: the verdict is computed from Requested, Advisory, and Informational.
 
 A summary opens with a label when, after blank lines, the first non-empty
 line starts with one of those labels. Leading spaces and tabs on that line
@@ -28,13 +31,11 @@ the same opening rule as the summary: after blank lines, the first
 remaining line starts with the label. A label later in the comment does
 not. A reply is different: a label anywhere in the reply is flagged.
 
-Someone else's pull request means pr_author and reviewer are both set and
-they differ. When they are the same login, an unlabeled new inline comment
-is left alone (your own pull request; this lint does not require or forbid
-a label on an inline comment there). When either login is missing, an
-unlabeled new inline comment is flagged because the check cannot tell whose
-pull request it is. The summary-opening check and the labeled-reply check
-do not depend on whose pull request it is.
+Every new inline comment needs a label, on your own pull request and on
+someone else's. A comment whose "severity" maps to a label is not flagged:
+post-review.py puts that label at the start. --pr-author and --reviewer are
+still accepted, and are not used for this rule. The summary-opening check
+and the labeled-reply check do not depend on whose pull request it is.
 
 When pr-context.json sits beside the payload and it has an automated risk
 rating, the summary prose must state that rating. No rating is a pass. The
@@ -54,16 +55,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import comment_draft  # noqa: E402
-
-
-def others_pr(pr_author: str | None, reviewer: str | None) -> bool | None:
-    """True when the pull request is someone else's, False when it is yours.
-
-    None when either login is missing.
-    """
-    if not pr_author or not reviewer:
-        return None
-    return pr_author != reviewer
+import finding_anchor  # noqa: E402
 
 
 def problems(
@@ -72,11 +64,9 @@ def problems(
     pr_author: str | None = None,
     reviewer: str | None = None,
 ) -> list[str]:
-    author = pr_author if pr_author is not None else payload.get("pr_author")
-    who = reviewer if reviewer is not None else payload.get("reviewer")
-    author = str(author) if author else None
-    who = str(who) if who else None
-    whose = others_pr(author, who)
+    # pr_author and reviewer stay in the signature for callers. Every new
+    # inline comment needs a label, so whose pull request it is does not matter.
+    del pr_author, reviewer
     comments = payload.get("comments") or []
     if not isinstance(comments, list):
         return ["comments must be a list"]
@@ -106,18 +96,24 @@ def problems(
             if comment_draft.has_label(body):
                 found.append(f"comment {index}: labeled reply")
             continue
-        if comment_draft.opens_with_label(body):
+        span = comment_draft.opening_label_span(body)
+        if span is not None:
+            opener = body[span[0]:span[1]].strip()
+            # post-review refuses a new comment that opens with **Question:**, and
+            # the lint agrees. The post labels are the three the verdict is
+            # computed from, and Question maps to none of them.
+            if opener not in comment_draft.POST_LABELS:
+                found.append(
+                    f"comment {index}: opens with {opener}, which is not drafted; "
+                    "use **Requested:**, **Advisory:**, or **Informational:**"
+                )
             continue
-        if whose is False:
+        if finding_anchor.label_for(comment.get("severity")):
             continue
-        if whose is True:
-            found.append(f"comment {index}: unlabeled new inline comment")
-        else:
-            found.append(
-                f"comment {index}: unlabeled new inline comment; "
-                "cannot tell whether this PR is someone else's "
-                "(set pr_author and reviewer)"
-            )
+        found.append(
+            f"comment {index}: unlabeled new inline comment; start it with "
+            "**Requested:**, **Advisory:**, or **Informational:**, or set a severity"
+        )
     return found
 
 

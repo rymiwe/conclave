@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Label lint: a summary that opens with a label fails, a labeled reply fails,
-and an unlabeled new inline comment on someone else's PR fails."""
+and an unlabeled new inline comment fails on every pull request."""
 from __future__ import annotations
 
 import json
@@ -73,9 +73,19 @@ def main() -> None:
         {"finding": "f1", "path": "a.rb", "line": 1, "body": "**Requested:** size counts deleted items."}
     ]}
     check(labels.problems(labeled_inline) == [], "labeled new inline comment is ok")
-    for token in ("**Advisory:**", "**Informational:**", "**Question:**"):
+    for token in ("**Advisory:**", "**Informational:**"):
         payload = {**other, "comments": [{"body": f"{token} noted."}]}
         check(labels.problems(payload) == [], f"{token} counts as a label on a new inline comment")
+    # **Question:** used to count here. post-review.py refuses it, and the verdict
+    # is computed from the three post labels, so the lint now refuses it too.
+    for extra in ({}, {"severity": "nit"}):
+        payload = {**other, "comments": [{"body": "**Question:** noted.", **extra}]}
+        found = labels.problems(payload)
+        check(len(found) == 1 and "opens with **Question:**" in found[0] and "not drafted" in found[0],
+              f"**Question:** on a new inline comment is flagged {extra} ({found})")
+    cli_q = run_cli({**other, "comments": [{"body": "**Question:** noted."}]})
+    check(cli_q.returncode != 0 and "opens with **Question:**" in cli_q.stdout,
+          f"cli flags a new inline comment that opens with **Question:** ({cli_q.stdout!r})")
 
     plain_reply = {**other, "comments": [{"in_reply_to": 9, "body": "The next build picks this up."}]}
     check(labels.problems(plain_reply) == [], "unlabeled reply is ok")
@@ -86,12 +96,36 @@ def main() -> None:
     }]}
     check(labels.problems(fenced) == [], "a label inside a fence is not a labeled reply")
 
+    # An unlabeled new inline comment is always a problem. Whose pull request
+    # it is no longer changes the check.
     own = {"pr_author": "me", "reviewer": "me", "comments": [{"body": "no label"}]}
-    check(labels.problems(own) == [], "your own PR is not flagged for a missing label")
+    found = labels.problems(own)
+    check(any("unlabeled new inline comment" in item for item in found),
+          f"your own PR is flagged for a missing label ({found})")
+    own_labeled = {"pr_author": "me", "reviewer": "me", "comments": [
+        {"body": "**Requested:** size counts deleted items."}
+    ]}
+    check(labels.problems(own_labeled) == [], "a labeled comment on your own PR is ok")
+    for who, payload in (
+        ("your own PR", {"pr_author": "me", "reviewer": "me", "comments": [
+            {"body": "size counts deleted items.", "severity": "nit"}
+        ]}),
+        ("someone else's PR", {**other, "comments": [
+            {"body": "size counts deleted items.", "severity": "should-fix"}
+        ]}),
+    ):
+        check(labels.problems(payload) == [], f"{who} with a mapped severity is not flagged")
+    unknown_severity = {**other, "comments": [{"body": "size counts deleted items.", "severity": "medium"}]}
+    found = labels.problems(unknown_severity)
+    check(any("unlabeled new inline comment" in item for item in found),
+          f"an unknown severity does not stand in for a label ({found})")
 
     unknown = {"comments": [{"body": "no label"}]}
     found = labels.problems(unknown)
-    check(any("cannot tell" in item for item in found), f"unknown author is not treated as your PR ({found})")
+    # The old message said the author could not be told apart. Every PR is
+    # flagged the same way now, so the check is the unlabeled-comment message.
+    check(any("unlabeled new inline comment" in item for item in found),
+          f"an unknown author is flagged for a missing label ({found})")
 
     cli_ok = run_cli(labeled_inline)
     check(cli_ok.returncode == 0 and cli_ok.stdout.endswith("ok\n"), f"cli accepts a labeled comment ({cli_ok.stdout!r})")
@@ -111,14 +145,18 @@ def main() -> None:
           "a label on a later line does not open an inline comment")
     padded = {**other, "comments": [{"body": "\n\n  **Advisory:** noted."}]}
     check(labels.problems(padded) == [], "blank lines and indentation still open an inline comment")
+    # A label that does not open the comment is not a label, on your own PR too.
     own_buried = {"pr_author": "me", "reviewer": "me", "comments": [
         {"body": "size counts deleted items. as **Requested:** above"}
     ]}
-    check(labels.problems(own_buried) == [], "your own PR is not flagged when the label is not at the start")
+    found = labels.problems(own_buried)
+    check(any("unlabeled new inline comment" in item for item in found),
+          f"your own PR is flagged when the label is not at the start ({found})")
     unknown_buried = {"comments": [{"body": "see **Requested:** later"}]}
     found = labels.problems(unknown_buried)
-    check(any("cannot tell" in item for item in found),
-          f"a buried label does not identify the pull request ({found})")
+    # Same rule as the unknown-author case above: the buried label is unlabeled.
+    check(any("unlabeled new inline comment" in item for item in found),
+          f"a buried label is an unlabeled inline comment ({found})")
     buried_reply = {**other, "comments": [{"in_reply_to": 9, "body": "see **Requested:** later"}]}
     check(any("labeled reply" in item for item in labels.problems(buried_reply)),
           "a reply is labeled wherever the label sits")
