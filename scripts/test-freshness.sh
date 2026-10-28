@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Freshness check against temp local repos: up to date, behind clean,
-# behind dirty, diverged, fetch failure, skip, and the default without
+# behind dirty, untracked tmp/ run dirs, diverged, fetch failure, skip, and the default without
 # CONCLAVE_AUTO_UPDATE (reports, never pulls or stops).
 set -u
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
@@ -64,6 +64,33 @@ check "fetch fails + REQUIRE_FRESH: rc 1" "$rc" 1
 
 out="$(COUNCIL_SKIP_UPDATE_CHECK=1 council_freshness_check "$T/e" 2>&1)"; rc=$?
 check "skip: rc 0, silent" "$rc:$out" "0:"
+
+fresh g; advance g; mkdir -p "$T/g/tmp/chairs/x"; echo s >"$T/g/tmp/chairs/x/file"
+out="$(council_freshness_check "$T/g" 2>&1)"; rc=$?
+check "behind, only untracked tmp/ run dir: rc 0" "$rc" 0
+check "untracked tmp/: fast-forwarded" "$(git -C "$T/g" rev-parse HEAD)" "$(git -C "$T/g-o.git" rev-parse main)"
+check "untracked tmp/: run dir kept" "$(cat "$T/g/tmp/chairs/x/file")" s
+
+fresh h; advance h; echo s >"$T/h/stray"; mkdir -p "$T/h/tmp/chairs"; echo s >"$T/h/tmp/chairs/ok"
+before="$(git -C "$T/h" rev-parse HEAD)"
+out="$(council_freshness_check "$T/h" 2>&1)"; rc=$?
+check "untracked outside tmp/: rc 1, HEAD unmoved" "$rc:$(git -C "$T/h" rev-parse HEAD)" "1:$before"
+case "$out" in *"behind origin/main by 1 but the working tree is dirty; not pulling."*) echo "ok untracked outside tmp/ dirty message";; *) echo "FAIL untracked outside tmp/ output: $out"; fail=1;; esac
+
+fresh i; mkdir -p "$T/i/tmp/keep"; echo r >"$T/i/tmp/keep/README"
+git -C "$T/i" add tmp && git -C "$T/i" commit -qm readme && git -C "$T/i" push -q origin main 2>/dev/null
+advance i; echo edit >>"$T/i/tmp/keep/README"; before="$(git -C "$T/i" rev-parse HEAD)"
+out="$(council_freshness_check "$T/i" 2>&1)"; rc=$?
+check "tracked edit under tmp/: rc 1, HEAD unmoved" "$rc:$(git -C "$T/i" rev-parse HEAD)" "1:$before"
+case "$out" in *dirty*) echo "ok tracked edit under tmp/ dirty message";; *) echo "FAIL tracked tmp/ output: $out"; fail=1;; esac
+
+fresh j; git clone -q "$T/j-o.git" "$T/j-w" 2>/dev/null; mkdir -p "$T/j-w/tmp/x"; echo theirs >"$T/j-w/tmp/x/new"
+git -C "$T/j-w" add tmp && git -C "$T/j-w" commit -qm incoming && git -C "$T/j-w" push -q origin main 2>/dev/null
+mkdir -p "$T/j/tmp/x"; echo mine >"$T/j/tmp/x/new"; before="$(git -C "$T/j" rev-parse HEAD)"
+out="$(council_freshness_check "$T/j" 2>&1)"; rc=$?
+check "untracked tmp/ file the pull would overwrite: rc 1, HEAD unmoved" "$rc:$(git -C "$T/j" rev-parse HEAD)" "1:$before"
+check "colliding tmp/ file untouched" "$(cat "$T/j/tmp/x/new")" mine
+case "$out" in *"working tree is dirty"*) echo "ok collision dirty message";; *) echo "FAIL collision output: $out"; fail=1;; esac
 
 # Wiring: council.sh --dry-run must stop on a failed check before touching anything.
 fresh f; git -C "$T/f" remote set-url origin "$T/nonexistent.git"
