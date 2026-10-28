@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Merge gate: one read-only reviewer on a PR diff, and the only merge path.
 #
-#   scripts/merge-gate.sh review <repo_dir> <base_ref> <head_ref> <pr_url> <out_dir> <builder_vendor>
-#   scripts/merge-gate.sh merge  <pr_url> <out_dir>
+#   scripts/merge-gate.sh review <repo_dir> <base_ref> <head_ref> <pr_url> <out_dir> <builder_vendor> [builder_bot]
+#   scripts/merge-gate.sh merge  [--builder-bot NAME] <pr_url> <out_dir>
 #
 # review asks `seat-usage --route review --cached --json --builder-vendor V`
 # for the reviewer and its launch argv (saved as gate-route.json). Before
@@ -30,16 +30,21 @@
 # reviewer's raw output), gate.err, gate.md (the reviewer's answer),
 # gate-head.txt (the reviewed head sha), and gate-verdict.json (the parsed
 # verdict line, approve / request-changes / comment, and the parsed one_way
-# line) under <out_dir>.
+# line) under <out_dir>. Given a builder_bot (the bot that built the PR), it
+# also writes builder-bot.txt.
 #
 # merge refuses, nonzero, unless gate-verdict.json records verdict approve and
 # gate.md still parses to that verdict (a missing, null, or unknown verdict
-# refuses). It also refuses when gate.md says one_way: yes, when its one_way
-# line is missing or unparseable, when the PR has the one-way label, when
-# the labels cannot be read, or when gate-route.json is missing, unreadable,
-# or records no builder vendor, no reviewer vendor, or the same vendor for
-# both. Otherwise it runs gh pr merge --squash, pinned to the reviewed head
-# sha. See scripts/merge_gate.py.
+# refuses). It also refuses when its one_way line is missing or unparseable,
+# when the PR has the one-way label, when the labels cannot be read, or when
+# gate-route.json is missing, unreadable, or records no builder vendor, no
+# reviewer vendor, or the same vendor for both. one_way: yes refuses unless
+# <out_dir>/acks/one-way-ack.json records Ryan's yes for this PR, this head
+# and exactly these one-way steps, written by a bot other than the builder
+# bot (builder-bot.txt, or --builder-bot for an older gate dir); a valid ack
+# also clears the one-way label. Otherwise it runs gh pr merge --squash,
+# pinned to the reviewed head sha, and after a one-way merge moves the ack to
+# acks/used/. See scripts/merge_gate.py.
 #
 # MERGE_GATE_GH (default /usr/local/bin/gh) and MERGE_GATE_SEAT_USAGE (default
 # seat-usage) override those binaries. MERGE_GATE_AGY, MERGE_GATE_CURSOR_AGENT,
@@ -59,12 +64,12 @@ newest() { # $1 = regex with one capture group for the version; reads IDs on std
 }
 
 review() {
-  [ "$#" -eq 6 ] || usage
-  local repo=$1 base=$2 head=$3 pr=$4 out=$5 vendor=$6 picked model why name bin
+  [ "$#" -eq 6 ] || [ "$#" -eq 7 ] || usage
+  local repo=$1 base=$2 head=$3 pr=$4 out=$5 vendor=$6 bot=${7:-} picked model why name bin
   local commits derived status listed source=caller
   mkdir -p "$out" || exit 1
   # A refusal must not leave an earlier verdict for merge to read.
-  rm -f "$out/gate.md" "$out/gate-verdict.json" "$out/gate-head.txt" "$out/gate-route.json"
+  rm -f "$out/gate.md" "$out/gate-verdict.json" "$out/gate-head.txt" "$out/gate-route.json" "$out/builder-bot.txt"
   vendor=$(python3 "$ROOT/scripts/trailer_vendor.py" normalize "$vendor") \
     || refuse "could not normalize builder vendor $6"
   commits=$("$GH" pr view "$pr" --json commits 2> "$out/gate-commits.err") \
@@ -164,6 +169,8 @@ review() {
   } > "$P/PROMPT.md"
   cp "$P/PROMPT.md" "$out/gate-prompt.md"
   printf '%s\n' "$headsha" > "$out/gate-head.txt"
+  bot=$(printf '%s' "$bot" | tr -d '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  [ -z "$bot" ] || printf '%s\n' "$bot" > "$out/builder-bot.txt"
   rm -f "$out/gate.md" "$out/gate-verdict.json"
   local raw="$out/gate.stream.jsonl" err="$out/gate.err" ec
   local -a noenv=(env -u TYPESAFE_API_KEY -u JEV_API_KEY)
@@ -224,7 +231,9 @@ A
 
 case "${1:-}" in
   review) shift; review "$@"; exit $? ;;
-  merge) shift; [ "$#" -eq 2 ] || usage
-    MERGE_GATE_GH="$GH" exec python3 "$ROOT/scripts/merge_gate.py" merge "$1" "$2" ;;
+  merge) shift
+    if [ "${1:-}" = --builder-bot ] && [ "$#" -eq 4 ] && [ -n "$2" ]; then :
+    else [ "$#" -eq 2 ] || usage; fi
+    MERGE_GATE_GH="$GH" exec python3 "$ROOT/scripts/merge_gate.py" merge "$@" ;;
   *) usage ;;
 esac

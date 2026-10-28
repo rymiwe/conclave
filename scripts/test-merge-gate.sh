@@ -2,7 +2,7 @@
 # merge-gate.sh review + merge against a temp repo with stubbed gh, seat-usage
 # and every reviewer binary (no network, no quota): the gate runs the reviewer
 # seat-usage names, read-only; a normal diff passes and gh pr merge runs; one_way:
-# yes, a one-way label, a missing or garbled verdict, and unreadable labels
+# yes without a valid one-way ack, a one-way label, a missing or garbled verdict, and unreadable labels
 # are refused; prose that only mentions one_way is not a verdict.
 set -u
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
@@ -24,6 +24,7 @@ case "$1 $2 $*" in
     if [ -n "${FAKE_COMMITS+x}" ]; then printf '%s\n' "$FAKE_COMMITS"; else printf '%s\n' '{"commits":[]}'; fi ;;
   "pr view "*"--json labels"*) [ -n "${FAKE_GH_LABELS_FAIL:-}" ] && { echo "HTTP 401" >&2; exit 1; }
     printf '{"labels":[%s]}\n' "${FAKE_LABELS:-}";;
+  "pr view "*"--json headRefOid"*) printf '%s\n' "${FAKE_PR_HEAD:-}";;
   "pr view "*) echo "Title: t"; echo; echo "body";;
   "pr merge "*) # FAKE_PR_HEAD is the PR's current head; a different --match-head-commit fails as GitHub does.
     m=""; prev=""; for a in "$@"; do [ "$prev" = --match-head-commit ] && m=$a; prev=$a; done
@@ -292,14 +293,14 @@ run yes $'approve\n\nFindings:\nNone.\n\n**one_way: yes**\none_way_at: db/migrat
 [ "$merge_rc" = 3 ] && ok "yes: merge rc 3" || bad "yes: merge rc $merge_rc"
 has "yes: reason" "$merge_out" "reason: gate verdict is one_way: yes"
 has "yes: file:line" "$merge_out" "one-way step: db/migrate/002_drop.sql:3 drops column users.email"
-has "yes: needs Ryan's yes" "$merge_out" "needs Ryan's explicit yes in a separate PR"
+has "yes: needs Ryan's yes" "$merge_out" "needs Ryan's explicit yes recorded in $T/yes/out/acks/one-way-ack.json"
 hasnt "yes: no gh pr merge" "$gh_log" "pr merge"
 
 # 3. one-way label with a clean verdict -> refused.
 FAKE_LABELS='{"name":"docs"},{"name":"one-way"}' run label $'approve\n\none_way: no'
 [ "$merge_rc" = 3 ] && ok "label: merge rc 3" || bad "label: merge rc $merge_rc"
 has "label: reason" "$merge_out" 'reason: the PR has the `one-way` label'
-has "label: needs Ryan's yes" "$merge_out" "needs Ryan's explicit yes in a separate PR"
+has "label: needs Ryan's yes" "$merge_out" "needs Ryan's explicit yes recorded in $T/label/out/acks/one-way-ack.json"
 hasnt "label: no gh pr merge" "$gh_log" "pr merge"
 
 # 4. missing verdict line -> refused (fail closed).
@@ -348,6 +349,126 @@ hasnt "head moved: nothing reports merged" "$merge_out" "merged"
 FAKE_PR_HEAD=$HEAD_SHA run headsame $'approve\n\nFindings:\nNone.\n\none_way: no'
 [ "$merge_rc" = 0 ] && ok "head unchanged: merge rc 0" || bad "head unchanged: merge rc $merge_rc"
 has "head unchanged: merged" "$merge_out" "merged"
+
+# One-way acknowledgement. A one_way: yes verdict merges only with a valid
+# <out>/acks/one-way-ack.json written by a bot other than the builder.
+YES=$'approve\n\nFindings:\nNone.\n\none_way: yes\none_way_at: db/migrate/002_drop.sql:3 drops column users.email\none_way_at: app/mail.py:9 emails every user'
+ackgate() { # $1 case, $2 reply, $3 builder bot (empty for none): review only
+  local d="$T/$1"; mkdir -p "$d"; printf '%s\n' "$2" > "$FAKE_REPLY"; : > "$FAKE_GH_LOG"
+  "$ROOT/scripts/merge-gate.sh" review "$R" main feat "$PR" "$d/out" xai ${3:+"$3"} > "$d/review.out" 2>&1
+}
+ack() { # $1 case, $2 jq filter applied to a well-formed ack copied from gate-verdict.json
+  local o="$T/$1/out"; mkdir -p "$o/acks"
+  jq --arg pr "$PR" --arg h "$HEAD_SHA" '{pr_url: $pr, head_sha: $h, one_way_items: .items,
+      ryan_words: "Yes, merge #1", source: {chat: "Practice Paul", message_or_card_id: "m-42"},
+      writer: "Practice Paul", written_at: "2026-10-27T18:44:00-07:00"}' "$o/gate-verdict.json" \
+    | jq "${2:-.}" > "$o/acks/one-way-ack.json"
+}
+amerge() { # $1 case, then extra merge args; leaves merge_rc, merge_out, gh_log
+  : > "$FAKE_GH_LOG"
+  "$ROOT/scripts/merge-gate.sh" merge "${@:2}" "$PR" "$T/$1/out" > "$T/$1/merge.out" 2>&1; merge_rc=$?
+  merge_out="$(cat "$T/$1/merge.out")"; gh_log="$(cat "$FAKE_GH_LOG")"
+  echo "--- $1: merge rc=$merge_rc"; sed 's/^/    /' "$T/$1/merge.out"
+}
+ackrefused() { # $1 case label, $2 expected reason
+  [ "$merge_rc" = 3 ] && ok "$1: merge rc 3" || bad "$1: merge rc $merge_rc"
+  has "$1: reason" "$merge_out" "$2"
+  hasnt "$1: no gh pr merge" "$gh_log" "pr merge"
+}
+export FAKE_PR_HEAD=$HEAD_SHA
+
+ackgate ack-ok "$YES" Ada; ack ack-ok
+has "ack-ok: review records the builder bot" "$(cat "$T/ack-ok/out/builder-bot.txt" 2>&1)" "Ada"
+amerge ack-ok
+[ "$merge_rc" = 0 ] && ok "ack-ok: merge rc 0" || bad "ack-ok: merge rc $merge_rc"
+has "ack-ok: gh pr merge pinned to the reviewed sha" "$gh_log" "gh pr merge $PR --squash --match-head-commit $HEAD_SHA"
+has "ack-ok: live head read" "$gh_log" "gh pr view $PR --json headRefOid"
+[ ! -e "$T/ack-ok/out/acks/one-way-ack.json" ] && ok "ack-ok: ack moved out of acks/" || bad "ack-ok: ack still in acks/"
+used=$(ls "$T/ack-ok/out/acks/used/" 2>/dev/null)
+case "$used" in [0-9]*T[0-9]*Z-one-way-ack.json) ok "ack-ok: ack moved to acks/used/$used";; *) bad "ack-ok: acks/used holds '$used'";; esac
+note="$(cat "$T/ack-ok/out/merge-note.md" 2>&1)"
+has "ack-ok: note quotes Ryan's words" "$note" "Yes, merge #1"
+has "ack-ok: note names the source" "$note" "Practice Paul message m-42"
+has "ack-ok: note names the writer" "$note" "written by Practice Paul"
+has "ack-ok: note lists a one-way step" "$note" "app/mail.py:9 emails every user"
+has "ack-ok: stdout carries the note" "$merge_out" "Yes, merge #1"
+ack_merges=$(grep '^gh pr merge' "$FAKE_GH_LOG")
+[ "$(grep -c '^gh pr merge' "$FAKE_GH_LOG")" = 1 ] && ok "ack-ok: exactly one gh pr merge call" || bad "ack-ok: gh pr merge calls: $ack_merges"
+run onemerge-no $'approve\n\nFindings:\nNone.\n\none_way: no'
+no_merges=$(grep '^gh pr merge' "$FAKE_GH_LOG")
+[ "$(grep -c '^gh pr merge' "$FAKE_GH_LOG")" = 1 ] && ok "one_way: no: exactly one gh pr merge call" || bad "one_way: no: gh pr merge calls: $no_merges"
+[ -n "$ack_merges" ] && [ "$ack_merges" = "$no_merges" ] && ok "the ack path and the one_way: no path make the same gh pr merge call" \
+  || bad "merge calls differ: ack '$ack_merges' vs no '$no_merges'"
+
+amerge ack-ok
+ackrefused "ack-used" "acks/used/ holds 1 used ack, and a used ack cannot authorize a merge again"
+cp "$T/ack-ok/out/acks/used/$used" "$T/ack-ok/out/acks/used/copy-one-way-ack.json"
+amerge ack-ok
+ackrefused "ack-used-copy" "no one-way ack at $T/ack-ok/out/acks/one-way-ack.json"
+
+ackgate ack-missing "$YES" Ada; amerge ack-missing
+ackrefused "ack-missing" "no one-way ack at $T/ack-missing/out/acks/one-way-ack.json"
+has "ack-missing: one_way reason kept" "$merge_out" "reason: gate verdict is one_way: yes"
+has "ack-missing: names the ack" "$merge_out" "acks/one-way-ack.json"
+
+ackgate ack-notjson "$YES" Ada; mkdir -p "$T/ack-notjson/out/acks"; echo '{oops' > "$T/ack-notjson/out/acks/one-way-ack.json"
+amerge ack-notjson; ackrefused "ack-notjson" "one-way ack is malformed: not JSON"
+ackgate ack-shortsha "$YES" Ada; ack ack-shortsha '.head_sha = "149b5b2"'
+amerge ack-shortsha; ackrefused "ack-shortsha" "one-way ack is malformed: head_sha is not a 40-hex sha"
+ackgate ack-nowords "$YES" Ada; ack ack-nowords 'del(.ryan_words)'
+amerge ack-nowords; ackrefused "ack-nowords" "one-way ack is malformed: ryan_words is missing or not a non-empty string"
+ackgate ack-nooffset "$YES" Ada; ack ack-nooffset '.written_at = "2026-10-27T18:44:00"'
+amerge ack-nooffset; ackrefused "ack-nooffset" "one-way ack is malformed: written_at is not an ISO timestamp with a UTC offset"
+ackgate ack-badsource "$YES" Ada; ack ack-badsource '.source = {chat: "Practice Paul"}'
+amerge ack-badsource; ackrefused "ack-badsource" "one-way ack is malformed: source.message_or_card_id is missing or not a non-empty string"
+ackgate ack-baditem "$YES" Ada; ack ack-baditem '.one_way_items = [{at: "a.sql:1"}]'
+amerge ack-baditem; ackrefused "ack-baditem" "one-way ack is malformed: one_way_items[0] is not {at, what} strings"
+
+ackgate ack-wrongpr "$YES" Ada; ack ack-wrongpr '.pr_url = "https://github.com/o/r/pull/2"'
+amerge ack-wrongpr; ackrefused "ack-wrongpr" "one-way ack is for https://github.com/o/r/pull/2, not $PR"
+
+MOVED=0123456789abcdef0123456789abcdef01234567
+ackgate ack-gatehead "$YES" Ada; ack ack-gatehead ".head_sha = \"$MOVED\""
+amerge ack-gatehead; ackrefused "ack-gatehead" "one-way ack head_sha $MOVED is not the reviewed head $HEAD_SHA (gate-head.txt)"
+
+ackgate ack-livehead "$YES" Ada; ack ack-livehead
+FAKE_PR_HEAD=$MOVED amerge ack-livehead
+ackrefused "ack-livehead" "the PR head is now $MOVED, not the reviewed head $HEAD_SHA"
+[ -e "$T/ack-livehead/out/acks/one-way-ack.json" ] && ok "ack-livehead: ack stays unused" || bad "ack-livehead: ack moved"
+
+ackgate ack-missingitem "$YES" Ada; ack ack-missingitem '.one_way_items |= .[:1]'
+amerge ack-missingitem; ackrefused "ack-missingitem" "one-way step missing from the ack: app/mail.py:9 emails every user"
+ackgate ack-extraitem "$YES" Ada; ack ack-extraitem '.one_way_items += [{at: "x.py:1", what: "posts to chat"}]'
+amerge ack-extraitem; ackrefused "ack-extraitem" "one-way ack lists a step the gate did not: x.py:1 posts to chat"
+ackgate ack-editeditems "$YES" Ada; ack ack-editeditems '.one_way_items |= .[:1]'
+v="$T/ack-editeditems/out/gate-verdict.json"; jq -c '.items |= .[:1]' "$v" > "$v.tmp" && mv "$v.tmp" "$v"
+amerge ack-editeditems; ackrefused "ack-editeditems" "gate-verdict.json one_way items differ from gate.md"
+
+ackgate ack-rc "${YES/approve/request-changes}" Ada; ack ack-rc
+amerge ack-rc; ackrefused "ack-rc" "reason: gate verdict is request-changes, not approve"
+
+ackgate ack-builder "$YES" Ada; ack ack-builder '.writer = "  ada "'
+amerge ack-builder; ackrefused "ack-builder" "one-way ack writer '  ada ' is the builder bot Ada"
+
+ackgate ack-nobuilder "$YES" ""; ack ack-nobuilder
+[ ! -e "$T/ack-nobuilder/out/builder-bot.txt" ] && ok "ack-nobuilder: no builder-bot.txt" || bad "ack-nobuilder: builder-bot.txt written"
+amerge ack-nobuilder; ackrefused "ack-nobuilder" "the builder bot is unknown"
+amerge ack-nobuilder --builder-bot Ada
+[ "$merge_rc" = 0 ] && ok "ack-nobuilder: --builder-bot Ada merges an older gate dir" || bad "ack-nobuilder: --builder-bot rc $merge_rc"
+ackgate ack-flagconflict "$YES" Ada; ack ack-flagconflict
+amerge ack-flagconflict --builder-bot Jules
+ackrefused "ack-flagconflict" "--builder-bot Jules does not match builder-bot.txt (Ada)"
+ackgate ack-flagwriter "$YES" ""; ack ack-flagwriter
+amerge ack-flagwriter --builder-bot "practice paul"
+ackrefused "ack-flagwriter" "one-way ack writer 'Practice Paul' is the builder bot practice paul"
+
+ackgate ack-label "$YES" Ada; ack ack-label
+FAKE_LABELS='{"name":"one-way"}' amerge ack-label
+[ "$merge_rc" = 0 ] && ok "ack-label: a valid ack merges a one-way-labelled PR" || bad "ack-label: rc $merge_rc"
+ackgate ack-label-bad "$YES" Ada; ack ack-label-bad '.writer = "Ada"'
+FAKE_LABELS='{"name":"one-way"}' amerge ack-label-bad
+ackrefused "ack-label-bad" 'reason: the PR has the `one-way` label'
+unset FAKE_PR_HEAD
 
 # Verdict parsing: the value must end at end of line or a non-lowercase character.
 parse_of() { printf '%s\n' "$1" > "$T/parse.md"; python3 "$ROOT/scripts/merge_gate.py" parse "$T/parse.md"; }

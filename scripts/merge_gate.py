@@ -3,7 +3,7 @@
 
     merge_gate.py extract <gate.stream.jsonl> <gate.md>
     merge_gate.py parse <gate.md>
-    merge_gate.py merge <pr_url> <out_dir>
+    merge_gate.py merge [--builder-bot NAME] <pr_url> <out_dir>
     merge_gate.py pick <gate-route.json>
     merge_gate.py cursor-result|claude-result|plain-result|muse-result <reviewer output> <gate.md>
 
@@ -23,12 +23,26 @@ and a verdict_error. review writes the parse to gate-verdict.json.
 
 merge fails closed. It refuses (exit 3, nothing merged) unless gate-verdict.json
 records verdict approve and gate.md still parses to that same verdict. It also
-refuses when the one_way verdict is yes, missing, conflicting, or malformed, when gate-head.txt is missing, when
+refuses when the one_way verdict is missing, conflicting, or malformed, when gate-head.txt is missing, when
 the PR has the `one-way` label, when gh cannot read the labels, or when
 gate-route.json is missing, unreadable, or records no builder vendor, no
 reviewer vendor, or the same vendor for both. Every reason is printed.
 Otherwise it runs `gh pr merge <pr> --squash --match-head-commit <reviewed
 sha>` and returns gh's exit code. MERGE_GATE_GH overrides the gh binary.
+
+A one_way: yes verdict merges only with Ryan's yes recorded in
+<out_dir>/acks/one-way-ack.json, and then the `one-way` label does not
+refuse. The ack is JSON with pr_url, head_sha (40 hex), one_way_items (the
+{at, what} list copied from gate-verdict.json), ryan_words (verbatim), source
+({chat, message_or_card_id}), writer (the bot that wrote it), and written_at
+(ISO 8601 with a UTC offset). merge refuses unless the ack is well formed, its
+pr_url is this PR, its head_sha is gate-head.txt and the PR's live head, its
+items are exactly gate-verdict.json's (which must match gate.md's), and its
+writer is not the builder bot. The builder bot comes from builder-bot.txt,
+which review writes, or from --builder-bot for an older gate dir; both given
+and different, or neither, refuses. After gh merges, the ack moves to
+acks/used/<UTC time>-one-way-ack.json, so it cannot authorize again, and the
+merge note that quotes it is printed and written to merge-note.md.
 
 pick reads the `seat-usage --route review --json` output and prints one JSON
 line, {"model": ..., "runner": [argv...]}. The argv is the top-level `runner`
@@ -49,6 +63,8 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 from trailer_vendor import normalize_vendor
@@ -204,33 +220,184 @@ def pr_labels(gh: str, pr: str) -> tuple[list[str] | None, str]:
         return None, f"gh pr view returned no labels list: {e}"
 
 
-def merge(pr: str, out_dir: str) -> int:
+ACK = Path("acks") / "one-way-ack.json"
+USED = Path("acks") / "used"
+SHA = re.compile(r"[0-9a-f]{40}")
+
+
+def _text(v: object) -> bool:
+    return isinstance(v, str) and bool(v.strip())
+
+
+def _same_bot(a: str, b: str) -> bool:
+    return a.strip().casefold() == b.strip().casefold()
+
+
+def _step(it: dict) -> str:
+    return f"{it['at']} {it['what']}".rstrip()
+
+
+def builder_bot(out: Path, flag: str | None) -> tuple[str | None, str]:
+    """(name, "") from builder-bot.txt or --builder-bot, else (None, why)."""
+    f = out / "builder-bot.txt"
+    recorded = f.read_text(encoding="utf-8", errors="replace").strip() if f.is_file() else ""
+    given = (flag or "").strip()
+    if recorded and given and not _same_bot(recorded, given):
+        return None, f"--builder-bot {given} does not match builder-bot.txt ({recorded})"
+    if recorded or given:
+        return recorded or given, ""
+    return None, ("the builder bot is unknown: re-run review with the builder bot, "
+                  "or pass --builder-bot NAME for this older gate dir")
+
+
+def read_ack(path: Path) -> tuple[dict | None, list[str]]:
+    """(ack, []) when every field is present with the right type, else (None, reasons)."""
+    try:
+        a = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return None, ["one-way ack is malformed: not JSON"]
+    if not isinstance(a, dict):
+        return None, ["one-way ack is malformed: not a JSON object"]
+    bad: list[str] = []
+    for k in ("pr_url", "ryan_words", "writer"):
+        if not _text(a.get(k)):
+            bad.append(f"{k} is missing or not a non-empty string")
+    if not (isinstance(a.get("head_sha"), str) and SHA.fullmatch(a["head_sha"])):
+        bad.append("head_sha is not a 40-hex sha")
+    src = a.get("source")
+    for k in ("chat", "message_or_card_id"):
+        if not (isinstance(src, dict) and _text(src.get(k))):
+            bad.append(f"source.{k} is missing or not a non-empty string")
+    items = a.get("one_way_items")
+    if not isinstance(items, list) or not items:
+        bad.append("one_way_items is missing or not a non-empty list")
+    else:
+        for i, it in enumerate(items):
+            if not (isinstance(it, dict) and set(it) == {"at", "what"}
+                    and all(isinstance(it[k], str) for k in it)):
+                bad.append(f"one_way_items[{i}] is not {{at, what}} strings")
+    try:
+        ok = datetime.fromisoformat(a["written_at"]).tzinfo is not None
+    except (KeyError, TypeError, ValueError):
+        ok = False
+    if not ok:
+        bad.append("written_at is not an ISO timestamp with a UTC offset")
+    if bad:
+        return None, [f"one-way ack is malformed: {b}" for b in bad]
+    return a, []
+
+
+def ack_reasons(gh: str, pr: str, out: Path, head: str, items: list[dict],
+                flag: str | None) -> tuple[dict | None, list[str]]:
+    """(ack, []) when acks/one-way-ack.json authorizes this one_way: yes merge."""
+    reasons: list[str] = []
+    builder, why = builder_bot(out, flag)
+    if builder is None:
+        reasons.append(why)
+    try:
+        rec = json.loads((out / "gate-verdict.json").read_text(encoding="utf-8", errors="replace"))
+        recorded = rec.get("items") if isinstance(rec, dict) else None
+    except (OSError, ValueError):
+        recorded = None
+    if recorded != items:
+        reasons.append("gate-verdict.json one_way items differ from gate.md")
+    path = out / ACK
+    if not path.is_file():
+        used = len(list((out / USED).glob("*-one-way-ack.json"))) if (out / USED).is_dir() else 0
+        reasons.append(f"no one-way ack at {path}" + (
+            f"; acks/used/ holds {used} used ack{'s' if used != 1 else ''}, "
+            "and a used ack cannot authorize a merge again" if used else ""))
+        return None, reasons
+    ack, bad = read_ack(path)
+    if ack is None:
+        return None, reasons + bad
+    if ack["pr_url"].strip() != pr.strip():
+        reasons.append(f"one-way ack is for {ack['pr_url']}, not {pr}")
+    if ack["head_sha"] != head:
+        reasons.append(f"one-way ack head_sha {ack['head_sha']} is not the reviewed head {head} (gate-head.txt)")
+    live, err = pr_head(gh, pr)
+    if live is None:
+        reasons.append(f"cannot read the PR's live head: {err}")
+    elif live != head:
+        reasons.append(f"the PR head is now {live}, not the reviewed head {head}")
+    want = Counter((it["at"], it["what"]) for it in items)
+    got = Counter((it["at"], it["what"]) for it in ack["one_way_items"])
+    reasons += [f"one-way step missing from the ack: {at} {what}".rstrip() for at, what in (want - got).elements()]
+    reasons += [f"one-way ack lists a step the gate did not: {at} {what}".rstrip() for at, what in (got - want).elements()]
+    if builder is not None and _same_bot(ack["writer"], builder):
+        reasons.append(f"one-way ack writer '{ack['writer']}' is the builder bot {builder}")
+    return (None if reasons else ack), reasons
+
+
+def pr_head(gh: str, pr: str) -> tuple[str | None, str]:
+    try:
+        p = subprocess.run([gh, "pr", "view", pr, "--json", "headRefOid", "--jq", ".headRefOid"],
+                           capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"gh pr view failed: {e}"
+    if p.returncode != 0:
+        return None, f"gh pr view exited {p.returncode}: {p.stderr.strip()[-300:]}"
+    sha = p.stdout.strip()
+    return (sha, "") if SHA.fullmatch(sha) else (None, f"gh pr view returned no head sha: {sha[:80]!r}")
+
+
+def merge_note(ack: dict, items: list[dict], used: Path) -> str:
+    src = ack["source"]
+    lines = [f"Ryan's yes: \"{ack['ryan_words']}\"",
+             f"Source: {src['chat']} message {src['message_or_card_id']}, "
+             f"written by {ack['writer']} at {ack['written_at']}.",
+             f"Ack: {used}",
+             "One-way steps acknowledged:"]
+    return "\n".join(lines + [f"- {_step(it)}" for it in items]) + "\n"
+
+
+def use_ack(out: Path) -> Path:
+    """Move acks/one-way-ack.json to acks/used/<UTC time>-one-way-ack.json."""
+    (out / USED).mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    dest = out / USED / f"{stamp}-one-way-ack.json"
+    n = 1
+    while dest.exists():
+        n += 1
+        dest = out / USED / f"{stamp}-{n}-one-way-ack.json"
+    (out / ACK).rename(dest)
+    return dest
+
+
+def merge(pr: str, out_dir: str, flag: str | None = None) -> int:
     gh = os.environ.get("MERGE_GATE_GH") or "/usr/local/bin/gh"
     out = Path(out_dir)
     reasons: list[str] = []
     items: list[dict] = []
+    one_way = None
     md = out / "gate.md"
     if not md.is_file():
         reasons.append(f"no gate answer at {md} (run merge-gate.sh review first)")
     else:
         v = parse(md.read_text(encoding="utf-8", errors="replace"))
         items = v["items"]
+        one_way = v["one_way"]
         reasons.extend(verdict_reasons(out / "gate-verdict.json", v))
         if v["error"]:
             reasons.append(f"gate verdict is missing or unparseable: {v['error']}")
-        elif v["one_way"] == "yes":
-            reasons.append("gate verdict is one_way: yes"
-                           + ("" if items else " (the reviewer listed no file:line)"))
     head = ""
     hf = out / "gate-head.txt"
     if hf.is_file():
         head = hf.read_text(encoding="utf-8").strip()
-    if not re.fullmatch(r"[0-9a-f]{40}", head):
+    if not SHA.fullmatch(head):
         reasons.append(f"no reviewed head sha in {hf}")
+    ack = None
+    if one_way == "yes":
+        ack, why = ack_reasons(gh, pr, out, head, items, flag)
+        if why:
+            reasons.append("gate verdict is one_way: yes"
+                           + ("" if items else " (the reviewer listed no file:line)")
+                           + f", and no valid one-way ack authorizes it ({ACK})")
+            reasons.extend(why)
     labels, err = pr_labels(gh, pr)
     if labels is None:
         reasons.append(f"cannot read the PR labels, so the one-way label is unknown: {err}")
-    elif any(l.lower() == LABEL for l in labels):
+    elif any(l.lower() == LABEL for l in labels) and ack is None:
         reasons.append(f"the PR has the `{LABEL}` label")
     reasons.extend(route_file_reasons(out / "gate-route.json"))
     if reasons:
@@ -238,14 +405,26 @@ def merge(pr: str, out_dir: str) -> int:
         for r in reasons:
             print(f"reason: {r}", file=sys.stderr)
         for it in items:
-            print(f"  one-way step: {it['at']} {it['what']}".rstrip(), file=sys.stderr)
+            print(f"  one-way step: {_step(it)}", file=sys.stderr)
         print("A step that a git revert cannot undo, or a PR whose one-way status is "
-              "unknown, needs Ryan's explicit yes in a separate PR. Nothing was merged.",
-              file=sys.stderr)
+              f"unknown, needs Ryan's explicit yes recorded in {out / ACK} by a bot other "
+              "than the builder (see README). Nothing was merged.", file=sys.stderr)
         return REFUSED
-    print(f"merge-gate: approve, one_way: no, no `{LABEL}` label; squash-merging {pr} at {head}", flush=True)
-    return subprocess.run([gh, "pr", "merge", pr, "--squash",
-                           "--match-head-commit", head]).returncode
+    why = f"one_way: no, no `{LABEL}` label" if ack is None else "one_way: yes with Ryan's ack"
+    print(f"merge-gate: approve, {why}; squash-merging {pr} at {head}", flush=True)
+    rc = subprocess.run([gh, "pr", "merge", pr, "--squash",
+                         "--match-head-commit", head]).returncode
+    if rc != 0 or ack is None:
+        return rc
+    try:
+        used = use_ack(out)
+    except OSError as e:
+        print(f"merge-gate: merged, but could not move the ack to {out / USED}: {e}", file=sys.stderr)
+        return 1
+    note = merge_note(ack, items, used)
+    (out / "merge-note.md").write_text(note, encoding="utf-8")
+    print(note, end="", flush=True)
+    return 0
 
 
 MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -452,8 +631,13 @@ def main(argv: list[str]) -> int:
                          {"verdict": None, "verdict_error": f"no file {argv[1]}",
                           "one_way": None, "items": [], "error": f"no file {argv[1]}"}))
         return 0
-    if len(argv) == 3 and argv[0] == "merge":
-        return merge(argv[1], argv[2])
+    if argv[:1] == ["merge"]:
+        rest = argv[1:]
+        flag = None
+        if rest[:1] == ["--builder-bot"] and len(rest) >= 2:
+            flag, rest = rest[1], rest[2:]
+        if len(rest) == 2:
+            return merge(rest[0], rest[1], flag)
     if len(argv) == 2 and argv[0] == "pick":
         picked, why = pick(argv[1])
         if picked is None:
