@@ -14,9 +14,10 @@ its first token is `one_way:` or `one_way_at:`; prose that mentions one_way is
 ignored, and a directive with a value other than yes/no is unparseable.
 
 The verdict is a line, outside code fences, that is exactly `approve`,
-`request-changes`, or `comment` (lowercase), optionally ending in a period or
-glued to an uppercase letter (`approveFindings:`), the same rule as the
-one_way value. A preamble before it is fine. Prose that only mentions approve
+`request-changes`, or `comment` (lowercase), alone on the line. It may end in
+one `.` or `:`, or carry a glued `Findings` / `Findings:` header
+(`approveFindings:`), and nothing else. A preamble before it is fine. A name
+that starts with the word (`approveRequest`, `commentOn`) is not a verdict. Prose that only mentions approve
 is not a verdict. No verdict line, or two different ones, records verdict null
 and a verdict_error. review writes the parse to gate-verdict.json.
 
@@ -62,10 +63,12 @@ VERDICT = re.compile(r"^(?i:one_way)\s*:(.*)$")
 # parses. Whitespace, a comma or a semicolon then more text, or a lowercase
 # letter is unparseable: nothing, nope, none, "no longer", "no, actually yes".
 VALUE = re.compile(r"\s*(yes|no)(?=\s*$|[.:)\]]|[A-Z])")
-# The reviewer's first-line answer. Same value rule as one_way, minus ":" so a
-# prose line such as "comment: ..." is not read as a verdict.
+# The reviewer's verdict: the word alone on its line, optionally followed by a
+# glued "Findings" / "Findings:" header (cursor-agent joins turns with no
+# separator) or one "." or ":", then end of line. Anything else after the word
+# ("approveRequest", "comment: a note", "approve, mostly") is not a verdict.
 VERDICTS = ("approve", "request-changes", "comment")
-VERDICT_WORD = re.compile(r"^(approve|request-changes|comment)(?=\.?\s*$|[A-Z])")
+VERDICT_WORD = re.compile(r"^(approve|request-changes|comment)(?:Findings:?|[.:])?\s*$")
 DIRECTIVE_AT = re.compile(r"^one_way_at\s*:", re.I)
 ITEM = re.compile(r"^one_way_at\s*:\s*(\S+:\d+)\s*(.*)$", re.I)
 

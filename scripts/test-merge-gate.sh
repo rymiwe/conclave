@@ -402,10 +402,25 @@ has "preamble then approve on its own line" "$(parse_of $'I will read the diff f
 has "bold **approve** parses" "$(parse_of $'**approve**\none_way: no')" '"verdict": "approve"'
 has "glued approveFindings: parses" "$(parse_of $'approveFindings:\nNone.\none_way: no')" '"verdict": "approve"'
 has "fenced approve does not count" "$(parse_of $'```\napprove\n```\none_way: no')" '"verdict": null'
-for l in 'I approve of this' 'approved' 'approve, mostly' 'Approve' 'request-changes please'; do
+for l in 'I approve of this' 'approved' 'approve, mostly' 'Approve' 'request-changes please' 'comment: this is a note' 'approve. Ship it.'; do
   has "'$l' is not a verdict" "$(parse_of "$l"$'\none_way: no')" '"verdict": null'
 done
 has "verdict error leaves one_way error alone" "$(parse_of $'approve\none_way: no')" '"error": null'
+# A name that starts with a verdict word is not a verdict (gate-2 on #46).
+v="$(parse_of $'request-changes:\n\n- `approveRequest` skips the head check.\n\none_way: no')"
+has "bullet approveRequest under request-changes: parses request-changes" "$v" '"verdict": "request-changes"'
+has "bullet approveRequest under request-changes: no verdict error" "$v" '"verdict_error": null'
+v="$(parse_of $'approve\n\nFindings:\n- `commentOn` ignores a null author\n\none_way: no')"
+has "approve plus bullet commentOn parses approve" "$v" '"verdict": "approve"'
+has "approve plus bullet commentOn: no verdict error" "$v" '"verdict_error": null'
+v="$(parse_of $'The change is not ready.\n\napproveRequest() skips the null check.\n\none_way: no')"
+has "prose approveRequest() with no verdict line parses null" "$v" '"verdict": null'
+has "glued approveFindings (no colon) parses" "$(parse_of $'approveFindings\nNone.\none_way: no')" '"verdict": "approve"'
+has "approve. alone parses" "$(parse_of $'approve.\none_way: no')" '"verdict": "approve"'
+run camel $'The change is not ready.\n\napproveRequest() skips the null check.\n\none_way: no'
+[ "$merge_rc" = 3 ] && ok "prose approveRequest(): merge rc 3" || bad "prose approveRequest(): merge rc $merge_rc"
+has "prose approveRequest(): reason" "$merge_out" "gate-verdict.json records no verdict"
+hasnt "prose approveRequest(): no gh pr merge" "$gh_log" "pr merge"
 
 GLUED=$'approve\n\nFindings:\nNone.\n\none_way: noThe start-order stress run was killed after it deadlocked, so it produced no result.'
 has "glued 'one_way: noThe ...' parses as no" "$(parse_of "$GLUED")" '"one_way": "no"'
