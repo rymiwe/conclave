@@ -2983,6 +2983,11 @@ EOF
 review_dry_run() {
   review_resolve_repo
   review_target_mode
+  if [ -n "${LINEUP_ASK_RAW:-}" ]; then
+    # Same stop as a real launch: preflight's list, then the ask stop.
+    review_preflight plan
+    lineup_ask_after_preflight
+  fi
   review_prepare_shape
   review_write_lineup "$DIR/preview/lineup.md"
   if review_claude_needs_brief; then
@@ -3520,6 +3525,7 @@ review_run() {
   review_reject_shallow
   review_target_mode
   review_preflight
+  lineup_ask_after_preflight
   : >"$ERRORS_FILE"
   ballot_move_decide
   rm -f \

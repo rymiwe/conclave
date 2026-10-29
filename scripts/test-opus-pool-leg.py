@@ -254,6 +254,46 @@ review_report_present claude && echo present
     check(not list(ballot.glob("voter-argon*")), "no argon files on the claude leg")
 
 
+def test_ask_agy(tmp: Path):
+    """The ask route's Opus voter maps to the claude leg and runs on its pool."""
+    d = tmp / "ask"
+    packet = d / "packet"
+    packet.mkdir(parents=True)
+    (packet / "PROMPT.md").write_text("One question.\n", encoding="utf-8")
+    bindir = stubs(d)
+    stream = d / "stream.jsonl"
+    route = json.dumps({"role": "ask", "mode": "default", "voters": [
+        GROK, opus("google", "claude-opus-5-5-high")]})
+    env = {"CONCLAVE_AGY": str(bindir / "agy"), "AGY_RECORD": str(d / "rec"), "AGY_STREAM": str(stream),
+           "ROUTE": route}
+    body = f"""
+DIR={d}/run; mkdir -p "$DIR"; ASK_OUT={d}; PACKET={packet}; KIND=ask
+ERRORS_FILE={d}/errors.md; : >"$ERRORS_FILE"; FLAG_CLAUDE=""; ASK_ROUTE_JSON="$ROUTE"
+printf 'voters=%s\\n' "$(ask_voters_from_route)"
+line="$(ask_route_opus_line)"; printf 'line=%s\\n' "$line"
+claude_apply_launch_line "$line"; printf 'via=%s effort=%s\\n' "$(claude_leg_via)" "$CLAUDE_EFFORT"
+ask_run_claude; echo rc=$?
+"""
+    agy_stream(stream, "SUCCESS", "Opus answer text.")
+    proc = bash(body, env)
+    out = proc.stdout
+    check("voters=grok,claude" in out, f"ask route opus maps to the claude leg ({out}{proc.stderr})")
+    check("line=opus:agy:claude-opus-5-5-high" in out, f"ask route opus gives an agy launch line ({out})")
+    check("via=agy effort=high" in out, f"ask Opus runs on agy at high ({out})")
+    check("rc=0" in out and (d / "answer-claude.ok").exists(), f"ask Opus on agy answers ({out}{proc.stderr})")
+    argv = (d / "rec" / "argv").read_text(encoding="utf-8").splitlines() if (d / "rec" / "argv").exists() else []
+    check("--model" in argv and argv[argv.index("--model") + 1] == "claude-opus-5-5-high",
+          f"ask agy ran the Opus id ({argv})")
+    check("Opus answer text." in (d / "answer-claude.md").read_text(encoding="utf-8")
+          if (d / "answer-claude.md").exists() else False, "ask answer text is kept")
+    agy_stream(stream, "ERROR", "")
+    proc = bash(body, env)
+    check("rc=1" in proc.stdout and not (d / "answer-claude.md").exists(),
+          f"a failed ask Opus on agy is a failed leg ({proc.stdout}{proc.stderr})")
+    check("claude: Opus on agy failed" in (d / "errors.md").read_text(encoding="utf-8"),
+          "the ask failure is logged loud")
+
+
 def main():
     import tempfile
     test_lineup_parse()
@@ -263,6 +303,7 @@ def main():
         test_design_agy(tmp)
         test_design_cursor(tmp)
         test_review_agy(tmp)
+        test_ask_agy(tmp)
     print(f"{passed} passed, {failed} failed")
     return 1 if failed else 0
 

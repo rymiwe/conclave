@@ -103,13 +103,14 @@ rejected pairs.
   pick log records the ballot. Families map to legs: fable to claude (or
   cursor-fable), opus to claude at high on the pool seat-usage picked
   (agy on Google AI Pro, native claude, or cursor-agent), astra to codex, grok, wonder and wonder-full to muse,
-  argon to the agy leg. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, excluding a named author or a caller-passed builder or --builder-vendor and nobody when none of those is set, and falls back to Fable and Astra when that route is missing, fails, or asks.<!-- ballot-rule:end -->
+  argon to the agy leg. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, excluding a named author or a caller-passed builder or --builder-vendor and nobody when none of those is set, and falls back to Fable and Astra when that route is missing or fails, and stops with an ask for Ryan when it asks.<!-- ballot-rule:end -->
   `--voters` still wins. On review, `fable` and `astra` in that list mean
-  claude and codex. When the call is missing, fails, or returns mode ask,
+  claude and codex. When the call is missing or fails,
   the script uses Fable and Astra, warns on review, and says so in the lineup
-  and in `routing.md`. The same places name the
+  and in `routing.md`. When it returns mode ask, the script stops with exit 3
+  and seats nobody (no Fable, no Astra) on every lineup kind: ask Ryan. The same places name the
   excluded vendor and why when the router returns one.
-  It does not stop the run. Ask mode calls `--route ask` and stays at two
+  Naming it does not stop the run. Ask mode calls `--route ask` and stays at two
   voters by headroom. The runs record still leaves lineup, host, usage,
   and chair reuse `unknown`
   unless the control plane passed them. Pool draw and builder rounds stay

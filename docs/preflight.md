@@ -28,9 +28,9 @@ Every check runs, even when an earlier one fails, so the list is complete. Each 
 - `conclave.sh` skips it when `--voters` is given, because `--voters` wins over the route.
 - stack-run skips it when no scheduled ballot needs voters: every one is done, needs decide, needs findings, or blocked. A resume that only reuses ballots, runs chair steps, or reconciles is not stopped by a capped route. The per-wave pre-check exempts the same ballots.
 - stack-run with `--wave-wait S` turns capped seats into a warning. The first wave then waits for seats as before.
-- A blocked seat item lists the options and a default. `conclave.sh`: wait for the capped seat to reset and rerun (the default), pass `--voters` with seats that have quota, or set `CONCLAVE_PREFLIGHT=0` to run the old fixed default pair. stack-run: wait for the reset and rerun (the default), pass `--wave-wait SECONDS` so the run waits for seats before the first wave, or set `CONCLAVE_PREFLIGHT=0` (the per-wave pre-check still stops a capped wave).
+- A blocked seat item lists the options and a default. `conclave.sh`: wait for the capped seat to reset and rerun (the default), pass `--voters` with seats that have quota, `CONCLAVE_PREFLIGHT=0` skips preflight, but a seat ask still stops the run (exit 3) with no fixed default. stack-run: wait for the reset and rerun (the default), pass `--wave-wait SECONDS` so the run waits for seats before the first wave, or set `CONCLAVE_PREFLIGHT=0` (the per-wave pre-check still stops a capped wave).
 
-Before preflight, a review with an asking route fell back to the fixed default pair. It now stops at minute 0 instead. `CONCLAVE_PREFLIGHT=0` or `--voters` keeps the old launch.
+Before preflight, a review with an asking route fell back to the fixed default pair. It now stops at minute 0 instead. With `CONCLAVE_PREFLIGHT=0` the ask still stops the run, on every kind, and seats no fixed default. `--voters` seats the named legs.
 
 **Repo prerequisites.** An optional file in the target repo, `.conclave/preflight.json`, read from a committed ref, never the working tree. It names what a reviewer needs to run a repro: a test database, installed dependencies, a private registry.
 

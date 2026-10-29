@@ -33,7 +33,7 @@ cd "$ROOT"
 
 DEFAULT_VOTERS="claude,codex"
 # No --voters: the lineup seats the ballot. Kind review uses --kind review. See apply_kind_voters.
-# A missing router, a failed run, or mode ask keeps the fixed default.
+# A missing router or a failed run keeps the fixed default. Mode ask stops (exit 3).
 VOTERS="$DEFAULT_VOTERS"
 VOTERS_EXPLICIT=0
 BALLOT_SOURCE=""
@@ -87,6 +87,7 @@ GROK_EFFORT=""
 MUSE_EFFORT=""
 ARGON_EFFORT=""
 ARGON_PREFLIGHT_OK=0
+LINEUP_ASK_RAW=""
 PACKET=""
 PACKET_TMP=""
 ROUTING_OUT=""
@@ -519,8 +520,8 @@ A pace-picked builder is not excluded. Audit excludes that vendor when the
 brief names the author. The
 chair's vendor still votes. The lineup says who sat out and why. A capped
 pool is not seated. A pool ahead of pace still votes. When seat-usage is
-missing, fails, or returns mode ask, the fixed default is used and the
-lineup says so. A named voter passes the routed effort. Review and audit
+missing or fails, the fixed default is used and the lineup says so. When it
+returns mode ask, the run stops (exit 3) and seats nothing: ask Ryan. A named voter passes the routed effort. Review and audit
 pass high. Argon follows that same resolved effort: low, medium, or high
 (gemini-4-argon-low, gemini-4-argon-medium, gemini-4-argon-high).
 CONCLAVE_ARGON_MODEL overrides the id. CONCLAVE_AGY is the binary
@@ -1665,6 +1666,10 @@ ballot_source_line() {
     printf 'ballot: lineup'
     return 0
   fi
+  if [ "${BALLOT_SOURCE:-}" = ask ]; then
+    printf 'ballot: ask (%s)' "${BALLOT_SOURCE_NOTE:-seat-usage asked}"
+    return 0
+  fi
   printf 'ballot: fallback (%s; fixed default)' "${BALLOT_SOURCE_NOTE:-seat-usage unavailable}"
 }
 
@@ -1803,11 +1808,8 @@ load_lineup_ballot() {
       ;;
     ask)
       review_refuse_fixed_default "$raw"
-      BALLOT_SOURCE=fallback
-      BALLOT_SOURCE_NOTE="seat-usage asked"
-      ballot_use_fixed_default
-      note_review_route_fallback
-      return 0
+      lineup_ask_defer "$raw" && return 0
+      lineup_ask_stop "$raw"
       ;;
   esac
   review_refuse_fixed_default "$raw"
@@ -1815,6 +1817,49 @@ load_lineup_ballot() {
   BALLOT_SOURCE_NOTE="seat-usage failed"
   ballot_use_fixed_default
   note_review_route_fallback
+}
+
+lineup_ask_defer() {
+  # Review runs preflight, which lists the capped seats with any other
+  # blocker in one numbered list and exits 3. So a review ask seats nobody
+  # here and stops after preflight (lineup_ask_after_preflight). Other kinds,
+  # and review with CONCLAVE_PREFLIGHT=0, stop at once.
+  [ "${KIND:-}" = review ] || return 1
+  [ "$(conclave_env PREFLIGHT 1)" != 0 ] || return 1
+  LINEUP_ASK_RAW="$1"
+  VOTERS=""
+  BALLOT_SOURCE=ask
+  BALLOT_SOURCE_NOTE="seat-usage asked"
+  return 0
+}
+
+lineup_ask_after_preflight() {
+  # A deferred review ask that preflight did not stop still stops here.
+  [ -z "${LINEUP_ASK_RAW:-}" ] || lineup_ask_stop "$LINEUP_ASK_RAW"
+}
+
+lineup_ask_stop() {
+  # $1 is seat-usage stdout with mode ask. An ask is Ryan's call: no fixed
+  # default, so Fable and Astra are never seated in its place. Stops the run
+  # (exit 3) on every kind, dry-run included. errors.md on a real run.
+  local why msg
+  why="$(python3 -c '
+import json, sys
+try:
+    doc = json.loads(sys.argv[1])
+except ValueError:
+    doc = None
+if isinstance(doc, list) and doc:
+    doc = doc[0]
+why = doc.get("reason") if isinstance(doc, dict) else None
+print(" ".join(str(why).split()) if why else "no reason given")
+' "$1" 2>/dev/null)" || why="no reason given"
+  msg="conclave: stopped: seat-usage asked (${why:-no reason given}); no fixed default seated (not Fable, not Astra): ask Ryan"
+  printf '%s\n' "$msg" >&2
+  if [ "${DRY_RUN:-0}" != 1 ] && [ -n "${ERRORS_FILE:-}" ]; then
+    printf '%s\n' "$msg" >>"$ERRORS_FILE" 2>/dev/null || true
+  fi
+  exit 3
 }
 
 review_refuse_fixed_default() {
@@ -2741,8 +2786,9 @@ PY
     return 0
   fi
   rm -f "$parse_reason"
-  # Review reports follow the reviewer brief, not the design headings.
-  if [ "${KIND:-}" = "review" ]; then
+  # Review reports follow the reviewer brief, and ask answers are free text,
+  # not the design headings.
+  if [ "${KIND:-}" = "review" ] || [ "${KIND:-}" = "ask" ]; then
     cp "$raw" "$out"
     argon_write_model_proof "$v" "$model"
     return 0
