@@ -576,6 +576,8 @@ path-ordered, so a long packet silently loses the specs and tests.
 `scripts/argon_packet.py` sizes the packet before the leg runs.
 `CONCLAVE_ARGON_MAX_BYTES` is the cap (default 150000, `COUNCIL_ARGON_MAX_BYTES`
 is the alias; a value that is not a positive integer falls back to the default).
+`scripts/merge-gate.sh` reads the same cap: when its reviewer runs on `agy`
+and the gate prompt is over it, the gate refuses (exit 3) before `agy` runs.
 Every run writes one line to `voter-argon.packet.txt` and to stderr with the
 mode, the full packet bytes, the cap, the packet count and each packet's bytes,
 and the number of files cut.

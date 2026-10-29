@@ -285,8 +285,28 @@ big() { # $1 case, $2 runner argv JSON, $3 family, $4 vendor, $5 model
 big cursor '["cursor-agent","--model","grok-4.7-xhigh-fast"]' grok xai grok-4.7-xhigh-fast
 big claude '["claude","--model","fable-5"]' fable anthropic fable-5
 big codex '["codex","exec","-m","gpt-6-astra"]' astra openai gpt-6-astra
-big agy '["agy","--model","gemini-4-argon-high"]' argon google gemini-4-argon-high
+# The other runners above took this prompt over the agy cap; agy needs a raised cap.
+CONCLAVE_ARGON_MAX_BYTES=400000 big agy '["agy","--model","gemini-4-argon-high"]' argon google gemini-4-argon-high
 big muse '["muse","exec","--model","muse-wonder-2"]' muse meta muse-wonder-2
+
+# agy silently stops reading near 190 KB, so over CONCLAVE_ARGON_MAX_BYTES the
+# gate refuses before agy runs instead of reviewing a truncated prompt.
+d="$T/agy-overcap"; mkdir -p "$d"; printf '%s\n' "$ANSWER" > "$FAKE_REPLY"; : > "$FAKE_RUN_LOG"
+"$ROOT/scripts/merge-gate.sh" review "$R" main big "$PR" "$d/out" xai > "$d/review.out" 2> "$d/review.err"; review_rc=$?
+size=$(wc -c < "$d/out/gate-prompt.md")
+[ "$review_rc" = 3 ] && ok "agy over cap: review rc 3" || bad "agy over cap: review rc $review_rc"
+[ "$(wc -l < "$d/review.err")" = 1 ] && ok "agy over cap: one stderr line" || bad "agy over cap: stderr: $(cat "$d/review.err")"
+has "agy over cap: names size, cap and override" "$(cat "$d/review.err")" \
+  "merge-gate: refused: gate prompt is $size bytes, over the agy cap of 150000 bytes (agy silently stops reading near 190 KB); set CONCLAVE_ARGON_MAX_BYTES to override"
+[ -z "$(grep '^agy ' "$FAKE_RUN_LOG")" ] && ok "agy over cap: agy not called" || bad "agy over cap: agy called"
+[ ! -e "$d/out/gate-verdict.json" ] && [ ! -e "$d/out/gate.md" ] && ok "agy over cap: no verdict written" || bad "agy over cap: verdict written"
+"$ROOT/scripts/merge-gate.sh" merge "$PR" "$d/out" > "$d/merge.out" 2>&1; merge_rc=$?
+[ "$merge_rc" != 0 ] && ok "agy over cap: merge refuses" || bad "agy over cap: merge rc 0"
+d="$T/agy-undercap"; mkdir -p "$d"; : > "$FAKE_RUN_LOG"
+CONCLAVE_ARGON_MAX_BYTES=$size "$ROOT/scripts/merge-gate.sh" review "$R" main big "$PR" "$d/out" xai > "$d/review.out" 2>&1; review_rc=$?
+[ "$review_rc" = 0 ] && ok "agy at the cap: review rc 0" || bad "agy at the cap: review rc $review_rc: $(cat "$d/review.out")"
+has "agy at the cap: agy called" "$(cat "$FAKE_RUN_LOG")" "agy --model gemini-4-argon-high"
+has "agy at the cap: verdict" "$(cat "$d/out/gate-verdict.json" 2>/dev/null)" '"verdict": "approve"'
 
 # 2. one_way: yes -> refused, names the reason and the file:line, no merge.
 run yes $'approve\n\nFindings:\nNone.\n\n**one_way: yes**\none_way_at: db/migrate/002_drop.sql:3 drops column users.email'
