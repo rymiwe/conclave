@@ -101,7 +101,8 @@ rejected pairs.
   with no model trailer. It passes `--builder-vendor` when the header or a
   commit trailer names one vendor, plus `--ballot` and `--repo`, so the
   pick log records the ballot. Families map to legs: fable to claude (or
-  cursor-fable), astra to codex, grok, wonder and wonder-full to muse,
+  cursor-fable), opus to claude at high on the pool seat-usage picked
+  (agy on Google AI Pro, native claude, or cursor-agent), astra to codex, grok, wonder and wonder-full to muse,
   argon to the agy leg. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, excluding a named author or a caller-passed builder or --builder-vendor and nobody when none of those is set, and falls back to Fable and Astra when that route is missing, fails, or asks.<!-- ballot-rule:end -->
   `--voters` still wins. On review, `fable` and `astra` in that list mean
   claude and codex. When the call is missing, fails, or returns mode ask,

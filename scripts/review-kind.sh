@@ -594,7 +594,9 @@ review_write_lineup() {
     printf 'kind: review\n'
     printf 'target: %s\n' "$(review_target_line)"
     printf 'diff: %s\n' "$(review_cell "$DIFFSHAPE")"
-    if [ "${CLAUDE_SKU:-fable}" = "opus" ]; then
+    if [ "${CLAUDE_SKU:-fable}" = "opus" ] && [ "$(claude_leg_via)" != claude ]; then
+      printf 'effort: OpenAI %s; Opus high on %s; Grok on %s\n' "$CODEX_EFFORT" "$(claude_launch_cli)" "$(grok_launch_cli)"
+    elif [ "${CLAUDE_SKU:-fable}" = "opus" ]; then
       printf 'effort: OpenAI %s; Opus native; Grok on %s\n' "$CODEX_EFFORT" "$(grok_launch_cli)"
     elif voter_is_named opus; then
       printf 'effort: OpenAI %s; Fable on cursor-agent; Opus native; Grok on %s\n' "$CODEX_EFFORT" "$(grok_launch_cli)"
@@ -633,10 +635,17 @@ review_write_lineup() {
           pool="Claude"
           pace="$(review_pace_cell claude)"
           if claude_leg_uses_cursor; then
-            model="${CURSOR_FABLE:-}"
+            model="$(claude_cursor_model)"
             cli="cursor-agent ($(review_cli_version "$(conclave_env CURSOR_AGENT cursor-agent)"))"
+            meth="brief"
             pool="Cursor Other Models"
             pace="$(review_pace_cell cursor)"
+          elif claude_leg_uses_agy; then
+            model="${CLAUDE_OPUS_MODEL:-}"
+            cli="agy ($(review_cli_version agy))"
+            meth="packet"
+            pool="Google AI Pro"
+            pace="pace unknown"
           fi
           ;;
         opus)
@@ -704,9 +713,15 @@ EOF
       "TypeSafe" "resolved when findings are judged" "scripts/jev-judge.py" \
       "choice per finding" "metered" "n/a"
     printf '\n'
-    if claude_leg_uses_cursor; then
+    if claude_leg_uses_cursor && [ "${CLAUDE_SKU:-fable}" = opus ]; then
+      printf 'Cursor Opus: selected: %s\n' "${CLAUDE_OPUS_MODEL:-unavailable}"
+      printf 'The Cursor Opus leg is proven from its stream init model; Cursor reports no modelUsage.\n'
+    elif claude_leg_uses_cursor; then
       printf 'Cursor Fable: selected: %s\n' "${CURSOR_FABLE:-unavailable}"
       printf 'The Cursor Fable leg is proven from its stream init model; Cursor reports no modelUsage.\n'
+    elif claude_leg_uses_agy; then
+      printf 'agy Opus: selected: %s\n' "${CLAUDE_OPUS_MODEL:-unavailable}"
+      printf 'The agy Opus leg is the model id agy was launched with; agy reports no modelUsage.\n'
     else
       printf 'Cursor Fable fallback (not selected): %s\n' "${CURSOR_FABLE:-unavailable}"
       printf 'Anthropic model id is proven from modelUsage after the run. The lineup cell is the launch alias.\n'
@@ -1617,8 +1632,11 @@ review_run_claude_max() {
 }
 
 review_run_cursor_fable() {
-  local wt="$1" ec=0 brief="$DIR/voter-claude.brief.md"
-  if [ -z "${CURSOR_FABLE:-}" ] || [ ! -s "$brief" ]; then
+  # The claude leg on cursor-agent: Cursor Fable, or the lineup's Opus id.
+  local wt="$1" ec=0 brief="$DIR/voter-claude.brief.md" model family
+  model="$(claude_cursor_model)"
+  family="$(claude_cursor_family)"
+  if [ -z "$model" ] || [ ! -s "$brief" ]; then
     echo 'claude: Cursor model or reviewer brief missing' >"$DIR/voter-claude.fail"
     return 1
   fi
@@ -1630,19 +1648,19 @@ review_run_cursor_fable() {
   [ "$(voter_sandbox_mode)" = test-db ] || sandbox=(--sandbox enabled)
   (
     cd -- "$wt" || exit 1
-    "$(conclave_env CURSOR_AGENT cursor-agent)" -p --model "$CURSOR_FABLE" \
+    "$(conclave_env CURSOR_AGENT cursor-agent)" -p --model "$model" \
       --output-format stream-json -f --trust "${sandbox[@]}" --workspace "$wt" "$(cat "$brief")"
   ) >"$DIR/voter-claude.stream.jsonl" 2>"$DIR/voter-claude.err" || ec=$?
   if [ "$ec" -ne 0 ]; then
     echo "claude: Cursor exit $ec" >"$DIR/voter-claude.fail"
     return 1
   fi
-  python3 - "$DIR" "$CURSOR_FABLE" <<'PY' || return 1
+  python3 - "$DIR" "$model" "$family" <<'PY' || return 1
 import json
 import re
 import sys
 from pathlib import Path
-d, model = Path(sys.argv[1]), sys.argv[2]
+d, model, family = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 try:
     lines = (d / 'voter-claude.stream.jsonl').read_text().split('\n')
     if lines[-1] == '':
@@ -1658,27 +1676,58 @@ try:
         'result': last['result'], 'via': 'cursor', 'model': model,
         'init_model': display, 'session_id': init.get('session_id')}) + '\n')
     shown = re.sub(r'\s', '_', display)
-    ok = 'fable' in display.lower()
+    ok = family in display.lower()
     proof = (f'claude: ok via=cursor model={model} display={shown}' if ok else
              f'claude: FAIL via=cursor ran={shown} (lineup said {model})')
     (d / 'voter-claude.model.txt').write_text(proof + '\n')
     if not ok:
-        raise ValueError('Cursor init model has no fable proof')
+        raise ValueError(f'Cursor init model has no {family} proof')
 except (ValueError, IndexError, AttributeError) as exc:
     (d / 'voter-claude.fail').write_text(f'claude: {exc}\n')
     sys.exit(1)
 PY
 }
 
+review_run_claude_agy() {
+  # Opus on agy (Google AI Pro): the argon packet launcher on the claude brief.
+  # The report becomes voter-claude.json like the other claude legs.
+  local wt="$1"
+  rm -f "$DIR/voter-claude.json" "$DIR/voter-claude.fail" "$DIR/voter-claude.skipped"
+  if [ -z "${CLAUDE_OPUS_MODEL:-}" ]; then
+    echo 'claude: agy Opus id is unresolved' >"$DIR/voter-claude.fail"
+    return 1
+  fi
+  AGY_VOTER=claude AGY_MODEL="$CLAUDE_OPUS_MODEL" review_run_argon "$wt" || return 1
+  if [ ! -s "$DIR/voter-claude.md" ] || [ -s "$DIR/voter-claude.skipped" ]; then
+    printf 'claude: Opus on agy failed: %s\n' \
+      "$(sed -n 2p "$DIR/voter-claude.skipped" 2>/dev/null || true)" >"$DIR/voter-claude.fail"
+    rm -f "$DIR/voter-claude.md" "$DIR/voter-claude.model.txt"
+    return 1
+  fi
+  if ! jq -n --rawfile r "$DIR/voter-claude.md" --arg m "$CLAUDE_OPUS_MODEL" \
+    '{result: $r, via: "agy", model: $m}' >"$DIR/voter-claude.json"; then
+    echo 'claude: cannot write voter-claude.json' >"$DIR/voter-claude.fail"
+    return 1
+  fi
+  rm -f "$DIR/voter-claude.md"
+  printf 'claude: ok via=agy model=%s\n' "$CLAUDE_OPUS_MODEL" >"$DIR/voter-claude.model.txt"
+}
+
 review_run_claude() {
   # Fable, including the lineup fallback and cursor-fable, is cursor-agent.
-  # Opus is the only native claude leg. --fable-overflow does not change this.
+  # Opus runs on the pool the lineup picked: native, cursor-agent, or agy.
+  # --fable-overflow does not change this.
   local wt="$1"
-  if [ "${CLAUDE_SKU:-fable}" = opus ]; then
-    review_run_claude_max "$wt"
-    return
-  fi
-  review_run_cursor_fable "$wt"
+  case "$(claude_leg_via)" in
+    claude) review_run_claude_max "$wt" ;;
+    agy) review_run_claude_agy "$wt" ;;
+    *) review_run_cursor_fable "$wt" ;;
+  esac
+}
+
+review_claude_needs_brief() {
+  # Native Opus builds its own prompt. Cursor and agy legs read the brief.
+  voter_is_named claude && ! [ "$(claude_leg_via)" = claude ]
 }
 
 review_run_opus() {
@@ -2247,9 +2296,9 @@ review_run_grok_native() {
 
 review_argon_note_packet() {
   # $1 is plan.json. Logs the packet bytes when the packet is planned.
-  local plan="$1" line
-  line="$(jq -r '"argon packet: mode=\(.mode) full_bytes=\(.full_bytes) max_bytes=\(.max_bytes) packets=\(.packets | length) packet_bytes=\([.packets[].bytes] | join(",")) files_cut=\(.cut | length)"' "$plan")"
-  printf '%s\n' "$line" >"$DIR/voter-argon.packet.txt"
+  local plan="$1" line v="${AGY_VOTER:-argon}"
+  line="$(jq -r --arg v "$v" '"\($v) packet: mode=\(.mode) full_bytes=\(.full_bytes) max_bytes=\(.max_bytes) packets=\(.packets | length) packet_bytes=\([.packets[].bytes] | join(",")) files_cut=\(.cut | length)"' "$plan")"
+  printf '%s\n' "$line" >"$DIR/voter-$v.packet.txt"
   printf '%s\n' "$line" >&2
 }
 
@@ -2257,41 +2306,42 @@ review_argon_note_partial() {
   # $1 is plan.json. Call only once a packet returned a report. A cut writes
   # voter-argon.partial and a loud warning to errors.md, and the phase-1 summary
   # prints the same text.
-  local plan="$1" line
+  local plan="$1" line v="${AGY_VOTER:-argon}"
   [ "$(jq -r '.warning' "$plan")" != "" ] || return 0
-  jq -r '.warning' "$plan" >"$DIR/voter-argon.partial"
+  jq -r '.warning' "$plan" >"$DIR/voter-$v.partial"
   # Note lines are not failures: Argon voted, on less of the change.
   while IFS= read -r line || [ -n "$line" ]; do
     log_err "note: $line"
-  done <"$DIR/voter-argon.partial"
+  done <"$DIR/voter-$v.partial"
 }
 
 review_run_argon() {
   # $1 wt. Packet-first, same as the design argon leg. Contributor mode is not a Muse flag here.
   # The packet is sized first (scripts/argon_packet.py): over CONCLAVE_ARGON_MAX_BYTES it is
   # cut by priority or split in two, and what was cut is named, never silent.
-  local wt="$1" packet stage plan n i f line max reason model="" ok=0
-  local brief="$DIR/voter-argon.brief.md"
+  # AGY_VOTER=claude runs the claude leg's Opus on agy with the claude brief.
+  local wt="$1" packet stage plan n i f line max reason model="" ok=0 v="${AGY_VOTER:-argon}"
+  local brief="$DIR/voter-$v.brief.md"
   local -a args=()
   if [ ! -s "$brief" ]; then
-    echo "argon: reviewer brief missing" >"$DIR/voter-argon.fail"
+    echo "$v: reviewer brief missing" >"$DIR/voter-$v.fail"
     return 1
   fi
-  rm -f "$DIR/voter-argon.partial" "$DIR/voter-argon.packet.txt" "$DIR/voter-argon.skipped"
+  rm -f "$DIR/voter-$v.partial" "$DIR/voter-$v.packet.txt" "$DIR/voter-$v.skipped"
   stage="$(alloc_packet_tmpdir)" || {
-    echo "argon: cannot create packet temp dir" >"$DIR/voter-argon.fail"
+    echo "$v: cannot create packet temp dir" >"$DIR/voter-$v.fail"
     return 1
   }
   max="$(argon_max_bytes)"
   # Pinned so user or repo diff settings cannot change the headers argon_packet.py parses.
   if ! git -c diff.mnemonicPrefix=false -c diff.noprefix=false -c color.ui=never \
     -C "$wt" diff --no-color --src-prefix=a/ --dst-prefix=b/ HEAD >"$stage/change.diff"; then
-    echo "argon: cannot write packet prompt" >"$DIR/voter-argon.fail"
+    echo "$v: cannot write packet prompt" >"$DIR/voter-$v.fail"
     return 1
   fi
   if ! python3 "$ROOT/scripts/argon_packet.py" plan --brief "$brief" --diff "$stage/change.diff" \
     --max-bytes "$max" --out-dir "$stage" >/dev/null 2>"$stage/plan.err"; then
-    echo "argon: cannot write packet prompt: $(tail -n 1 "$stage/plan.err")" >"$DIR/voter-argon.fail"
+    echo "$v: cannot write packet prompt: $(tail -n 1 "$stage/plan.err")" >"$DIR/voter-$v.fail"
     return 1
   fi
   plan="$stage/plan.json"
@@ -2299,20 +2349,20 @@ review_run_argon() {
   n="$(jq -r '.packets | length' "$plan")"
   for i in $(seq 1 "$n"); do
     packet="$(alloc_packet_tmpdir)" || {
-      echo "argon: cannot create packet temp dir" >"$DIR/voter-argon.fail"
+      echo "$v: cannot create packet temp dir" >"$DIR/voter-$v.fail"
       return 1
     }
     cp "$stage/packet-$i.md" "$packet/PROMPT.md" || {
-      echo "argon: cannot write packet prompt" >"$DIR/voter-argon.fail"
+      echo "$v: cannot write packet prompt" >"$DIR/voter-$v.fail"
       return 1
     }
     if [ "$i" -eq 1 ]; then
-      cp "$packet/PROMPT.md" "$DIR/voter-argon.prompt.md"
+      cp "$packet/PROMPT.md" "$DIR/voter-$v.prompt.md"
     else
-      cp "$packet/PROMPT.md" "$DIR/voter-argon.prompt.$i.md"
+      cp "$packet/PROMPT.md" "$DIR/voter-$v.prompt.$i.md"
     fi
     # A skip file present after run_argon is then this packet's own failure.
-    rm -f "$DIR/voter-argon.skipped"
+    rm -f "$DIR/voter-$v.skipped"
     PACKET="$packet"
     if [ "$n" -gt 1 ]; then
       ERRORS_FILE="$stage/errors.$i" run_argon
@@ -2320,17 +2370,17 @@ review_run_argon() {
       run_argon
     fi
     [ "$n" -gt 1 ] || continue
-    if [ -s "$DIR/voter-argon.md" ] && [ ! -s "$DIR/voter-argon.skipped" ]; then
-      mv "$DIR/voter-argon.md" "$stage/report-$i.md"
-      model="$(cat "$DIR/voter-argon.model.txt" 2>/dev/null || true)"
+    if [ -s "$DIR/voter-$v.md" ] && [ ! -s "$DIR/voter-$v.skipped" ]; then
+      mv "$DIR/voter-$v.md" "$stage/report-$i.md"
+      model="$(cat "$DIR/voter-$v.model.txt" 2>/dev/null || true)"
       args+=(--report "$i=$stage/report-$i.md")
       ok=$((ok + 1))
     else
-      reason="$(sed -n 2p "$DIR/voter-argon.skipped" 2>/dev/null || true)"
+      reason="$(sed -n 2p "$DIR/voter-$v.skipped" 2>/dev/null || true)"
       args+=(--report "$i=!${reason:-no report}")
     fi
     for f in stream.jsonl err; do
-      [ -f "$DIR/voter-argon.$f" ] && mv "$DIR/voter-argon.$f" "$DIR/voter-argon.packet-$i.$f"
+      [ -f "$DIR/voter-$v.$f" ] && mv "$DIR/voter-$v.$f" "$DIR/voter-$v.packet-$i.$f"
     done
   done
   if [ "$n" -gt 1 ]; then
@@ -2338,29 +2388,29 @@ review_run_argon() {
     for i in $(seq 1 "$n"); do
       [ -s "$stage/errors.$i" ] || continue
       while IFS= read -r line || [ -n "$line" ]; do
-        if [ "$ok" -gt 0 ]; then log_err "note: argon packet $i: $line"; else log_err "$line"; fi
+        if [ "$ok" -gt 0 ]; then log_err "note: $v packet $i: $line"; else log_err "$line"; fi
       done <"$stage/errors.$i"
     done
   fi
   if [ "$n" -eq 1 ]; then
-    if [ -s "$DIR/voter-argon.md" ] && [ ! -s "$DIR/voter-argon.skipped" ]; then
+    if [ -s "$DIR/voter-$v.md" ] && [ ! -s "$DIR/voter-$v.skipped" ]; then
       review_argon_note_partial "$plan"
       if [ "$(jq -r '.mode' "$plan")" != whole ]; then
-        cp "$DIR/voter-argon.md" "$stage/report-1.md"
-        python3 "$ROOT/scripts/argon_packet.py" finalize --plan "$plan" --out "$DIR/voter-argon.md" \
+        cp "$DIR/voter-$v.md" "$stage/report-1.md"
+        python3 "$ROOT/scripts/argon_packet.py" finalize --plan "$plan" --out "$DIR/voter-$v.md" \
           --report "1=$stage/report-1.md"
       fi
     else
-      rm -f "$DIR/voter-argon.partial"
+      rm -f "$DIR/voter-$v.partial"
     fi
   elif [ "$ok" -eq 0 ]; then
-    rm -f "$DIR/voter-argon.partial"
-    argon_write_skipped "argon: every packet failed: $(jq -r '[.packets[].n] | join(",")' "$plan")"
+    rm -f "$DIR/voter-$v.partial"
+    argon_write_skipped "$v: every packet failed: $(jq -r '[.packets[].n] | join(",")' "$plan")"
   else
-    rm -f "$DIR/voter-argon.skipped"
+    rm -f "$DIR/voter-$v.skipped"
     review_argon_note_partial "$plan"
-    python3 "$ROOT/scripts/argon_packet.py" finalize --plan "$plan" --out "$DIR/voter-argon.md" "${args[@]}"
-    [ -n "$model" ] && printf '%s\n' "$model" >"$DIR/voter-argon.model.txt"
+    python3 "$ROOT/scripts/argon_packet.py" finalize --plan "$plan" --out "$DIR/voter-$v.md" "${args[@]}"
+    [ -n "$model" ] && printf '%s\n' "$model" >"$DIR/voter-$v.model.txt"
   fi
   rm -rf "$stage"
   return 0
@@ -2935,7 +2985,7 @@ review_dry_run() {
   review_target_mode
   review_prepare_shape
   review_write_lineup "$DIR/preview/lineup.md"
-  if voter_is_named claude && [ "${CLAUDE_SKU:-fable}" != "opus" ]; then
+  if review_claude_needs_brief; then
     review_write_claude_brief "$DIR/preview/voter-claude.brief.md" \
       || die "$REVIEW_BRIEF_REJECT"
   fi
@@ -3013,7 +3063,9 @@ review_failure_seat() {
       if [ -n "${DIR:-}" ] && [ -f "$DIR/voter-claude.via" ]; then
         via="$(head -1 "$DIR/voter-claude.via" 2>/dev/null || true)"
       fi
-      if claude_leg_uses_cursor || [ "$via" = cursor ]; then
+      if claude_leg_uses_agy || [ "$via" = agy ]; then
+        printf 'google\n'
+      elif claude_leg_uses_cursor || [ "$via" = cursor ]; then
         printf 'cursor\n'
       else
         printf 'claude\n'
@@ -3333,8 +3385,8 @@ EOF
     review_note_reseat "re-seat: could not replace $failed ($reason): route named no voter"
     return 1
   }
-  if [ "$sku" = cursor-fable ]; then
-    CLAUDE_SKU="cursor-fable"
+  if [ -n "$sku" ]; then
+    claude_apply_launch_line "$sku" || true
   fi
   if [ "${KIND:-}" = design ] || [ "${KIND:-}" = mixed ]; then
     review_swap_voter "$failed" "$name"
@@ -3476,6 +3528,8 @@ review_run() {
     "$DIR"/voter-*.stdout.md "$DIR"/voter-*.seconds \
     "$DIR"/voter-argon.partial "$DIR"/voter-argon.packet.txt \
     "$DIR"/voter-argon.packet-* "$DIR"/voter-argon.skipped \
+    "$DIR"/voter-claude.partial "$DIR"/voter-claude.packet.txt \
+    "$DIR"/voter-claude.packet-* "$DIR"/voter-claude.skipped \
     "$DIR"/lineup.md "$DIR"/diffshape.txt "$DIR"/readonly.txt \
     "$DIR"/model-check.md "$DIR"/worktrees-kept.txt \
     "$DIR"/findings.json "$DIR"/judgment.md "$DIR"/convergence.md \
@@ -3496,7 +3550,7 @@ review_run() {
   fi
   REVIEW_RO_BEFORE="$REVIEW_HASH_VALUE"
   REVIEW_REFS_BEFORE="$REVIEW_REFS_VALUE"
-  if voter_is_named claude && [ "${CLAUDE_SKU:-fable}" != "opus" ]; then
+  if review_claude_needs_brief; then
     review_write_claude_brief "$DIR/voter-claude.brief.md" \
       || die "$REVIEW_BRIEF_REJECT"
   fi
