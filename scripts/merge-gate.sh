@@ -26,9 +26,17 @@
 # (MAX_ARG_STRLEN) makes execve fail with "Argument list too long", and a
 # diff with 40 lines of context passes that. agy and codex read it on stdin,
 # cursor-agent and claude read it on stdin when given no prompt argument, and
-# muse reads --prompt-file. agy silently stops reading near 190 KB, so for agy
-# a prompt over CONCLAVE_ARGON_MAX_BYTES (default 150000, the review Argon
-# packet cap) refuses (exit 3, one line) before agy runs. It writes
+# muse reads --prompt-file. agy silently stops reading near 190 KB, so when
+# seat-usage picks agy for a prompt over CONCLAVE_ARGON_MAX_BYTES (default
+# 150000, the review Argon packet cap), agy never runs. The gate keeps that
+# route as gate-route-first.json and asks seat-usage again with the same
+# --builder-vendor plus --exclude-vendor <agy reviewer's vendor>. seat-usage
+# still skips stale and capped seats, so the swap only lands on a seat it
+# reports eligible. The new gate-route.json carries a "swap" record (from,
+# excluded_vendor, reason), and gate.md ends with the same note in a fenced
+# block the verdict parser skips. When the re-ask leaves no eligible reviewer,
+# it stops with "merge-gate: ask Ryan: ..." (exit 4, one line) and writes no
+# verdict. Any other re-ask failure refuses (exit 3). It writes
 # gate-prompt.md, gate.stream.jsonl (the reviewer's raw output), gate.err,
 # gate.md (the reviewer's answer), gate-head.txt (the reviewed head sha), and
 # gate-verdict.json (the parsed verdict line, approve / request-changes /
@@ -59,6 +67,8 @@ GH="${MERGE_GATE_GH:-/usr/local/bin/gh}"
 SEAT_USAGE="${MERGE_GATE_SEAT_USAGE:-seat-usage}"
 usage() { sed -n '4,5p' "${BASH_SOURCE[0]}" | sed 's/^# *//' >&2; exit 2; }
 refuse() { echo "merge-gate: refused: $*" >&2; exit 3; }
+# No eligible reviewer is left after a swap: Ryan picks, so it is not exit 3.
+ask_ryan() { echo "merge-gate: ask Ryan: $*" >&2; exit 4; }
 
 # Same newest-version pick as scripts/resolve-models.sh.
 newest() { # $1 = regex with one capture group for the version; reads IDs on stdin
@@ -66,48 +76,34 @@ newest() { # $1 = regex with one capture group for the version; reads IDs on std
     sort -V | tail -1 | cut -d' ' -f2
 }
 
-review() {
-  [ "$#" -eq 6 ] || [ "$#" -eq 7 ] || usage
-  local repo=$1 base=$2 head=$3 pr=$4 out=$5 vendor=$6 bot=${7:-} picked model why name bin
-  local commits derived status listed source=caller
-  mkdir -p "$out" || exit 1
-  # A refusal must not leave an earlier verdict for merge to read.
-  rm -f "$out/gate.md" "$out/gate-verdict.json" "$out/gate-head.txt" "$out/gate-route.json" "$out/builder-bot.txt"
-  vendor=$(python3 "$ROOT/scripts/trailer_vendor.py" normalize "$vendor") \
-    || refuse "could not normalize builder vendor $6"
-  commits=$("$GH" pr view "$pr" --json commits 2> "$out/gate-commits.err") \
-    || { why=$(head -n 1 "$out/gate-commits.err"); refuse "could not read the PR commits for $pr${why:+: $why}"; }
-  derived=$(printf '%s' "$commits" | python3 "$ROOT/scripts/trailer_vendor.py" from-commits) \
-    || refuse "could not read the PR commits for $pr"
-  status=${derived%%$'\n'*}
-  listed=${derived#*$'\n'}
-  listed=${listed%%$'\n'*}
-  case "$status" in
-    ambiguous)
-      refuse "the PR commit trailers name several vendors or an unrecognised co-author ($listed), so no single builder vendor can be verified" ;;
-    unknown)
-      echo "merge-gate: note: co-author $listed names no known model family; builder vendor $vendor is the caller's" ;;
-    "")
-      echo "merge-gate: note: no model trailer on the PR commits; builder vendor $vendor is the caller's" ;;
-    "$vendor") source=trailer ;;
-    *)
-      refuse "builder vendor $vendor does not match the PR commit trailers ($status)" ;;
-  esac
-  if ! "$SEAT_USAGE" --route review --cached --json --builder-vendor "$vendor" \
+# Ask seat-usage for the review route into gate-route.json. Extra args (an
+# --exclude-vendor) go after --builder-vendor, which every ask keeps.
+route_ask() {
+  if ! "$SEAT_USAGE" --route review --cached --json --builder-vendor "$vendor" "$@" \
       > "$out/gate-route.json" 2> "$out/gate-route.err"; then
     why=$(grep -v '^\[seat-usage\]' "$out/gate-route.err" | head -n 1)
     refuse "seat-usage --route review failed: ${why:-no output}"
   fi
   # Record where the builder vendor came from, beside the vendors seat-usage recorded.
   # A route that is not JSON is left as is for pick to refuse.
-  if jq --arg s "$source" 'if type == "array" then map(if type == "object" then . + {vendor_source: $s} else . end) elif type == "object" then . + {vendor_source: $s} else . end' \
+  route_add "{\"vendor_source\": $(jq -n --arg s "$source" '$s')}" \
+    || refuse "could not record vendor_source in gate-route.json"
+}
+
+# Merge one JSON object into the route row(s) of gate-route.json. Not JSON: left as is.
+route_add() {
+  if jq --argjson a "$1" 'if type == "array" then map(if type == "object" then . + $a else . end) elif type == "object" then . + $a else . end' \
       "$out/gate-route.json" > "$out/gate-route.tmp" 2>/dev/null; then
-    mv "$out/gate-route.tmp" "$out/gate-route.json" || refuse "could not record vendor_source in gate-route.json"
+    mv "$out/gate-route.tmp" "$out/gate-route.json"
   else
     rm -f "$out/gate-route.tmp"
   fi
-  picked=$(python3 "$ROOT/scripts/merge_gate.py" pick "$out/gate-route.json") || refuse "$picked"
-  local -a runner
+}
+
+# Pick the route's reviewer into runner, model, name and bin. Returns 1 with
+# $why set when the route names none; other unusable routes refuse.
+pick_reviewer() {
+  picked=$(python3 "$ROOT/scripts/merge_gate.py" pick "$out/gate-route.json") || { why=$picked; return 1; }
   mapfile -t runner < <(jq -r '.runner[]' <<<"$picked")
   model=$(jq -r '.model' <<<"$picked")
   # The model is the argv value after --model or -m, else the reviewer model.
@@ -140,6 +136,39 @@ review() {
     fi
     [ -n "$model" ] || refuse "cursor-agent models lists no $alias id"
   fi
+}
+
+review() {
+  [ "$#" -eq 6 ] || [ "$#" -eq 7 ] || usage
+  local repo=$1 base=$2 head=$3 pr=$4 out=$5 vendor=$6 bot=${7:-} picked model why name bin
+  local commits derived status listed source=caller
+  mkdir -p "$out" || exit 1
+  # A refusal must not leave an earlier verdict for merge to read.
+  rm -f "$out/gate.md" "$out/gate-verdict.json" "$out/gate-head.txt" "$out/gate-route.json" "$out/gate-route-first.json" "$out/builder-bot.txt"
+  vendor=$(python3 "$ROOT/scripts/trailer_vendor.py" normalize "$vendor") \
+    || refuse "could not normalize builder vendor $6"
+  commits=$("$GH" pr view "$pr" --json commits 2> "$out/gate-commits.err") \
+    || { why=$(head -n 1 "$out/gate-commits.err"); refuse "could not read the PR commits for $pr${why:+: $why}"; }
+  derived=$(printf '%s' "$commits" | python3 "$ROOT/scripts/trailer_vendor.py" from-commits) \
+    || refuse "could not read the PR commits for $pr"
+  status=${derived%%$'\n'*}
+  listed=${derived#*$'\n'}
+  listed=${listed%%$'\n'*}
+  case "$status" in
+    ambiguous)
+      refuse "the PR commit trailers name several vendors or an unrecognised co-author ($listed), so no single builder vendor can be verified" ;;
+    unknown)
+      echo "merge-gate: note: co-author $listed names no known model family; builder vendor $vendor is the caller's" ;;
+    "")
+      echo "merge-gate: note: no model trailer on the PR commits; builder vendor $vendor is the caller's" ;;
+    "$vendor") source=trailer ;;
+    *)
+      refuse "builder vendor $vendor does not match the PR commit trailers ($status)" ;;
+  esac
+  local -a runner
+  local swap_note=""
+  route_ask
+  pick_reviewer || refuse "$why"
   echo "merge-gate: reviewer $model on $name (seat-usage --route review, builder vendor $vendor, vendor_source=$source)"
   GATE_TMP=$(mktemp -d) || exit 1
   trap 'rm -rf "$GATE_TMP"' EXIT
@@ -172,9 +201,28 @@ review() {
   } > "$P/PROMPT.md"
   cp "$P/PROMPT.md" "$out/gate-prompt.md"
   if [ "$name" = agy ]; then
-    local size cap
+    local size cap from_vendor from_model=$model reason swap
     size=$(wc -c < "$P/PROMPT.md") cap=$(argon_max_bytes)
-    [ "$size" -le "$cap" ] || refuse "gate prompt is $size bytes, over the agy cap of $cap bytes (agy silently stops reading near 190 KB); set CONCLAVE_ARGON_MAX_BYTES to override"
+    if [ "$size" -gt "$cap" ]; then
+      reason="gate prompt is $size bytes, over the agy cap of $cap bytes (agy silently stops reading near 190 KB)"
+      from_vendor=$(jq -r 'if type == "array" then .[0] else . end | .reviewers[0].vendor // empty' "$out/gate-route.json" 2>/dev/null)
+      [[ "$from_vendor" =~ ^[a-z0-9_-]+$ ]] || refuse "$reason, and the route names no reviewer vendor to exclude"
+      echo "merge-gate: $reason; asking seat-usage again without $from_vendor"
+      mv "$out/gate-route.json" "$out/gate-route-first.json" || refuse "could not keep the first route"
+      route_ask --exclude-vendor "$from_vendor"
+      swap=$(jq -n --arg m "$from_model" --arg v "$from_vendor" --arg r "$reason" \
+        '{swap: {from: {runner: "agy", model: $m, vendor: $v}, excluded_vendor: $v, reason: $r}}')
+      route_add "$swap" || refuse "could not record the swap in gate-route.json"
+      if ! pick_reviewer; then
+        case "$why" in
+          "no eligible reviewer"*) ask_ryan "$reason, and with $from_vendor excluded there is $why" ;;
+          *) refuse "$why" ;;
+        esac
+      fi
+      [ "$name" != agy ] || refuse "$reason, and the route without $from_vendor still names agy"
+      swap_note="merge-gate swap: reviewer $from_model on agy ($from_vendor) -> $model on $name; $reason; seat-usage asked again with --exclude-vendor $from_vendor and --builder-vendor $vendor"
+      echo "merge-gate: swapped reviewer to $model on $name (seat-usage --route review --exclude-vendor $from_vendor, builder vendor $vendor)"
+    fi
   fi
   printf '%s\n' "$headsha" > "$out/gate-head.txt"
   bot=$(printf '%s' "$bot" | tr -d '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
@@ -232,6 +280,8 @@ A
       echo "$name exit=$ec"
       python3 "$ROOT/scripts/merge_gate.py" muse-result "$raw" "$out/gate.md" || ec=1 ;;
   esac
+  # The parser skips fenced blocks, so the note cannot change the verdict.
+  [ -z "$swap_note" ] || printf '\n```text\n%s\n```\n' "$swap_note" >> "$out/gate.md"
   python3 "$ROOT/scripts/merge_gate.py" parse "$out/gate.md" > "$out/gate-verdict.json"
   cat "$out/gate-verdict.json"
   return "$ec"

@@ -576,8 +576,13 @@ path-ordered, so a long packet silently loses the specs and tests.
 `scripts/argon_packet.py` sizes the packet before the leg runs.
 `CONCLAVE_ARGON_MAX_BYTES` is the cap (default 150000, `COUNCIL_ARGON_MAX_BYTES`
 is the alias; a value that is not a positive integer falls back to the default).
-`scripts/merge-gate.sh` reads the same cap: when its reviewer runs on `agy`
-and the gate prompt is over it, the gate refuses (exit 3) before `agy` runs.
+`scripts/merge-gate.sh` reads the same cap. When its reviewer runs on `agy`
+and the gate prompt is over it, `agy` never runs: the gate asks seat-usage
+again with the same `--builder-vendor` plus `--exclude-vendor` for the agy
+reviewer's vendor, records the swap in `gate-route.json` (the first route is
+kept as `gate-route-first.json`) and in `gate.md`, and reviews on the seat that
+route names. Stale and capped seats stay ineligible. With no eligible reviewer
+left it prints `merge-gate: ask Ryan: ...` and exits 4.
 Every run writes one line to `voter-argon.packet.txt` and to stderr with the
 mode, the full packet bytes, the cap, the packet count and each packet's bytes,
 and the number of files cut.

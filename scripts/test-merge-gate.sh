@@ -93,6 +93,10 @@ cat > "$T/bin/seat-usage" <<'S'
 echo "seat-usage $*" >> "$FAKE_SU_LOG"
 echo "[seat-usage] pull-only cached 1m ago" >&2
 [ -n "${FAKE_ROUTE_ERR:-}" ] && echo "$FAKE_ROUTE_ERR" >&2
+# The over-cap re-ask excludes the agy vendor; FAKE_ROUTE_EXCLUDED answers it.
+case " $* " in
+  *" --exclude-vendor "*) [ -n "${FAKE_ROUTE_EXCLUDED:-}" ] && { printf '%s\n' "$FAKE_ROUTE_EXCLUDED"; exit 0; } ;;
+esac
 printf '%s\n' "$FAKE_ROUTE"
 exit "${FAKE_ROUTE_RC:-0}"
 S
@@ -289,19 +293,68 @@ big codex '["codex","exec","-m","gpt-6-astra"]' astra openai gpt-6-astra
 CONCLAVE_ARGON_MAX_BYTES=400000 big agy '["agy","--model","gemini-4-argon-high"]' argon google gemini-4-argon-high
 big muse '["muse","exec","--model","muse-wonder-2"]' muse meta muse-wonder-2
 
-# agy silently stops reading near 190 KB, so over CONCLAVE_ARGON_MAX_BYTES the
-# gate refuses before agy runs instead of reviewing a truncated prompt.
-d="$T/agy-overcap"; mkdir -p "$d"; printf '%s\n' "$ANSWER" > "$FAKE_REPLY"; : > "$FAKE_RUN_LOG"
-"$ROOT/scripts/merge-gate.sh" review "$R" main big "$PR" "$d/out" xai > "$d/review.out" 2> "$d/review.err"; review_rc=$?
-size=$(wc -c < "$d/out/gate-prompt.md")
-[ "$review_rc" = 3 ] && ok "agy over cap: review rc 3" || bad "agy over cap: review rc $review_rc"
-[ "$(wc -l < "$d/review.err")" = 1 ] && ok "agy over cap: one stderr line" || bad "agy over cap: stderr: $(cat "$d/review.err")"
-has "agy over cap: names size, cap and override" "$(cat "$d/review.err")" \
-  "merge-gate: refused: gate prompt is $size bytes, over the agy cap of 150000 bytes (agy silently stops reading near 190 KB); set CONCLAVE_ARGON_MAX_BYTES to override"
-[ -z "$(grep '^agy ' "$FAKE_RUN_LOG")" ] && ok "agy over cap: agy not called" || bad "agy over cap: agy called"
-[ ! -e "$d/out/gate-verdict.json" ] && [ ! -e "$d/out/gate.md" ] && ok "agy over cap: no verdict written" || bad "agy over cap: verdict written"
-"$ROOT/scripts/merge-gate.sh" merge "$PR" "$d/out" > "$d/merge.out" 2>&1; merge_rc=$?
-[ "$merge_rc" != 0 ] && ok "agy over cap: merge refuses" || bad "agy over cap: merge rc 0"
+# agy silently stops reading near 190 KB, so over CONCLAVE_ARGON_MAX_BYTES agy
+# never runs. The gate asks seat-usage again without agy's vendor, keeping the
+# builder vendor, and reviews on the seat that route names.
+overcap() { # $1 case; FAKE_ROUTE_EXCLUDED answers the re-ask
+  local d="$T/$1"; mkdir -p "$d"; printf '%s\n' "$ANSWER" > "$FAKE_REPLY"
+  : > "$FAKE_RUN_LOG"; : > "$FAKE_SU_LOG"; : > "$FAKE_STDIN"; : > "$FAKE_GH_LOG"
+  "$ROOT/scripts/merge-gate.sh" review "$R" main big "$PR" "$d/out" xai > "$d/review.out" 2> "$d/review.err"; review_rc=$?
+  size=$(wc -c < "$d/out/gate-prompt.md"); su_log="$(cat "$FAKE_SU_LOG")"; run_log="$(cat "$FAKE_RUN_LOG")"
+  review_out="$(cat "$d/review.out")"; review_err="$(cat "$d/review.err")"
+  "$ROOT/scripts/merge-gate.sh" merge "$PR" "$d/out" > "$d/merge.out" 2>&1; merge_rc=$?
+  gh_log="$(cat "$FAKE_GH_LOG")"
+}
+reason_of() { echo "gate prompt is $size bytes, over the agy cap of 150000 bytes (agy silently stops reading near 190 KB)"; }
+
+# (1) Over cap with an eligible non-google seat: swap, log it, review, merge.
+FAKE_ROUTE_EXCLUDED="$(route astra openai gpt-6-astra '["codex","exec","-m","gpt-6-astra"]' \
+  '[{"family":"argon","code":"excluded_vendor"},{"family":"muse","code":"capped"},{"family":"astra-stale","code":"stale"}]')" \
+  overcap agy-swap
+d="$T/agy-swap"
+[ "$review_rc" = 0 ] && ok "swap: review rc 0" || bad "swap: review rc $review_rc: $review_out $review_err"
+[ -z "$(grep '^agy ' "$FAKE_RUN_LOG")" ] && ok "swap: agy not called" || bad "swap: agy called"
+has "swap: codex reviewed" "$run_log" "codex exec -m gpt-6-astra"
+has "swap: first ask keeps the builder vendor" "$(sed -n 1p "$FAKE_SU_LOG")" "seat-usage --route review --cached --json --builder-vendor xai"
+has "swap: re-ask keeps the builder vendor and excludes google" "$(sed -n 2p "$FAKE_SU_LOG")" \
+  "seat-usage --route review --cached --json --builder-vendor xai --exclude-vendor google"
+[ "$(wc -l < "$FAKE_SU_LOG")" = 2 ] && ok "swap: two seat-usage asks" || bad "swap: asks: $su_log"
+has "swap: says why" "$review_out" "merge-gate: $(reason_of); asking seat-usage again without google"
+has "swap: says where" "$review_out" "merge-gate: swapped reviewer to gpt-6-astra on codex"
+jq -e --arg r "$(reason_of)" '.[0].swap == {from: {runner: "agy", model: "gemini-4-argon-high", vendor: "google"}, excluded_vendor: "google", reason: $r}
+  and .[0].reviewers[0].vendor == "openai" and .[0].builder_vendor == "xai" and .[0].vendor_source == "caller"' \
+  "$d/out/gate-route.json" > /dev/null && ok "swap: gate-route.json records the swap and the new reviewer" \
+  || bad "swap: gate-route.json: $(cat "$d/out/gate-route.json")"
+jq -e '.[0].reviewers[0].vendor == "google" and (.[0].swap == null)' "$d/out/gate-route-first.json" > /dev/null \
+  && ok "swap: the first route is kept" || bad "swap: first route: $(cat "$d/out/gate-route-first.json" 2>/dev/null)"
+has "swap: gate.md notes the swap" "$(cat "$d/out/gate.md")" \
+  "merge-gate swap: reviewer gemini-4-argon-high on agy (google) -> gpt-6-astra on codex; $(reason_of); seat-usage asked again with --exclude-vendor google and --builder-vendor xai"
+has "swap: verdict still parses" "$(cat "$d/out/gate-verdict.json")" '"verdict": "approve"'
+[ "$merge_rc" = 0 ] && ok "swap: merge rc 0" || bad "swap: merge rc $merge_rc: $(cat "$d/merge.out")"
+has "swap: merged at the reviewed sha" "$gh_log" "--squash --match-head-commit $(git -C "$R" rev-parse big)"
+
+# (2) Over cap and nothing fresh and uncapped is left: ask Ryan (exit 4), no reviewer, no verdict.
+ASK='[{"role": "review", "mode": "ask", "builder_vendor": "xai", "runner": null, "reason": "need 1 review seat(s) outside xai, google; 0 eligible: ask Ryan", "reviewers": [], "skipped": [{"family":"astra","code":"stale"},{"family":"muse","code":"capped"}]}]'
+FAKE_ROUTE_EXCLUDED="$ASK" overcap agy-ask
+d="$T/agy-ask"
+[ "$review_rc" = 4 ] && ok "ask: review rc 4" || bad "ask: review rc $review_rc: $review_err"
+[ "$(wc -l < "$d/review.err")" = 1 ] && ok "ask: one stderr line" || bad "ask: stderr: $review_err"
+has "ask: asks Ryan and says why" "$review_err" \
+  "merge-gate: ask Ryan: $(reason_of), and with google excluded there is no eligible reviewer: need 1 review seat(s) outside xai, google; 0 eligible: ask Ryan"
+hasnt "ask: not a plain refusal" "$review_err" "refused"
+[ -z "$run_log" ] && ok "ask: no reviewer ran" || bad "ask: ran: $run_log"
+[ ! -e "$d/out/gate-verdict.json" ] && [ ! -e "$d/out/gate.md" ] && ok "ask: no verdict written" || bad "ask: verdict written"
+jq -e '.[0].mode == "ask" and .[0].swap.excluded_vendor == "google"' "$d/out/gate-route.json" > /dev/null \
+  && ok "ask: gate-route.json records the attempted swap" || bad "ask: gate-route.json: $(cat "$d/out/gate-route.json")"
+[ "$merge_rc" != 0 ] && ok "ask: merge refuses" || bad "ask: merge rc 0"
+hasnt "ask: no gh pr merge" "$gh_log" "pr merge"
+
+# (3) A re-ask that still names agy refuses (exit 3) instead of truncating.
+overcap agy-again
+[ "$review_rc" = 3 ] && ok "agy again: review rc 3" || bad "agy again: review rc $review_rc"
+has "agy again: says so" "$review_err" "merge-gate: refused: $(reason_of), and the route without google still names agy"
+[ -z "$(grep '^agy ' "$FAKE_RUN_LOG")" ] && ok "agy again: agy not called" || bad "agy again: agy called"
+[ "$merge_rc" != 0 ] && ok "agy again: merge refuses" || bad "agy again: merge rc 0"
 d="$T/agy-undercap"; mkdir -p "$d"; : > "$FAKE_RUN_LOG"
 CONCLAVE_ARGON_MAX_BYTES=$size "$ROOT/scripts/merge-gate.sh" review "$R" main big "$PR" "$d/out" xai > "$d/review.out" 2>&1; review_rc=$?
 [ "$review_rc" = 0 ] && ok "agy at the cap: review rc 0" || bad "agy at the cap: review rc $review_rc: $(cat "$d/review.out")"
