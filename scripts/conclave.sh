@@ -2440,18 +2440,6 @@ argon_print_timeout() {
   printf '%s\n' "$t"
 }
 
-argon_max_bytes() {
-  # The review packet cap in bytes. agy silently stops reading near 190 KB.
-  local t
-  t="$(conclave_env ARGON_MAX_BYTES 150000)"
-  # Not an integer >= 1 (00 included) is the default. 10# reads 010 as ten.
-  case "$t" in
-    ''|*[!0-9]*) t=150000 ;;
-    *) t=$((10#$t)); [ "$t" -ge 1 ] || t=150000 ;;
-  esac
-  printf '%s\n' "$t"
-}
-
 argon_unsupported_reason() {
   # $1 is the kind. Audit still skips the leg. Review seats it.
   if [ "$1" = "review" ]; then

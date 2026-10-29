@@ -26,12 +26,14 @@
 # (MAX_ARG_STRLEN) makes execve fail with "Argument list too long", and a
 # diff with 40 lines of context passes that. agy and codex read it on stdin,
 # cursor-agent and claude read it on stdin when given no prompt argument, and
-# muse reads --prompt-file. It writes gate-prompt.md, gate.stream.jsonl (the
-# reviewer's raw output), gate.err, gate.md (the reviewer's answer),
-# gate-head.txt (the reviewed head sha), and gate-verdict.json (the parsed
-# verdict line, approve / request-changes / comment, and the parsed one_way
-# line) under <out_dir>. Given a builder_bot (the bot that built the PR), it
-# also writes builder-bot.txt.
+# muse reads --prompt-file. agy silently stops reading near 190 KB, so for agy
+# a prompt over CONCLAVE_ARGON_MAX_BYTES (default 150000, the review Argon
+# packet cap) refuses (exit 3, one line) before agy runs. It writes
+# gate-prompt.md, gate.stream.jsonl (the reviewer's raw output), gate.err,
+# gate.md (the reviewer's answer), gate-head.txt (the reviewed head sha), and
+# gate-verdict.json (the parsed verdict line, approve / request-changes /
+# comment, and the parsed one_way line) under <out_dir>. Given a builder_bot
+# (the bot that built the PR), it also writes builder-bot.txt.
 #
 # merge refuses, nonzero, unless gate-verdict.json records verdict approve and
 # gate.md still parses to that verdict (a missing, null, or unknown verdict
@@ -52,6 +54,7 @@
 # binary seat-usage names; the tests stub them all.
 set -uo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+. "$ROOT/scripts/conclave-env.sh"
 GH="${MERGE_GATE_GH:-/usr/local/bin/gh}"
 SEAT_USAGE="${MERGE_GATE_SEAT_USAGE:-seat-usage}"
 usage() { sed -n '4,5p' "${BASH_SOURCE[0]}" | sed 's/^# *//' >&2; exit 2; }
@@ -168,6 +171,11 @@ review() {
     echo; echo "## Diff ($base...$head)"; echo '```diff'; printf '%s\n' "$diff"; echo '```'
   } > "$P/PROMPT.md"
   cp "$P/PROMPT.md" "$out/gate-prompt.md"
+  if [ "$name" = agy ]; then
+    local size cap
+    size=$(wc -c < "$P/PROMPT.md") cap=$(argon_max_bytes)
+    [ "$size" -le "$cap" ] || refuse "gate prompt is $size bytes, over the agy cap of $cap bytes (agy silently stops reading near 190 KB); set CONCLAVE_ARGON_MAX_BYTES to override"
+  fi
   printf '%s\n' "$headsha" > "$out/gate-head.txt"
   bot=$(printf '%s' "$bot" | tr -d '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
   [ -z "$bot" ] || printf '%s\n' "$bot" > "$out/builder-bot.txt"
