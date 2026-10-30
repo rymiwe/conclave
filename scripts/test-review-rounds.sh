@@ -304,7 +304,7 @@ jq -n '{pr_url: "https://github.com/example/app/pull/7", rounds: [range(1;4) |
 cat >"$work/bin/gh" <<'SH'
 #!/bin/sh
 [ "$1 $2" = "pr view" ] || exit 1
-case "$*" in *--json\ number*) ;; *) echo '[]'; exit 0 ;; esac
+case "$*" in *--json\ number*) ;; *) echo '{}'; exit 0 ;; esac
 printf '{"number":7,"title":"t","url":"https://github.com/example/app/pull/7","headRefName":"feature","baseRefName":"master","state":"OPEN","headRefOid":"%040d","additions":1,"deletions":0,"changedFiles":1}\n' 9
 SH
 id="test-rounds-cli-$$"
@@ -323,6 +323,58 @@ tail -3 "$work/cli.out"
 [ "$rc" -eq 3 ] || fail "conclave.sh round 4 exit $rc: $(cat "$work/cli.out")"
 [ -s "$cli/github.com_example_app_7.park.md" ] || fail "conclave.sh round 4 wrote no park note"
 grep -q 'refused round 4' "$work/cli.out" || fail "conclave.sh round 4 message"
+
+# A capped PR with no --voters. The stub lineup demands a downgrade approval,
+# so a run that reached seating would die there. The cap must refuse first.
+cap="$work/rounds-cap"
+mkdir -p "$cap"
+cp "$cli/github.com_example_app_7.json" "$cap/"
+cat >"$work/bin/seat-usage" <<EOF2
+#!/bin/sh
+echo "seat-usage \$*" >>"$work/seat-calls"
+printf '%s\n' '[{"role":"lineup","mode":"default","reason":"stub","lineup":{"voters":[{"family":"astra","seat":"chatgpt","vendor":"openai"}]},"downgrade":{"family":"fable","reason":"stub: approve a downgraded leg"}}]'
+EOF2
+chmod +x "$work/bin/seat-usage"
+id="test-rounds-cap-$$"
+mkdir -p "$ROOT/tmp/council/$id"
+printf 'kind: review\n\nReview the change.\n' >"$ROOT/tmp/council/$id/brief.md"
+cap_runs="$work/cap-runs.jsonl"
+cap_run() {
+  env -u COUNCIL_CODEX_BIN -u COUNCIL_SEAT_USAGE \
+    HOME="$work/home" \
+    SEAT_USAGE_RUNS="$cap_runs" \
+    CONCLAVE_CODEX_BIN="$work/bin/codex" \
+    CONCLAVE_MUSE_CATALOG="$work/muse-catalog.json" \
+    CONCLAVE_SEAT_USAGE="$work/bin/seat-usage" \
+    CONCLAVE_ROUNDS_DIR="$cap" CONCLAVE_SKIP_UPDATE_CHECK=1 CONCLAVE_JEV_OP=/bin/false \
+    "$ROOT/scripts/conclave.sh" "$id" --repo "$REPO" --pr 7 --delta "$@" >"$work/cap.out" 2>&1
+}
+rc=0; cap_run --dry-run || rc=$?
+printf -- '--- conclave.sh capped PR, --dry-run: exit %s\n' "$rc"
+[ "$rc" -eq 3 ] || fail "capped dry-run exit $rc: $(cat "$work/cap.out")"
+[ ! -e "$cap_runs" ] || fail "capped dry-run wrote the runs log: $(cat "$cap_runs")"
+rc=0; cap_run || rc=$?
+rm -rf "$ROOT/tmp/council/$id"
+printf -- '--- conclave.sh capped PR, no --voters: exit %s\n' "$rc"
+tail -3 "$work/cap.out"
+[ "$rc" -eq 3 ] || fail "capped PR exit $rc: $(cat "$work/cap.out")"
+[ -s "$cap/github.com_example_app_7.park.md" ] || fail "capped PR wrote no park note"
+grep -q 'refused round 4' "$work/cap.out" || fail "capped PR message"
+[ ! -e "$work/seat-calls" ] || fail "capped PR reached seat-usage: $(cat "$work/seat-calls")"
+if grep -q 'approve a downgraded leg' "$work/cap.out"; then fail "capped PR asked for a downgrade"; fi
+[ -s "$cap_runs" ] || fail "capped PR wrote no runs log"
+printf -- '--- capped PR runs log\n'; cat "$cap_runs"
+[ "$(wc -l <"$cap_runs")" -eq 1 ] || fail "capped PR runs log: $(cat "$cap_runs")"
+jq -e --arg id "$id" --arg head "$(printf '%040d' 9)" \
+  '.phase == "parked" and .pr_url == "https://github.com/example/app/pull/7" and .head == $head and .task_id == $id and (.run_id | startswith($id + "-"))' \
+  "$cap_runs" >/dev/null || fail "capped PR parked line: $(cat "$cap_runs")"
+
+# The same gate on a PR under the cap writes nothing. Not in a subshell: the
+# writer skips subshells, which would pass this for the wrong reason.
+ID=under FLAG_PR=7 FLAG_DELTA=0 FLAG_BASE="" FLAG_HEAD="" FLAG_WHOLE=0 HEADER_PR="" HEADER_BRANCH="" DRY_RUN=0
+DIR="$work/council/under"
+SEAT_USAGE_RUNS="$work/under-runs.jsonl" CONCLAVE_ROUNDS_DIR="$work/rounds-under" review_rounds_cap_gate >/dev/null
+[ ! -e "$work/under-runs.jsonl" ] || fail "a run under the cap wrote the runs log: $(cat "$work/under-runs.jsonl")"
 
 # review_run with review_launch replaced, so no voter leg starts. The lineup
 # still asks claude and cursor-agent for --version; those hit the stubs.
