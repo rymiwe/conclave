@@ -10,6 +10,8 @@ joined by run_id. It does not call a vendor and does not read the usage cache.
            When the Muse shadow leg was armed, also whether its verdict
            agreed with the Decision. The verdict text is not stored.
   review   accepted, duplicates, and wrong findings per voter, and the decision
+  parked   a pull request at the round cap, refused before seating: PR url and
+           head. It is that run's only line, with no before or after.
 
 A missing lineup or host file leaves those fields "unknown". An explicit
 JSON null stays null. An invalid review file writes nothing and exits 2.
@@ -292,6 +294,10 @@ def build(args):
             return None, err
         row["review"] = review
         return row, None
+    if args.phase == "parked":
+        row["pr_url"] = _text(args.pr_url)
+        row["head"] = _text(args.head)
+        return row, None
     return None, f"unknown phase {args.phase}"
 
 
@@ -328,7 +334,7 @@ def append(path, row):
 
 def main(argv):
     parser = argparse.ArgumentParser(description="Append one Conclave outcome phase.")
-    parser.add_argument("--phase", required=True, choices=("before", "after", "review"))
+    parser.add_argument("--phase", required=True, choices=("before", "after", "review", "parked"))
     parser.add_argument("--path", required=True)
     parser.add_argument("--run-id", default="")
     parser.add_argument("--task-id", default="")
@@ -341,6 +347,8 @@ def main(argv):
     parser.add_argument("--host-file", default="")
     parser.add_argument("--review-file", default="")
     parser.add_argument("--voters", default="")
+    parser.add_argument("--pr-url", default="")
+    parser.add_argument("--head", default="")
     parser.add_argument("--ran-claude-model", default="")
     parser.add_argument("--ran-claude-effort", default="")
     parser.add_argument("--ran-codex-model", default="")

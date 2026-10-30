@@ -3476,6 +3476,10 @@ council_record_outcome() {
     || true
 }
 
+council_new_run_id() {
+  printf '%s-%s\n' "${ID:-unknown}" "$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+}
+
 council_begin_run() {
   # Real ballot only. Dry-run, --findings, --verdicts, and --judge return
   # before this is called. A sourced test never calls it.
@@ -3490,7 +3494,7 @@ council_begin_run() {
   OUTCOME_BEFORE_DONE=0
   OUTCOME_AFTER_DONE=0
   RUN_STARTED_TS="$(date +%s)"
-  RUN_ID="${ID:-unknown}-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  RUN_ID="$(council_new_run_id)"
   printf 'run_id: %s\n' "$RUN_ID"
   council_record_outcome before
 }
@@ -3509,6 +3513,21 @@ council_record_review() {
     --kind "${KIND:-}" \
     --difficulty "${DIFFICULTY:-}" \
     --review-file "$review_file"
+}
+
+# A capped PR exits before council_begin_run, so this is that run's only line.
+council_record_parked() {
+  [ "${BASH_SUBSHELL:-0}" -eq 0 ] || return 0
+  python3 "$ROOT/scripts/record-run.py" \
+    --phase parked \
+    --path "$(council_runs_path)" \
+    --run-id "$(council_new_run_id)" \
+    --task-id "${ID:-}" \
+    --kind "${KIND:-}" \
+    --difficulty "${DIFFICULTY:-}" \
+    --pr-url "${PR_URL:-}" \
+    --head "${PR_OID:-}" \
+    || true
 }
 
 # --- args ---

@@ -1162,6 +1162,8 @@ review_rounds_plan() {
   # REVIEW_PLANNED_ROUNDS, and REVIEW_DELTA_BASE on --delta. Advisory: it never writes the round log.
   # A new round past the cap exits 3 here, before any worktree or leg.
   # $1 = dry-run previews without writing the park note.
+  # $1 = gate is the launch check before the lineup: a refusal there also writes
+  # the parked runs-log line, since that run never reaches council_begin_run.
   # $1 = recheck runs after the worktree build, before the legs: it also exits 3
   # when another ballot recorded since this plan.
   local mode=pr out rc=0 base rerun latest recorded
@@ -1173,7 +1175,11 @@ review_rounds_plan() {
   out="$(python3 "$REVIEW_KIND_DIR/review_rounds.py" "${args[@]}")" || rc=$?
   case "$rc" in
     0) ;;
-    3) log_err "round refused: see $(review_rounds_dir)"; exit 3 ;;
+    3)
+      [ "${1:-}" = gate ] && council_record_parked
+      log_err "round refused: see $(review_rounds_dir)"
+      exit 3
+      ;;
     *) die "review rounds plan failed (exit $rc)" ;;
   esac
   [ "${1:-}" = recheck ] && return 0
@@ -1191,7 +1197,7 @@ review_rounds_plan() {
 review_rounds_cap_gate() {
   # Before the lineup: a capped PR exits 3 without seating anyone.
   # review_run plans again with the full PR facts. A failed lookup stays its failure.
-  local mode="" json
+  local mode=gate json
   [ -n "$(review_pr_number)" ] || return 0
   review_target_mode
   json="$(cd "$REPO" && gh pr view "$FLAG_PR" --json number,url,headRefName,headRefOid 2>/dev/null)" || return 0
