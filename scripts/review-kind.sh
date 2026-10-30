@@ -1983,17 +1983,24 @@ review_toolchain_bins() {
   printf '%s' "$bins"
 }
 
+review_codex_title() {
+  case "$REVIEW_MODE" in
+    pr)
+      if [ -n "${REVIEW_DELTA_BASE:-}" ]; then
+        printf '%s, changes since %s\n' "$FLAG_PR" "${REVIEW_DELTA_BASE:0:12}"
+      else
+        printf '%s\n' "$FLAG_PR"
+      fi
+      ;;
+    refs) printf '%s against %s\n' "$FLAG_HEAD" "$FLAG_BASE" ;;
+    *) printf 'whole codebase\n' ;;
+  esac
+}
+
 review_run_codex() {
   local wt="$1" ec title bins rules extra=""
   local out="$DIR/voter-codex.md" err="$DIR/voter-codex.err"
-  case "$REVIEW_MODE" in
-    pr) title="$FLAG_PR" ;;
-    refs) title="$FLAG_HEAD against $FLAG_BASE" ;;
-  esac
-  case "$REVIEW_DELTA_BASE" in
-    ?*) title="$FLAG_PR, changes since ${REVIEW_DELTA_BASE:0:12}" ;;
-    *) title="whole codebase" ;;
-  esac
+  title="$(review_codex_title)"
   if [ ! -x "$CODEX" ]; then
     echo "codex: resolver binary is not executable: $CODEX" >"$DIR/voter-codex.fail"
     return 1

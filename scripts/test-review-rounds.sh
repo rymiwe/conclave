@@ -147,4 +147,40 @@ rc=0; ( review_round p3 1 ) >"$work/p3.out" 2>&1 || rc=$?
 [ "$rc" -ne 0 ] && grep -q "fork point from master moved" "$work/p3.out" || fail "rebased delta: $rc $(cat "$work/p3.out")"
 grep -q "Revision recipes" "$work/p3.out" || fail "rebased delta names the manual recipe"
 
+# The Astra title names the target in every mode.
+REVIEW_MODE=pr FLAG_PR=7 REVIEW_DELTA_BASE=""
+[ "$(review_codex_title)" = "7" ] || fail "pr title: $(review_codex_title)"
+REVIEW_DELTA_BASE=0123456789abcdef
+[ "$(review_codex_title)" = "7, changes since 0123456789ab" ] || fail "delta title: $(review_codex_title)"
+REVIEW_MODE=refs FLAG_HEAD=topic FLAG_BASE=master REVIEW_DELTA_BASE=""
+[ "$(review_codex_title)" = "topic against master" ] || fail "refs title: $(review_codex_title)"
+REVIEW_MODE=whole
+[ "$(review_codex_title)" = "whole codebase" ] || fail "whole title: $(review_codex_title)"
+
+# The real entry point. gh names a head the repo lacks, so if the cap ever
+# failed to refuse, the run would die at the fetch, before any leg.
+cli="$work/rounds3"
+mkdir -p "$cli"
+jq -n '{pr_url: "https://github.com/example/app/pull/7", rounds: [range(1;4) |
+  {round: ., ballot: "cli\(.)", mode: "pr", base: ("0" * 40), head: ("\(.)" * 40), carried_open: []}]}' \
+  >"$cli/github.com_example_app_7.json"
+cat >"$work/bin/gh" <<'SH'
+#!/bin/sh
+[ "$1 $2" = "pr view" ] || exit 1
+case "$*" in *--json\ number*) ;; *) echo '[]'; exit 0 ;; esac
+printf '{"number":7,"title":"t","url":"https://github.com/example/app/pull/7","headRefName":"feature","baseRefName":"master","state":"OPEN","headRefOid":"%040d","additions":1,"deletions":0,"changedFiles":1}\n' 9
+SH
+id="test-rounds-cli-$$"
+mkdir -p "$ROOT/tmp/council/$id"
+printf 'kind: review\n\nReview the change.\n' >"$ROOT/tmp/council/$id/brief.md"
+rc=0
+CONCLAVE_ROUNDS_DIR="$cli" CONCLAVE_PREFLIGHT=0 CONCLAVE_SKIP_UPDATE_CHECK=1 CONCLAVE_JEV_OP=/bin/false \
+  "$ROOT/scripts/conclave.sh" "$id" --repo "$REPO" --pr 7 --delta --voters claude,codex >"$work/cli.out" 2>&1 || rc=$?
+rm -rf "$ROOT/tmp/council/$id"
+printf -- '--- conclave.sh round 4: exit %s\n' "$rc"
+tail -3 "$work/cli.out"
+[ "$rc" -eq 3 ] || fail "conclave.sh round 4 exit $rc: $(cat "$work/cli.out")"
+[ -s "$cli/github.com_example_app_7.park.md" ] || fail "conclave.sh round 4 wrote no park note"
+grep -q 'refused round 4' "$work/cli.out" || fail "conclave.sh round 4 message"
+
 echo "test-review-rounds: all passed"
