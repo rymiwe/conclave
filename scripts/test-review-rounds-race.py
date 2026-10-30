@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Review rounds on one synthetic PR: concurrent ballots, stale ballots, and a
-rerun of an earlier round after later rounds exist. No git and no gh: review_rounds.py only."""
+"""Review rounds on synthetic PRs: concurrent ballots, stale ballots, a rerun
+of an earlier round, and a ballot id reused on another pull request.
+No git and no gh: review_rounds.py only."""
 
 import json
 import os
@@ -186,6 +187,53 @@ def seed(w, count):
     (w / "rounds" / f"{KEY}.json").write_text(json.dumps({"pr_url": URL, "rounds": rounds}))
 
 
+def isolated_env(w):
+    """A temp HOME and a PATH of stubs. review_rounds.py must not reach a real CLI."""
+    home = w / "home"
+    stub = w / "bin"
+    home.mkdir()
+    stub.mkdir()
+    for name in ("gh", "codex", "claude", "grok", "cursor-agent"):
+        path = stub / name
+        path.write_text("#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >>\"$HOME/vendor-calls\"\nexit 1\n")
+        path.chmod(0o755)
+    return {"HOME": str(home), "PATH": str(stub), "LANG": "C"}
+
+
+def reused_ballot():
+    """One ballot id, two pull requests, one head. Replay keeps this PR's snapshot."""
+    head = "a" * 40
+    url_b = "https://github.com/example/app/pull/8"
+    with tempfile.TemporaryDirectory() as t:
+        w = Path(t)
+        (w / "rounds").mkdir()
+        own = {"target": "pr 7", "findings": [
+            {"id": "own", "claim": "this pull request drops a row", "file": "a.txt", "line": 1}]}
+        (w / "rounds" / f"{KEY}.json").write_text(json.dumps({"pr_url": URL, "rounds": [{
+            "round": 1, "ballot": "shared", "mode": "pr", "base": "0" * 40, "head": head,
+            "findings_doc": own}]}))
+        ballot = prep(w, "shared")
+        (ballot / "round.json").write_text(json.dumps({
+            "pr_url": url_b, "round": 1, "mode": "pr", "base": "0" * 40, "head": head}))
+        (ballot / "findings.json").write_text(json.dumps({
+            "target": "pr 8", "findings": [
+                {"id": "other", "claim": "the other pull request drops a row", "file": "b.txt", "line": 4}]}))
+        env = isolated_env(w)
+        rec = subprocess.run(record_argv(w, "next", "b" * 40, "pr", "0" * 40, head, 1),
+                             capture_output=True, text=True, env=env)
+        if rec.returncode:
+            fail(f"record of the next round: {rec.returncode} {rec.stderr}")
+        if (w / "home" / "vendor-calls").exists():
+            fail(f"a vendor CLI ran: {(w / 'home' / 'vendor-calls').read_text()}")
+        carried = json.loads((w / "council" / "next" / "round.json").read_text())["carried_open"]
+        if [c["id"] for c in carried] != ["r1-own"] or any("other pull request" in c["claim"] for c in carried):
+            fail(f"reused ballot replayed the other pull request: {carried}")
+        kept = log(w)["rounds"][0]["findings_doc"]["findings"][0]
+        if kept["id"] != "own" or kept["claim"] != "this pull request drops a row":
+            fail(f"replay overwrote this pull request's findings snapshot: {kept}")
+        print("--- reused ballot names another pull request: carried r1-own, snapshot kept")
+
+
 def stale():
     """A ballot planned at round 2, then sat while round 2 landed: it cannot take
     round 3, however old it is. No clock or pid decides this."""
@@ -206,6 +254,7 @@ def stale():
 
 
 def main():
+    reused_ballot()
     refused = None
     for fn in (race_pr, race_delta, race_same_head, race_cap):
         for _ in range(TRIALS):
