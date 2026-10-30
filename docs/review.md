@@ -838,23 +838,29 @@ a later round's `findings.json` lists its id (`r<round>-<id>`) under
 `findings.json` in order, so a rerun of an earlier round counts in later rounds
 and in the park note.
 
-Ballots on one PR take a per-PR lock around the round log, so concurrent ballots
-get distinct rounds. A `--delta` ballot whose planned base is no longer the last
-recorded head exits before any leg: another ballot recorded first. Rerun it with
-a new ballot id.
+The round log holds completed rounds only. The run records its round after the
+legs, under a per-PR lock, and nothing else adds a round. A round counts, and the
+delta base moves, only when at least one reviewer returned a ballot. A launch
+where every leg failed records nothing: the count and the delta base stay put.
 
-Plan reserves a slot in the round log, so with 2 rounds recorded, a second
-concurrent ballot hits the cap before it builds a worktree. Record releases the
-reservation. A crashed ballot's reservation goes stale when its `conclave.sh`
-process is gone, or after one hour, and then it stops counting.
+The plan step is an advisory read and holds no slot. It runs before any worktree,
+and again after the worktree build, just before the legs. The second check also
+refuses when another ballot recorded since the first.
 
-The cap is 3 rounds per PR. Recorded rounds plus other ballots' live
-reservations count against it. A refusal exits 3 and writes `<key>.park.md`
-beside the round log: the open findings and why it stopped. Plan refuses before
-any worktree is built. Record refuses the same way if a ballot's reservation
-went stale and another ballot took the slot. Nothing is posted. A PR body links to the round log or the park note;
-it does not list each round. Getting past the cap is a human decision. Do not
-loosen the findings gate to reach clean sooner.
+The cap is 3 rounds per PR. A refusal exits 3 and writes `<key>.park.md` beside
+the round log: why it stopped, the open findings, and the rounds. Nothing is
+posted.
+
+Concurrent ballots can both pass plan, so record decides the race. The first to
+record wins. A later ballot is refused when the cap is reached or the latest
+recorded head moved since its plan. It records nothing, exits 3, and writes
+`round-refused.md` in the ballot and the park note. Both name the winning round
+and its head. Its reports stay on disk. Rerun with a new ballot id, if the cap
+allows.
+
+A PR body links to the round log or the park note; it does not list each round.
+Getting past the cap is a human decision. Do not loosen the findings gate to
+reach clean sooner.
 
 `--delta` refuses when the PR's fork point from its base moved since the last
 reviewed head (a rebase onto a newer base, or a merge from it). Then

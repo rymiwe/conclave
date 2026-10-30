@@ -2,34 +2,31 @@
 """Per-PR review rounds for kind review: the round log, the delta base, and the cap.
 
 One JSON log per pull request under the rounds dir (CONCLAVE_ROUNDS_DIR,
-default tmp/council/rounds/). A round is one (ballot id, reviewed head) pair.
-A rerun of the same ballot at the same head is the same round.
+default tmp/council/rounds/). A round is one (ballot id, reviewed head) pair that
+completed: at least one reviewer returned a ballot. A rerun of the same ballot at
+the same head is the same round. Only completed rounds count against the cap or
+move the delta base, so a launch that failed outright changes nothing.
 
   plan     --rounds-dir D --pr-url U --ballot B --head H --mode pr|delta [--council-dir C]
-           [--owner-pid P] [--dry-run]
-           prints "<round> <delta base or -> <rerun 0|1>" and reserves a slot for a new
-           round (not on --dry-run). The round number is the next one free in the log;
-           record assigns the final number. A new round past the cap exits 3 and writes
-           <key>.park.md (not on --dry-run).
+           [--planned-latest H|-] [--dry-run]
+           prints "<round> <delta base or -> <rerun 0|1> <latest recorded head or ->".
+           An advisory check: it never writes the log or holds a slot, and record
+           assigns the final number. It refuses a new round past the cap. With
+           --planned-latest it also refuses when the latest recorded head moved.
+           Both refusals exit 3 and write <key>.park.md (not on --dry-run).
   record   --rounds-dir D --pr-url U --ballot B --ballot-dir DIR --council-dir C
-           --mode M --base SHA --head SHA --files-file F
+           --mode M --base SHA --head SHA --planned-latest H|- --files-file F
            appends the round and writes DIR/round.json and DIR/carried-findings.md.
-           A new delta round must name the last recorded head as --base, or exit 2.
-           A new round past the cap exits 3 and writes <key>.park.md. Every outcome
-           releases this ballot's reservation.
+           A new round past the cap, or one whose planned latest head is no longer
+           the latest, records nothing, exits 3, and writes <key>.park.md and
+           DIR/round-refused.md, which name the winning round and its head.
   snapshot --rounds-dir D --ballot-dir DIR
            copies DIR/findings.json into that round's log entry. A fresh run of a
            ballot deletes findings.json, so conclave.sh calls this first.
 
-Each command holds <key>.lock for its whole read-modify-write of the log, so two
-ballots on one pull request cannot lose an entry. A dry run only reads and takes
+Record and snapshot hold <key>.lock for their whole read-modify-write of the log,
+so two ballots on one pull request cannot lose an entry. Plan only reads and takes
 no lock: the log is replaced atomically.
-
-A reservation holds one slot against the cap from plan to record, so a concurrent
-ballot hits the cap before it builds a worktree. It lives in the log's
-"reservations" list. It goes stale when its owner process is gone, or after
-RESERVATION_TTL seconds, whichever comes first. Plan ignores stale reservations and
-drops them on its next write, so a crashed ballot does not block the PR.
 """
 from __future__ import annotations
 
@@ -41,14 +38,11 @@ import os
 import re
 import sys
 import tempfile
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 MAX_ROUNDS = 3
 MODES = ("pr", "delta")
-# Plan to record covers the fetch and the worktree build, not the legs.
-RESERVATION_TTL = 3600
 
 
 class Refused(Exception):
@@ -170,107 +164,77 @@ def findings_md(findings: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def owner_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        pass
-    return True
-
-
-def live_reservations(doc: dict, ballot: str) -> list[dict]:
-    """Other ballots' reservations that still hold a slot."""
-    now = time.time()
-    return [r for r in doc.get("reservations") or []
-            if r["ballot"] != ballot and now - r["reserved_at"] < RESERVATION_TTL and owner_alive(r["owner_pid"])]
-
-
-def release_reservation(rounds_dir: Path, url: str, ballot: str) -> None:
-    path = log_path(rounds_dir, url)
-    doc = load_log(path, url)
-    kept = [r for r in doc.get("reservations") or [] if r["ballot"] != ballot]
-    if len(kept) != len(doc.get("reservations") or []):
-        doc["reservations"] = kept
-        write_json(path, doc)
-
-
-def park_note(doc: dict, ballot: str, head: str, council_dir: Path | None, held: list[dict]) -> str:
-    last = doc["rounds"][-1] if doc["rounds"] else None
+def park_note(doc: dict, reason: str, council_dir: Path | None) -> str:
+    last = doc["rounds"][-1]
     still = open_findings(doc["rounds"], council_dir)
     rows = "\n".join(
         f"| {r['round']} | {r['ballot']} | {r['mode']} | {r['base'][:12]}..{r['head'][:12]} |"
         for r in doc["rounds"]
     )
-    known = "" if last is None or round_findings(last, council_dir) is not None else (
+    known = "" if round_findings(last, council_dir) is not None else (
         f"\nRound {last['round']} has no findings.json yet, so its own findings are not listed.\n")
-    open_after = f"after round {last['round']}" if last else "with no round recorded"
-    reserved = f", and {', '.join(r['ballot'] for r in held)} holds a reservation" if held else ""
     return (
         f"# Parked: {doc['pr_url']}\n\n"
-        f"Stopped: round {len(doc['rounds']) + len(held) + 1} refused (ballot {ballot}, head {head[:12]}). "
-        f"The cap is {MAX_ROUNDS} review rounds per pull request, and {len(doc['rounds'])} ran{reserved}. "
-        f"{len(still)} finding(s) are still open {open_after}.\n\n"
+        f"Stopped: {reason} "
+        f"{len(still)} finding(s) are still open after round {last['round']}.\n\n"
         f"A human decides what happens next. Nothing was posted.\n\n"
         f"## Unresolved findings\n\n{findings_md(still)}{known}\n"
         f"## Rounds\n\n| round | ballot | mode | reviewed |\n|---|---|---|---|\n{rows}\n"
     )
 
 
-def refuse_cap(a, doc: dict, council_dir: Path | None, held: list[dict], dry_run: bool = False) -> None:
-    rounds_dir = Path(a.rounds_dir)
-    msg = (f"review rounds: refused round {len(doc['rounds']) + len(held) + 1} on {a.pr_url}: "
-           f"the cap is {MAX_ROUNDS} rounds per pull request")
+def refusal(a, rounds: list[dict]) -> str | None:
+    """Why this ballot may not take a new round, or None."""
+    last = rounds[-1] if rounds else None
+    won = last and f"round {last['round']} (ballot {last['ballot']}) reviewed head {last['head'][:12]}"
+    if len(rounds) >= MAX_ROUNDS:
+        return (f"refused round {len(rounds) + 1} (ballot {a.ballot}, head {a.head[:12]}): "
+                f"the cap is {MAX_ROUNDS} rounds per pull request, and {won}.")
+    latest = last["head"] if last else "-"
+    if a.planned_latest is not None and a.planned_latest != latest:
+        return (f"refused ballot {a.ballot} (head {a.head[:12]}): it planned from "
+                f"{a.planned_latest[:12]}, but {won} first; rerun with a new ballot id.")
+    return None
+
+
+def refuse(a, doc: dict, reason: str, council_dir: Path | None, dry_run: bool = False) -> None:
+    msg = f"review rounds: {reason} ({a.pr_url})"
     if dry_run:
         raise Refused(3, msg + " (dry run: no park note written)")
-    park = park_path(rounds_dir, a.pr_url)
-    write_atomic(park, park_note(doc, a.ballot, a.head, council_dir, held))
+    park = park_path(Path(a.rounds_dir), a.pr_url)
+    write_atomic(park, park_note(doc, reason, council_dir))
     raise Refused(3, f"{msg}; park note: {park}")
 
 
 def cmd_plan(a) -> str:
-    if a.dry_run:
-        return plan_round(a)
-    with pr_lock(Path(a.rounds_dir), a.pr_url):
-        return plan_round(a)
-
-
-def plan_round(a) -> str:
     rounds_dir = Path(a.rounds_dir)
     council_dir = Path(a.council_dir) if a.council_dir else None
     doc = load_log(log_path(rounds_dir, a.pr_url), a.pr_url)
     rounds = doc["rounds"]
     last = rounds[-1] if rounds else None
+    latest = last["head"] if last else "-"
     same = find_round(rounds, a.ballot, a.head)
     if same:
         if same["mode"] != a.mode:
             raise Refused(2, f"review rounds: ballot {a.ballot} already reviewed head {a.head[:12]} "
                              f"as mode {same['mode']}; use a new ballot id")
         base = same["base"] if a.mode == "delta" else "-"
-        return f"{same['round']} {base} 1"
-    if a.mode == "delta":
+        return f"{same['round']} {base} 1 {latest}"
+    if a.mode == "delta" and a.planned_latest is None:
         if not last:
             raise Refused(2, f"review rounds: --delta needs an earlier round on {a.pr_url}; run --pr first")
         if last["head"] == a.head:
             raise Refused(2, f"review rounds: nothing to review; round {last['round']} already reviewed head {a.head[:12]}")
-    held = live_reservations(doc, a.ballot)
-    if len(rounds) + len(held) >= MAX_ROUNDS:
-        refuse_cap(a, doc, council_dir, held, a.dry_run)
-    if not a.dry_run:
-        doc["reservations"] = held + [{"ballot": a.ballot, "head": a.head, "owner_pid": a.owner_pid,
-                                       "reserved_at": int(time.time())}]
-        write_json(log_path(rounds_dir, a.pr_url), doc)
-    base = last["head"] if a.mode == "delta" else "-"
-    return f"{len(rounds) + 1} {base} 0"
+    reason = refusal(a, rounds)
+    if reason:
+        refuse(a, doc, reason, council_dir, a.dry_run)
+    base = latest if a.mode == "delta" else "-"
+    return f"{len(rounds) + 1} {base} 0 {latest}"
 
 
 def cmd_record(a) -> str:
     with pr_lock(Path(a.rounds_dir), a.pr_url):
-        try:
-            return record_round(a)
-        finally:
-            release_reservation(Path(a.rounds_dir), a.pr_url, a.ballot)
+        return record_round(a)
 
 
 def record_round(a) -> str:
@@ -280,15 +244,13 @@ def record_round(a) -> str:
     doc = load_log(path, a.pr_url)
     rounds = doc["rounds"]
     files = [ln for ln in Path(a.files_file).read_text(encoding="utf-8").splitlines() if ln]
-    last = rounds[-1] if rounds else None
+    ballot_dir = Path(a.ballot_dir)
     entry = find_round(rounds, a.ballot, a.head)
     if entry is None:
-        if len(rounds) >= MAX_ROUNDS:
-            refuse_cap(a, doc, council_dir, [])
-        if a.mode == "delta" and (not last or last["head"] != a.base):
-            raise Refused(2, f"review rounds: ballot {a.ballot} planned a delta from {a.base[:12]}, "
-                             f"but the last recorded head is {last['head'][:12] if last else 'none'}: "
-                             f"another ballot recorded first; rerun with a new ballot id")
+        reason = refusal(a, rounds)
+        if reason:
+            write_atomic(ballot_dir / "round-refused.md", f"Not recorded: {reason}\n")
+            refuse(a, doc, reason, council_dir)
         entry = {
             "round": len(rounds) + 1,
             "ballot": a.ballot,
@@ -306,7 +268,6 @@ def record_round(a) -> str:
         if kept is not None:
             r["findings_doc"] = kept
     write_json(path, doc)
-    ballot_dir = Path(a.ballot_dir)
     write_json(ballot_dir / "round.json", {
         "pr_url": a.pr_url,
         "round": entry["round"],
@@ -363,10 +324,11 @@ def main(argv: list[str]) -> int:
         s.add_argument("--mode", required=True, choices=MODES)
     plan.add_argument("--council-dir")
     plan.add_argument("--dry-run", action="store_true")
-    plan.add_argument("--owner-pid", type=int, default=os.getppid())
+    plan.add_argument("--planned-latest")
     rec.add_argument("--council-dir", required=True)
     rec.add_argument("--ballot-dir", required=True)
     rec.add_argument("--base", required=True)
+    rec.add_argument("--planned-latest", required=True)
     rec.add_argument("--files-file", required=True)
     snap.add_argument("--ballot-dir", required=True)
     a = p.parse_args(argv)

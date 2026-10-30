@@ -35,6 +35,19 @@ push_head() { # $1 = file to change; prints the new head
   g -C "$REPO" rev-parse HEAD
 }
 
+fake_legs() { # $1 = ok or fail; what the legs left in $DIR
+  local v
+  for v in claude codex; do
+    rm -f "$DIR/voter-$v.fail" "$DIR/voter-$v.md" "$DIR/voter-$v.json" "$DIR/voter-$v.model.txt"
+    if [ "$1" = ok ]; then
+      printf '%s: ok\n' "$v" >"$DIR/voter-$v.model.txt"
+      printf 'report\n' >"$(review_report_file "$v")"
+    else
+      printf 'leg failed\n' >"$DIR/voter-$v.fail"
+    fi
+  done
+}
+
 # One round as review_run sequences it, with gh pr view replaced by its values.
 review_round() { # $1 = ballot id, $2 = 1 for --delta
   ID="$1" FLAG_DELTA="$2" FLAG_PR=7 FLAG_BASE="" FLAG_HEAD="" FLAG_WHOLE=0 HEADER_PR="" HEADER_BRANCH=""
@@ -50,11 +63,14 @@ review_round() { # $1 = ballot id, $2 = 1 for --delta
   PR_ADD="$SS_INS" PR_DEL="$SS_DEL"
   review_target_mode
   python3 "$ROOT/scripts/review_rounds.py" snapshot --rounds-dir "$CONCLAVE_ROUNDS_DIR" --ballot-dir "$DIR"
-  rm -f "$DIR/findings.json" "$DIR/round.json" "$DIR/carried-findings.md" "$DIR/review-files.txt"
+  rm -f "$DIR/findings.json" "$DIR/round.json" "$DIR/carried-findings.md" "$DIR/review-files.txt" "$DIR/round-refused.md"
   review_rounds_plan
   review_write_claude_brief "$DIR/voter-claude.brief.md" || fail "$REVIEW_BRIEF_REJECT"
   review_alloc_scratch
   review_build_and_prove
+  review_rounds_files
+  review_rounds_plan recheck
+  fake_legs "${LEGS:-ok}"
   review_rounds_record
   wt="$(printf '%s\n' "$REVIEW_WORKTREES" | head -1)"
   printf -- '--- %s: what the legs review (git diff HEAD --stat in a leg worktree)\n' "$ID"
@@ -112,7 +128,7 @@ printf '{"target": "pr 7 delta", "resolved": ["r2-f1"], "findings": [{"id": "f1"
 out="$(python3 "$ROOT/scripts/review_rounds.py" plan --rounds-dir "$CONCLAVE_ROUNDS_DIR" \
   --pr-url https://github.com/example/app/pull/7 --ballot r1 --head "$h1" --mode pr)" \
   || fail "a rerun of round 1 after round 3 was refused"
-[ "$out" = "1 - 1" ] || fail "a rerun of round 1 after round 3 is round 1, got '$out'"
+[ "$out" = "1 - 1 $h3" ] || fail "a rerun of round 1 after round 3 is round 1, got '$out'"
 
 h4="$(push_head d.txt)"
 rc=0
@@ -129,6 +145,26 @@ cat "$park"
 for id in r1-f2 r3-f1 r3-f2; do grep -q "$id" "$park" || fail "park note misses $id"; done
 for id in r1-f1 r2-f1; do grep -q "$id" "$park" && fail "park note lists resolved $id"; done
 [ ! -e "$work/gh-calls" ] || fail "gh was called: $(cat "$work/gh-calls")"
+
+# A launch where every leg failed: same count, same delta base, and the next
+# --delta still reviews everything since the last completed round.
+export CONCLAVE_ROUNDS_DIR="$work/rounds-fail"
+log="$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.json"
+review_round f1 0 >/dev/null
+hf1="$(g -C "$REPO" rev-parse HEAD)"
+cp "$log" "$work/before.json"
+hf2="$(push_head a.txt)"
+LEGS=fail review_round f2 1 >"$work/f2.out" 2>&1
+cmp "$log" "$work/before.json" || fail "a failed launch changed the round log"
+printf -- '--- failed launch\n'; grep -i 'not recorded' "$work/f2.out"
+[ ! -e "$work/council/f2/round.json" ] || fail "a failed launch wrote round.json"
+hf3="$(push_head b.txt)"
+review_round f3 1 >/dev/null
+same_files "the delta after a failed launch covers it" "$(printf 'a.txt\nb.txt')" "$work/council/f3/review-files.txt"
+jq -e --arg b "$hf1" '.round == 2 and .base == $b' "$work/council/f3/round.json" >/dev/null \
+  || fail "after a failed launch: $(cat "$work/council/f3/round.json")"
+printf -- '--- after the failed launch: round 2 base %s (last completed head), files: %s\n' \
+  "${hf1:0:12}" "$(tr '\n' ' ' <"$work/council/f3/review-files.txt")"
 
 # --delta refusals and the moved fork point, on a fresh PR log.
 export CONCLAVE_ROUNDS_DIR="$work/rounds2"
@@ -157,20 +193,18 @@ REVIEW_MODE=refs FLAG_HEAD=topic FLAG_BASE=master REVIEW_DELTA_BASE=""
 REVIEW_MODE=whole
 [ "$(review_codex_title)" = "whole codebase" ] || fail "whole title: $(review_codex_title)"
 
-# Two concurrent ballots with 2 rounds recorded: one takes round 3, the other
-# hits the cap at plan. Each trial logs which ballots reached the worktree build.
-eval "orig_$(declare -f review_build_and_prove)"
-review_build_and_prove() { printf '%s\n' "$ID" >>"$work/built"; orig_review_build_and_prove; }
+# Two concurrent ballots with 2 rounds recorded, both past plan: one takes
+# round 3, the other is refused.
 seed_two() { # $1 = rounds dir; a log with 2 recorded rounds
   mkdir -p "$1"
   jq -n '{pr_url: "https://github.com/example/app/pull/7", rounds: [range(1;3) |
     {round: ., ballot: "seed\(.)", mode: "pr", base: ("0" * 40), head: ("\(.)" * 40), carried_open: []}]}' \
     >"$1/github.com_example_app_7.json"
 }
-for trial in 1 2 3 4 5; do
+trials=25
+for trial in $(seq "$trials"); do
   export CONCLAVE_ROUNDS_DIR="$work/rounds-c$trial"
   seed_two "$CONCLAVE_ROUNDS_DIR"
-  rm -f "$work/built"
   mkfifo "$work/go"
   exec 9<>"$work/go"
   a="c$trial-a" b="c$trial-b"
@@ -185,21 +219,18 @@ for trial in 1 2 3 4 5; do
     "3 0") won="$b" lost="$a" ;;
     *) fail "concurrent ballots exit $ra $rb: $(cat "$work/$a.out" "$work/$b.out")" ;;
   esac
-  [ "$(cat "$work/built")" = "$won" ] || fail "worktree build ran for: $(tr '\n' ' ' <"$work/built")"
-  [ ! -e "$work/council/$lost/review-files.txt" ] || fail "refused ballot $lost built worktrees"
-  [ "$(jq -c '[.rounds[-1].round, .rounds[-1].ballot, (.reservations | length)]' "$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.json")" = "[3,\"$won\",0]" ] \
+  [ "$(jq -c '[(.rounds | length), .rounds[-1].round, .rounds[-1].ballot]' "$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.json")" = "[3,3,\"$won\"]" ] \
     || fail "round 3: $(cat "$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.json")"
   park="$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.park.md"
   [ -s "$park" ] || fail "refused ballot wrote no park note"
   grep -q "ballot $lost" "$park" || fail "park note names another ballot"
+  grep -q "ballot $won" "$park" || fail "park note does not name the winning round"
 done
-printf -- '--- concurrent ballots, 5 trials; last trial: %s exit 0 round 3, %s exit 3\n' "$won" "$lost"
-printf -- '--- worktree builds in that trial: %s\n' "$(cat "$work/built")"
-printf -- '--- refused ballot output\n'; cat "$work/$lost.out"
+printf -- '--- concurrent ballots, %s trials; last trial: %s exit 0 round 3, %s exit 3\n' "$trials" "$won" "$lost"
+printf -- '--- refused ballot output\n'; tail -2 "$work/$lost.out"
 printf -- '--- park note %s\n' "$park"; cat "$park"
-review_build_and_prove() { orig_review_build_and_prove; }
 
-# A cap refusal at record: exit 3 from review_rounds_record, and a park note.
+# A cap refusal at record: exit 3 from review_rounds_record, and both notes.
 export CONCLAVE_ROUNDS_DIR="$work/rounds-rec"
 mkdir -p "$CONCLAVE_ROUNDS_DIR"
 jq -n '{pr_url: "https://github.com/example/app/pull/7", rounds: [range(1;4) |
@@ -207,11 +238,15 @@ jq -n '{pr_url: "https://github.com/example/app/pull/7", rounds: [range(1;4) |
   >"$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.json"
 ID=late DIR="$work/council/late" REVIEW_WORKTREES="$REPO" REVIEW_DELTA_BASE="" PR_URL=https://github.com/example/app/pull/7
 REVIEW_LEG_BASE="$(g -C "$REPO" rev-parse master)" REVIEW_HEAD_OID="$(g -C "$REPO" rev-parse HEAD)"
+REVIEW_PLANNED_LATEST="$(printf '2%.0s' $(seq 40))"
 mkdir -p "$DIR"
+printf 'a.txt\n' >"$DIR/review-files.txt"
+fake_legs ok
 rc=0; ( review_rounds_record ) >"$work/late.out" 2>&1 || rc=$?
 [ "$rc" -eq 3 ] || fail "cap at record exit $rc: $(cat "$work/late.out")"
 [ -s "$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.park.md" ] || fail "cap at record wrote no park note"
-printf -- '--- cap at record: exit %s\n' "$rc"; cat "$work/late.out"
+grep -q "round 3 (ballot seed3)" "$DIR/round-refused.md" || fail "the refused ballot's note: $(cat "$DIR/round-refused.md")"
+printf -- '--- cap at record: exit %s\n' "$rc"; cat "$work/late.out"; cat "$DIR/round-refused.md"
 
 # The real entry point. gh names a head the repo lacks, so if the cap ever
 # failed to refuse, the run would die at the fetch, before any leg.
@@ -239,22 +274,29 @@ tail -3 "$work/cli.out"
 [ -s "$cli/github.com_example_app_7.park.md" ] || fail "conclave.sh round 4 wrote no park note"
 grep -q 'refused round 4' "$work/cli.out" || fail "conclave.sh round 4 message"
 
-# Same entry point, 2 rounds recorded and another ballot's live reservation.
-cli="$work/rounds4"
-seed_two "$cli"
-jq --argjson pid "$$" --argjson now "$(date +%s)" \
-  '.reservations = [{ballot: "other", head: ("3" * 40), owner_pid: $pid, reserved_at: $now}]' \
-  "$cli/github.com_example_app_7.json" >"$work/held.json"
-mv "$work/held.json" "$cli/github.com_example_app_7.json"
-mkdir -p "$ROOT/tmp/council/$id"
-printf 'kind: review\n\nReview the change.\n' >"$ROOT/tmp/council/$id/brief.md"
-rc=0
-CONCLAVE_ROUNDS_DIR="$cli" CONCLAVE_PREFLIGHT=0 CONCLAVE_SKIP_UPDATE_CHECK=1 CONCLAVE_JEV_OP=/bin/false \
-  "$ROOT/scripts/conclave.sh" "$id" --repo "$REPO" --pr 7 --voters claude,codex >"$work/cli2.out" 2>&1 || rc=$?
-rm -rf "$ROOT/tmp/council/$id"
-printf -- '--- conclave.sh with a reserved round 3: exit %s\n' "$rc"
-tail -3 "$work/cli2.out"
-[ "$rc" -eq 3 ] || fail "conclave.sh reserved cap exit $rc: $(cat "$work/cli2.out")"
-[ -s "$cli/github.com_example_app_7.park.md" ] || fail "conclave.sh reserved cap wrote no park note"
+# review_run with review_launch replaced, so no vendor CLI can start. Every leg
+# failing leaves the log unwritten. A leg returning records after the legs.
+head="$(g -C "$REPO" rev-parse HEAD)"
+g -C "$REPO" push -q -f origin "HEAD:refs/heads/feature"
+review_parse_shortstat "$(g -C "$REPO" diff --shortstat master HEAD)"
+sed -i "s/%040d/$head/; s/ 9\$/ /; s/\"additions\":1/\"additions\":$SS_INS/; s/\"deletions\":0/\"deletions\":$SS_DEL/; s/\"changedFiles\":1/\"changedFiles\":$SS_FILES/" "$work/bin/gh"
+review_reseat_failed() { :; }
+review_launch() { [ ! -e "$(review_rounds_dir)/github.com_example_app_7.json" ] || fail "recorded before the legs"; fake_legs "$LEGS"; }
+export CONCLAVE_ROUNDS_DIR="$work/rounds5" CONCLAVE_PREFLIGHT=0
+run_review() { # $1 = ballot id, $2 = ok or fail
+  ( ID="$1" LEGS="$2" KIND=review VOTERS=claude,codex VOTERS_EXPLICIT=1 FLAG_REPO="$REPO" FLAG_PR=7 FLAG_DELTA=0
+    FLAG_BASE="" FLAG_HEAD="" FLAG_WHOLE=0 HEADER_PR="" HEADER_BRANCH="" REVIEW_DELTA_BASE=""
+    DIR="$work/council/$ID" ERRORS_FILE="$work/council/$ID/errors.md" BRIEF="$work/council/$ID/brief.md"
+    mkdir -p "$DIR"; printf 'Review the change.\n' >"$BRIEF"
+    review_run ) >"$work/$1.out" 2>&1
+}
+log="$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.json"
+rc=0; run_review full-fail fail || rc=$?
+printf -- '--- review_run with every leg failed: exit %s\n' "$rc"
+grep -E 'not recorded|not judgeable' "$work/full-fail.out" || fail "review_run failed launch: $(cat "$work/full-fail.out")"
+[ ! -e "$log" ] || fail "a failed launch wrote the round log: $(cat "$log")"
+rc=0; run_review full-ok ok || rc=$?
+printf -- '--- review_run with reports: exit %s, log rounds %s\n' "$rc" "$(jq -c '[.rounds[].ballot]' "$log" 2>&1)"
+[ "$(jq -c '[.rounds[].ballot]' "$log" 2>/dev/null)" = '["full-ok"]' ] || fail "review_run record: $(cat "$work/full-ok.out")"
 
 echo "test-review-rounds: all passed"

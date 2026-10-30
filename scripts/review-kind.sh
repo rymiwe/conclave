@@ -45,6 +45,7 @@ REVIEW_HEAD_OID=""
 # reviewed head on a --delta run, empty otherwise.
 REVIEW_ROUND=""
 REVIEW_DELTA_BASE=""
+REVIEW_PLANNED_LATEST=""
 REVIEW_DELTA_ADD=""
 REVIEW_DELTA_DEL=""
 
@@ -1156,22 +1157,27 @@ review_rounds_dir() {
 }
 
 review_rounds_plan() {
-  # PR targets only. Sets REVIEW_ROUND, and REVIEW_DELTA_BASE on --delta.
+  # PR targets only. Sets REVIEW_ROUND, REVIEW_PLANNED_LATEST, and
+  # REVIEW_DELTA_BASE on --delta. Advisory: it never writes the round log.
   # A new round past the cap exits 3 here, before any worktree or leg.
-  # A new round also reserves a slot under this process until record.
-  # $1 = dry-run previews without writing the park note or a reservation.
-  local mode=pr out rc=0 base rerun
+  # $1 = dry-run previews without writing the park note.
+  # $1 = recheck runs after the worktree build, before the legs: it also exits 3
+  # when another ballot recorded since this plan.
+  local mode=pr out rc=0 base rerun latest
   [ "${FLAG_DELTA:-0}" -eq 1 ] && mode=delta
   local -a args=(plan --rounds-dir "$(review_rounds_dir)" --pr-url "$PR_URL"
-    --ballot "$ID" --head "$PR_OID" --mode "$mode" --council-dir "$(dirname "$DIR")" --owner-pid "$$")
+    --ballot "$ID" --head "$PR_OID" --mode "$mode" --council-dir "$(dirname "$DIR")")
   [ "${1:-}" = dry-run ] && args+=(--dry-run)
+  [ "${1:-}" = recheck ] && args+=(--planned-latest "$REVIEW_PLANNED_LATEST")
   out="$(python3 "$REVIEW_KIND_DIR/review_rounds.py" "${args[@]}")" || rc=$?
   case "$rc" in
     0) ;;
-    3) log_err "round cap: see $(review_rounds_dir)"; exit 3 ;;
+    3) log_err "round refused: see $(review_rounds_dir)"; exit 3 ;;
     *) die "review rounds plan failed (exit $rc)" ;;
   esac
-  read -r REVIEW_ROUND base rerun <<<"$out"
+  [ "${1:-}" = recheck ] && return 0
+  read -r REVIEW_ROUND base rerun latest <<<"$out"
+  REVIEW_PLANNED_LATEST="$latest"
   if [ "$mode" = delta ]; then
     REVIEW_DELTA_BASE="$base"
   fi
@@ -1180,19 +1186,31 @@ review_rounds_plan() {
     "$([ "$rerun" = 1 ] && printf ' (rerun of this ballot)')"
 }
 
-review_rounds_record() {
-  # After the worktrees are proven: the reviewed file list goes in the log.
-  local wt files rc=0
+review_rounds_files() {
+  # After the worktrees are proven, before any leg can touch them.
+  local wt
   wt="$(printf '%s\n' "$REVIEW_WORKTREES" | head -1)"
-  files="$DIR/review-files.txt"
-  git -C "$wt" diff --name-only HEAD >"$files" || die "diff --name-only failed: $wt"
+  git -C "$wt" diff --name-only HEAD >"$DIR/review-files.txt" || die "diff --name-only failed: $wt"
+}
+
+review_rounds_record() {
+  # After the legs. Only a round with at least one returned ballot counts, so a
+  # failed launch leaves the cap and the delta base alone.
+  local rc=0
+  review_count_reports
+  if [ "$REVIEW_REPORTS_PRESENT" -eq 0 ]; then
+    log_err "round not recorded: no reviewer returned a ballot; the round count and the delta base did not change"
+    printf 'Round not recorded: no reviewer returned a ballot.\n'
+    return 0
+  fi
   python3 "$REVIEW_KIND_DIR/review_rounds.py" record --rounds-dir "$(review_rounds_dir)" \
     --pr-url "$PR_URL" --ballot "$ID" --ballot-dir "$DIR" --council-dir "$(dirname "$DIR")" \
     --mode "$([ -n "$REVIEW_DELTA_BASE" ] && echo delta || echo pr)" \
-    --base "$REVIEW_LEG_BASE" --head "$REVIEW_HEAD_OID" --files-file "$files" || rc=$?
+    --base "$REVIEW_LEG_BASE" --head "$REVIEW_HEAD_OID" \
+    --planned-latest "$REVIEW_PLANNED_LATEST" --files-file "$DIR/review-files.txt" || rc=$?
   case "$rc" in
     0) ;;
-    3) log_err "round cap: see $(review_rounds_dir)"; exit 3 ;;
+    3) log_err "round refused: see $DIR/round-refused.md"; exit 3 ;;
     *) die "review rounds record failed (exit $rc)" ;;
   esac
 }
@@ -3586,7 +3604,7 @@ review_run() {
     "$DIR"/voter-claude.via "$DIR"/voter-claude.stream.jsonl \
     "$DIR"/header.json \
     "$DIR"/pr-context.json \
-    "$DIR"/round.json "$DIR"/carried-findings.md "$DIR"/review-files.txt
+    "$DIR"/round.json "$DIR"/carried-findings.md "$DIR"/review-files.txt "$DIR"/round-refused.md
   rm -rf "$DIR/blind"
   if [ "$REVIEW_MODE" = "pr" ]; then
     review_load_pr_meta
@@ -3613,7 +3631,10 @@ review_run() {
       || die "$REVIEW_BRIEF_REJECT"
   fi
   review_build_and_prove
-  [ "$REVIEW_MODE" = "pr" ] && review_rounds_record
+  if [ "$REVIEW_MODE" = "pr" ]; then
+    review_rounds_files
+    review_rounds_plan recheck
+  fi
   review_record_leg_setup
   # Lock the scratch so a leg cannot list its siblings. Known paths still work.
   chmod 311 "$SCRATCH" || die "chmod scratch failed"
@@ -3638,6 +3659,9 @@ EOF
   review_blind || true
   if [ ! -s "$ERRORS_FILE" ]; then
     printf '(none)\n' >"$ERRORS_FILE"
+  fi
+  if [ "$REVIEW_MODE" = "pr" ]; then
+    review_rounds_record
   fi
   review_print_result
 }
