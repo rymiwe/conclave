@@ -3,22 +3,29 @@
 
 A row is a family and a seat. There is no family-only map.
 launch_for((fable, cursor)) is cursor-fable. launch_for((fable, claude))
-is claude. Any other pair raises. Unknown rows make the whole parse bad,
-which the shell already turns into the fixed default.
+is claude. An Opus row is the claude voter on the pool seat-usage picked:
+launch_for((opus, google|claude|cursor)) is opus:agy, opus:claude, or
+opus:cursor, and the parse adds an `opus:<via>:<model>` line. Any other
+pair raises. Unknown rows make the whole parse bad, which the shell
+already turns into the fixed default.
 """
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass
 from typing import Literal
 
-Family = Literal["fable", "astra", "grok", "muse", "wonder-full", "wonder", "argon"]
+Family = Literal["fable", "opus", "astra", "grok", "muse", "wonder-full", "wonder", "argon"]
 Seat = Literal["claude", "cursor", "chatgpt", "grok", "muse", "google"]
 
 VOTERS = {
     ("fable", "claude"): "claude",
     ("fable", "cursor"): "claude",
+    ("opus", "google"): "claude",
+    ("opus", "claude"): "claude",
+    ("opus", "cursor"): "claude",
     ("astra", "chatgpt"): "codex",
     ("grok", "grok"): "grok",
     ("muse", "muse"): "muse",
@@ -41,16 +48,32 @@ def voter_name(leg: Leg) -> str:
         raise ValueError(f"no voter for {leg.family}/{leg.seat}") from exc
 
 
+# Opus seat -> the CLI that runs it. Google is agy (Google AI Pro).
+OPUS_VIA = {"google": "agy", "claude": "claude", "cursor": "cursor"}
+_MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
 def launch_for(leg: Leg) -> str:
     """(fable, cursor) -> cursor-fable. (fable, claude) -> claude.
 
+    (opus, google|claude|cursor) -> opus:agy, opus:claude, or opus:cursor.
     Any other pair raises. There is no implicit family-only map.
     """
     if (leg.family, leg.seat) == ("fable", "cursor"):
         return "cursor-fable"
     if (leg.family, leg.seat) == ("fable", "claude"):
         return "claude"
+    if leg.family == "opus" and leg.seat in OPUS_VIA:
+        return "opus:" + OPUS_VIA[leg.seat]
     raise ValueError(f"no launch for {leg.family}/{leg.seat}")
+
+
+def opus_line(leg: Leg, row: dict) -> str:
+    """`opus:<via>:<model>` for an Opus row. Raises on a missing or unsafe model id."""
+    model = row.get("model")
+    if not isinstance(model, str) or not _MODEL_ID.fullmatch(model):
+        raise ValueError(f"opus row has no usable model: {model!r}")
+    return f"{launch_for(leg)}:{model}"
 
 
 def _leg(row: dict) -> Leg:
@@ -75,6 +98,7 @@ def parse(raw: str) -> str:
     down = doc.get("downgrade")
     out: list[str] = []
     cursor = False
+    opus = ""
     downgraded = ""
     for row in doc["lineup"].get("voters") or []:
         if not isinstance(row, dict):
@@ -84,6 +108,11 @@ def parse(raw: str) -> str:
             name = voter_name(leg)
         except ValueError:
             return "bad\n"
+        if leg.family == "opus":
+            try:
+                opus = opus_line(leg, row)
+            except ValueError:
+                return "bad\n"
         try:
             if launch_for(leg) == "cursor-fable":
                 cursor = True
@@ -101,8 +130,12 @@ def parse(raw: str) -> str:
     if not out:
         return "bad\n"
     lines = ["ok", ",".join(out)]
+    if cursor and opus:
+        return "bad\n"
     if cursor:
         lines.append("cursor-fable")
+    if opus:
+        lines.append(opus)
     if downgraded:
         lines.append("downgraded:" + str(downgraded))
     excl = doc.get("excluded")
@@ -115,9 +148,10 @@ def parse(raw: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-# Used when a route row omits vendor. Fable on either seat is still Anthropic.
+# Used when a route row omits vendor. Fable and Opus on any seat are still Anthropic.
 _FAMILY_VENDOR = {
     "fable": "anthropic",
+    "opus": "anthropic",
     "astra": "openai",
     "grok": "xai",
     "muse": "meta",
@@ -136,7 +170,8 @@ def pick_replacement(raw: str, failed: str, builder: str, other: str, avoid_name
     replacement's vendor is neither the builder nor the other working voter.
     A named voter in `avoid_names`, including the one that just failed, is
     not returned. Output is `ok`, the voter name, and `cursor-fable` when
-    that is how Fable launches; or `none` and a reason.
+    that is how Fable launches or `opus:<via>:<model>` for Opus; or `none`
+    and a reason.
     """
     try:
         doc = json.loads(raw)
@@ -175,6 +210,11 @@ def pick_replacement(raw: str, failed: str, builder: str, other: str, avoid_name
         if not vendor and avoid_vendors:
             continue
         lines = ["ok", name]
+        if leg.family == "opus":
+            try:
+                lines.append(opus_line(leg, row))
+            except ValueError:
+                continue
         try:
             if launch_for(leg) == "cursor-fable":
                 lines.append("cursor-fable")

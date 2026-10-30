@@ -145,7 +145,7 @@ def seat_precheck(run=subprocess.run) -> tuple[str, str]:
 SEAT_OPTIONS = {
     'conclave': ('Default: wait for the capped seat to reset (the reason says when), then rerun. '
                  'Or pass --voters with seats that have quota. '
-                 'Or set CONCLAVE_PREFLIGHT=0 to skip preflight and run the old fixed default pair'),
+                 'CONCLAVE_PREFLIGHT=0 skips preflight, but a seat ask still stops the run: no fixed default'),
     'stack': ('Default: wait for the capped seat to reset (the reason says when), then rerun. '
               'Or pass --wave-wait SECONDS, for example 1800, so the run waits for seats before the first wave. '
               'Or set CONCLAVE_PREFLIGHT=0 to skip preflight; the per-wave pre-check still stops a capped wave'),

@@ -92,13 +92,31 @@ ask_voters_from_route() {
   python3 - "$ASK_ROUTE_JSON" <<'PY'
 import json, sys
 doc = json.loads(sys.argv[1])
-names = {"fable": "claude", "astra": "codex", "grok": "grok", "muse": "muse", "wonder-full": "muse"}
+names = {"fable": "claude", "opus": "claude", "astra": "codex", "grok": "grok", "muse": "muse", "wonder-full": "muse"}
 out = []
 for row in doc.get("voters") or []:
     name = names.get(row.get("family"))
     if name and name not in out:
         out.append(name)
 print(",".join(out))
+PY
+}
+
+ask_route_opus_line() {
+  # The route's Opus voter as a lineup.py launch line (opus:<via>:<model>), or nothing.
+  [ -n "${ASK_ROUTE_JSON:-}" ] || return 0
+  python3 - "$ROOT/scripts" "$ASK_ROUTE_JSON" <<'PY'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import lineup
+doc = json.loads(sys.argv[2])
+for row in doc.get("voters") or []:
+    if isinstance(row, dict) and row.get("family") == "opus":
+        try:
+            print(lineup.opus_line(lineup._leg(row), row))
+        except ValueError:
+            pass
+        break
 PY
 }
 
@@ -112,7 +130,7 @@ ask_route_fields() {
   python3 - "$ASK_ROUTE_JSON" "$1" <<'PY'
 import json, sys
 doc = json.loads(sys.argv[1])
-wanted = {"claude": ("fable",), "codex": ("astra",), "grok": ("grok",), "muse": ("wonder-full", "muse")}.get(sys.argv[2])
+wanted = {"claude": ("fable", "opus"), "codex": ("astra",), "grok": ("grok",), "muse": ("wonder-full", "muse")}.get(sys.argv[2])
 if not wanted:
     raise SystemExit(0)
 rows = list(doc.get("candidates") or []) + list(doc.get("voters") or [])
@@ -326,6 +344,14 @@ ask_resolve() {
   esac
   CODEX_MODEL="$CODEX_REVIEW_MODEL"
   ask_set_efforts
+  # No --claude-model: an Opus voter from the route runs on its pool at high.
+  if [ -z "${FLAG_CLAUDE:-}" ]; then
+    local opus_line
+    opus_line="$(ask_route_opus_line)"
+    if [ -n "$opus_line" ] && ! claude_apply_launch_line "$opus_line"; then
+      die "ask mode: route Opus line is not usable: $opus_line"
+    fi
+  fi
   KIND="ask"
 }
 
@@ -369,16 +395,23 @@ ask_answer_ok() {
 
 ask_run_cursor_fable() {
   # Print-only, same as the packet Fable leg. The workspace is the packet.
+  # The model is Cursor Fable, or the route's Opus id when Opus is on cursor.
   local out="$ASK_OUT/answer-claude.md" err="$ASK_OUT/answer-claude.err"
-  local stream="$ASK_OUT/answer-claude.stream.jsonl" ec=0
-  if [ -z "${CURSOR_FABLE:-}" ]; then
-    log_err "claude: Cursor Fable id is unresolved"
+  local stream="$ASK_OUT/answer-claude.stream.jsonl" ec=0 model family
+  model="$(claude_cursor_model)"
+  family="$(claude_cursor_family)"
+  if [ -z "$model" ]; then
+    if [ "$family" = fable ]; then
+      log_err "claude: Cursor Fable id is unresolved"
+    else
+      log_err "claude: Cursor $family id is unresolved"
+    fi
     return 1
   fi
   (
     cd -- "$PACKET" || exit 97
     "$(conclave_env CURSOR_AGENT cursor-agent)" -p --mode ask \
-      --model "$CURSOR_FABLE" \
+      --model "$model" \
       --output-format stream-json \
       --trust --workspace "$PACKET" \
       "$(cat "$PACKET/PROMPT.md")"
@@ -388,16 +421,42 @@ ask_run_cursor_fable() {
     rm -f "$out"
     return 1
   fi
-  if ! cursor_write_text_result "$stream" "$CURSOR_FABLE" fable claude \
+  if ! cursor_write_text_result "$stream" "$model" "$family" claude \
     "$out" "$ASK_OUT/answer-claude.model.txt"; then
-    log_err "claude: Cursor Fable output missing or model unproven"
+    if [ "$family" = fable ]; then
+      log_err "claude: Cursor Fable output missing or model unproven"
+    else
+      log_err "claude: Cursor $family output missing or model unproven"
+    fi
     rm -f "$out"
     return 1
   fi
   ask_answer_ok claude
 }
 
+ask_run_claude_agy() {
+  # Opus on agy (Google AI Pro), print-only through the argon packet flow.
+  # run_argon writes voter-claude.* under DIR; DIR is ASK_OUT for this call.
+  local DIR="$ASK_OUT"
+  rm -f "$ASK_OUT/voter-claude.skipped"
+  AGY_VOTER=claude AGY_MODEL="${CLAUDE_OPUS_MODEL:-}" run_argon
+  if [ -f "$ASK_OUT/voter-claude.skipped" ] || [ ! -s "$ASK_OUT/voter-claude.md" ]; then
+    log_err "claude: Opus on agy failed; see voter-claude.skipped"
+    rm -f "$ASK_OUT/answer-claude.md"
+    return 1
+  fi
+  mv -f "$ASK_OUT/voter-claude.md" "$ASK_OUT/answer-claude.md"
+  if [ -f "$ASK_OUT/voter-claude.model.txt" ]; then
+    mv -f "$ASK_OUT/voter-claude.model.txt" "$ASK_OUT/answer-claude.model.txt"
+  fi
+  ask_answer_ok claude
+}
+
 ask_run_claude() {
+  if claude_leg_uses_agy; then
+    ask_run_claude_agy
+    return
+  fi
   if claude_leg_uses_cursor; then
     ask_run_cursor_fable
     return

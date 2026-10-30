@@ -33,7 +33,7 @@ cd "$ROOT"
 
 DEFAULT_VOTERS="claude,codex"
 # No --voters: the lineup seats the ballot. Kind review uses --kind review. See apply_kind_voters.
-# A missing router, a failed run, or mode ask keeps the fixed default.
+# A missing router or a failed run keeps the fixed default. Mode ask stops (exit 3).
 VOTERS="$DEFAULT_VOTERS"
 VOTERS_EXPLICIT=0
 BALLOT_SOURCE=""
@@ -79,12 +79,16 @@ SOURCE=""
 CLAUDE_SKU=""
 CLAUDE_MODEL_ALIAS=""
 CLAUDE_EFFORT=""
+# Opus pool and model id from the lineup (opus:<via>:<model>). Empty is native.
+CLAUDE_VIA=""
+CLAUDE_OPUS_MODEL=""
 CODEX_EFFORT=""
 CODEX_MODEL=""
 GROK_EFFORT=""
 MUSE_EFFORT=""
 ARGON_EFFORT=""
 ARGON_PREFLIGHT_OK=0
+LINEUP_ASK_RAW=""
 PACKET=""
 PACKET_TMP=""
 ROUTING_OUT=""
@@ -521,8 +525,8 @@ A pace-picked builder is not excluded. Audit excludes that vendor when the
 brief names the author. The
 chair's vendor still votes. The lineup says who sat out and why. A capped
 pool is not seated. A pool ahead of pace still votes. When seat-usage is
-missing, fails, or returns mode ask, the fixed default is used and the
-lineup says so. A named voter passes the routed effort. Review and audit
+missing or fails, the fixed default is used and the lineup says so. When it
+returns mode ask, the run stops (exit 3) and seats nothing: ask Ryan. A named voter passes the routed effort. Review and audit
 pass high. Argon follows that same resolved effort: low, medium, or high
 (gemini-4-argon-low, gemini-4-argon-medium, gemini-4-argon-high).
 CONCLAVE_ARGON_MODEL overrides the id. CONCLAVE_AGY is the binary
@@ -1670,6 +1674,10 @@ ballot_source_line() {
     printf 'ballot: lineup'
     return 0
   fi
+  if [ "${BALLOT_SOURCE:-}" = ask ]; then
+    printf 'ballot: ask (%s)' "${BALLOT_SOURCE_NOTE:-seat-usage asked}"
+    return 0
+  fi
   printf 'ballot: fallback (%s; fixed default)' "${BALLOT_SOURCE_NOTE:-seat-usage unavailable}"
 }
 
@@ -1762,10 +1770,9 @@ load_lineup_ballot() {
       if [ "$rest" = "$legs" ]; then
         rest=""
       fi
-      if [ "${rest%%$'\n'*}" = cursor-fable ]; then
-        CLAUDE_SKU="cursor-fable"
-        CLAUDE_MODEL_ALIAS="${CURSOR_FABLE:-}"
-        if [ "$rest" = cursor-fable ]; then
+      line="${rest%%$'\n'*}"
+      if [ -n "$line" ] && claude_apply_launch_line "$line"; then
+        if [ "$rest" = "$line" ]; then
           rest=""
         else
           rest="${rest#*$'\n'}"
@@ -1809,11 +1816,8 @@ load_lineup_ballot() {
       ;;
     ask)
       review_refuse_fixed_default "$raw"
-      BALLOT_SOURCE=fallback
-      BALLOT_SOURCE_NOTE="seat-usage asked"
-      ballot_use_fixed_default
-      note_review_route_fallback
-      return 0
+      lineup_ask_defer "$raw" && return 0
+      lineup_ask_stop "$raw"
       ;;
   esac
   review_refuse_fixed_default "$raw"
@@ -1821,6 +1825,49 @@ load_lineup_ballot() {
   BALLOT_SOURCE_NOTE="seat-usage failed"
   ballot_use_fixed_default
   note_review_route_fallback
+}
+
+lineup_ask_defer() {
+  # Review runs preflight, which lists the capped seats with any other
+  # blocker in one numbered list and exits 3. So a review ask seats nobody
+  # here and stops after preflight (lineup_ask_after_preflight). Other kinds,
+  # and review with CONCLAVE_PREFLIGHT=0, stop at once.
+  [ "${KIND:-}" = review ] || return 1
+  [ "$(conclave_env PREFLIGHT 1)" != 0 ] || return 1
+  LINEUP_ASK_RAW="$1"
+  VOTERS=""
+  BALLOT_SOURCE=ask
+  BALLOT_SOURCE_NOTE="seat-usage asked"
+  return 0
+}
+
+lineup_ask_after_preflight() {
+  # A deferred review ask that preflight did not stop still stops here.
+  [ -z "${LINEUP_ASK_RAW:-}" ] || lineup_ask_stop "$LINEUP_ASK_RAW"
+}
+
+lineup_ask_stop() {
+  # $1 is seat-usage stdout with mode ask. An ask is Ryan's call: no fixed
+  # default, so Fable and Astra are never seated in its place. Stops the run
+  # (exit 3) on every kind, dry-run included. errors.md on a real run.
+  local why msg
+  why="$(python3 -c '
+import json, sys
+try:
+    doc = json.loads(sys.argv[1])
+except ValueError:
+    doc = None
+if isinstance(doc, list) and doc:
+    doc = doc[0]
+why = doc.get("reason") if isinstance(doc, dict) else None
+print(" ".join(str(why).split()) if why else "no reason given")
+' "$1" 2>/dev/null)" || why="no reason given"
+  msg="conclave: stopped: seat-usage asked (${why:-no reason given}); no fixed default seated (not Fable, not Astra): ask Ryan"
+  printf '%s\n' "$msg" >&2
+  if [ "${DRY_RUN:-0}" != 1 ] && [ -n "${ERRORS_FILE:-}" ]; then
+    printf '%s\n' "$msg" >>"$ERRORS_FILE" 2>/dev/null || true
+  fi
+  exit 3
 }
 
 review_refuse_fixed_default() {
@@ -1935,9 +1982,15 @@ write_routing_md() {
   if muse_shadow_on; then
     muse_enabled="yes"
   fi
-  if claude_leg_uses_cursor; then
+  if claude_leg_uses_cursor && [ "${CLAUDE_SKU:-fable}" = opus ]; then
+    claude_cli="cursor-agent"
+    claude_note="opus on this seat through cursor-agent (${CLAUDE_OPUS_MODEL:-unresolved})"
+  elif claude_leg_uses_cursor; then
     claude_cli="cursor-agent"
     claude_note="fable on this seat through cursor-agent; opus is the only native claude leg and is a review coverage leg"
+  elif claude_leg_uses_agy; then
+    claude_cli="agy"
+    claude_note="opus on this seat through agy on the Google AI Pro pool (${CLAUDE_OPUS_MODEL:-unresolved})"
   else
     claude_cli="claude"
     claude_note="opus native on this seat; a fable leg runs on cursor-agent"
@@ -2473,12 +2526,13 @@ argon_zero_rows() {
 
 argon_write_skipped() {
   # $1 is the verbatim reason. First line of the file is the marker.
-  local reason="$1"
+  # AGY_VOTER names the leg (default argon). The claude leg sets it for Opus on agy.
+  local reason="$1" v="${AGY_VOTER:-argon}"
   {
-    printf 'argon: skipped\n'
+    printf '%s: skipped\n' "$v"
     printf '%s\n' "$reason"
-  } >"$DIR/voter-argon.skipped"
-  rm -f "$DIR/voter-argon.md" "$DIR/voter-argon.ok" "$DIR/voter-argon.model.txt"
+  } >"$DIR/voter-$v.skipped"
+  rm -f "$DIR/voter-$v.md" "$DIR/voter-$v.ok" "$DIR/voter-$v.model.txt"
 }
 
 argon_skip() {
@@ -2578,9 +2632,12 @@ argon_write_agent() {
   # The prompt already carries the diff, so the voter needs no tools, and a
   # headless run cannot approve one (agy auto-denies and answers empty).
   # Never ~/.gemini: the file lives in the packet temp dir and dies with it.
-  local dir="$1/.agents/agents"
+  # Argon and an Opus claude leg on agy share the packet and run at once, so
+  # the file is written to a temp name and renamed into place.
+  local dir="$1/.agents/agents" tmp
   mkdir -p -- "$dir" || return 1
-  cat >"$dir/$(argon_agent_name).md" <<'EOF'
+  tmp="$dir/.$(argon_agent_name).$BASHPID.tmp"
+  cat >"$tmp" <<'EOF'
 ---
 name: conclave-voter
 description: Conclave council voter. Answers from the user message alone. No tools.
@@ -2594,22 +2651,34 @@ Everything you need is in the user message: the brief and, for a review, the dif
 You have no tools. Do not try to read files, run commands, or open URLs.
 Answer in plain text, in the format the user message asks for.
 EOF
+  mv -f -- "$tmp" "$dir/$(argon_agent_name).md"
+}
+
+argon_write_model_proof() {
+  # $1 voter, $2 the model id agy ran. The claude leg names its pool.
+  if [ "$1" = argon ]; then
+    printf 'argon: ok model=%s\n' "$2" >"$DIR/voter-argon.model.txt"
+  else
+    printf '%s: ok via=agy model=%s\n' "$1" "$2" >"$DIR/voter-$1.model.txt"
+  fi
 }
 
 run_argon() {
   # Packet-first. The prompt is PROMPT.md on stdin as one stream-json user event.
-  # cwd is the packet. A failure writes voter-argon.skipped and returns 0.
-  local bin model timeout stream err raw out ec parse_ec reason
+  # cwd is the packet. A failure writes voter-<v>.skipped and returns 0.
+  # AGY_VOTER and AGY_MODEL run another voter on agy (the claude leg's Opus).
+  # Unset, this is the argon leg on the argon model.
+  local bin model timeout stream err raw out ec parse_ec reason v="${AGY_VOTER:-argon}"
   bin="$(argon_agy_bin)"
-  model="$(argon_model_id)"
+  model="${AGY_MODEL:-$(argon_model_id)}"
   timeout="$(argon_print_timeout)"
-  stream="$DIR/voter-argon.stream.jsonl"
-  err="$DIR/voter-argon.err"
-  raw="$DIR/voter-argon.raw.md"
-  out="$DIR/voter-argon.md"
-  rm -f "$out" "$DIR/voter-argon.ok" "$DIR/voter-argon.model.txt" "$stream" "$raw"
+  stream="$DIR/voter-$v.stream.jsonl"
+  err="$DIR/voter-$v.err"
+  raw="$DIR/voter-$v.raw.md"
+  out="$DIR/voter-$v.md"
+  rm -f "$out" "$DIR/voter-$v.ok" "$DIR/voter-$v.model.txt" "$stream" "$raw"
   if [ -z "${PACKET:-}" ] || [ ! -f "$PACKET/PROMPT.md" ]; then
-    argon_skip "argon: packet prompt missing"
+    argon_skip "$v: packet prompt missing"
     return 0
   fi
   if [ -z "$bin" ] || [ ! -x "$bin" ]; then
@@ -2617,7 +2686,7 @@ run_argon() {
     return 0
   fi
   if ! argon_write_agent "$PACKET"; then
-    argon_skip "argon: cannot write the tool-less voter agent"
+    argon_skip "$v: cannot write the tool-less voter agent"
     return 0
   fi
   ec=0
@@ -2654,9 +2723,9 @@ run_argon() {
   parse_ec=0
   local parse_reason
   parse_reason="$(mktemp)"
-  python3 - "$stream" "$raw" "$parse_reason" "$err" "$(argon_agent_name)" <<'PY' || parse_ec=$?
+  python3 - "$stream" "$raw" "$parse_reason" "$err" "$(argon_agent_name)" "$v" <<'PY' || parse_ec=$?
 import json, re, sys
-stream_path, raw_path, reason_path, err_path, agent_name = sys.argv[1:6]
+stream_path, raw_path, reason_path, err_path, agent_name, voter = sys.argv[1:7]
 result = None
 init = None
 try:
@@ -2704,17 +2773,17 @@ if status != "SUCCESS":
 # A run that did not load the tool-less agent had tools, so it is not a vote.
 loaded = init.get("agent") if isinstance(init, dict) else None
 if loaded != agent_name:
-    fail("argon: agy did not load the tool-less voter agent (init agent %r)" % (loaded,))
+    fail("%s: agy did not load the tool-less voter agent (init agent %r)" % (voter, loaded))
 # A denied tool means the answer was cut short. Exit 0 does not make it a review.
 denied = result.get("denied_actions")
 if denied:
-    fail("argon: agy denied a tool in headless mode: %s" % (as_text(denied),))
+    fail("%s: agy denied a tool in headless mode: %s" % (voter, as_text(denied)))
 if re.search(r"headless mode cannot prompt for|no output produced", stderr):
-    fail("argon: agy reported a headless permission denial")
+    fail("%s: agy reported a headless permission denial" % (voter,))
 response = result.get("response")
 if not isinstance(response, str) or not response.strip():
     err = as_text(result.get("error")).strip()
-    fail("argon: empty response (agy exit 0)" + (": " + err if err else ""))
+    fail("%s: empty response (agy exit 0)" % (voter,) + (": " + err if err else ""))
 open(raw_path, "w", encoding="utf-8").write(response if response.endswith("\n") else response + "\n")
 PY
   if [ "$parse_ec" -ne 0 ]; then
@@ -2725,10 +2794,11 @@ PY
     return 0
   fi
   rm -f "$parse_reason"
-  # Review reports follow the reviewer brief, not the design headings.
-  if [ "${KIND:-}" = "review" ]; then
+  # Review reports follow the reviewer brief, and ask answers are free text,
+  # not the design headings.
+  if [ "${KIND:-}" = "review" ] || [ "${KIND:-}" = "ask" ]; then
     cp "$raw" "$out"
-    printf 'argon: ok model=%s\n' "$model" >"$DIR/voter-argon.model.txt"
+    argon_write_model_proof "$v" "$model"
     return 0
   fi
   if ! python3 - "$raw" "$out" <<'PY'
@@ -2746,21 +2816,89 @@ for h in ["## Findings", "## Approach", "## Would not do", "## Uncertainties"]:
 open(out_path, "w", encoding="utf-8").write(body)
 PY
   then
-    argon_skip "argon: output missing required schema headings"
+    argon_skip "$v: output missing required schema headings"
     return 0
   fi
-  printf 'argon: ok model=%s\n' "$model" >"$DIR/voter-argon.model.txt"
-  if ! mark_voter_ok argon; then
-    rm -f "$DIR/voter-argon.model.txt"
-    argon_write_skipped "argon: output missing required schema headings"
+  argon_write_model_proof "$v" "$model"
+  if ! mark_voter_ok "$v"; then
+    rm -f "$DIR/voter-$v.model.txt"
+    argon_write_skipped "$v: output missing required schema headings"
     return 0
   fi
   return 0
 }
 
+claude_leg_via() {
+  # Fable always runs on cursor-agent. Opus runs where the lineup put it:
+  # claude (native), cursor (cursor-agent), or agy (Google AI Pro).
+  # An Opus header or --claude opus with no lineup pool is native.
+  if [ "${CLAUDE_SKU:-fable}" != opus ]; then
+    printf 'cursor'
+    return 0
+  fi
+  case "${CLAUDE_VIA:-claude}" in
+    cursor|agy) printf '%s' "$CLAUDE_VIA" ;;
+    *) printf 'claude' ;;
+  esac
+}
+
 claude_leg_uses_cursor() {
-  # Opus is the only native claude leg, and only when the route or lineup names it.
-  [ "${CLAUDE_SKU:-fable}" != opus ]
+  [ "$(claude_leg_via)" = cursor ]
+}
+
+claude_leg_uses_agy() {
+  [ "$(claude_leg_via)" = agy ]
+}
+
+claude_cursor_model() {
+  # The cursor-agent model id for the claude leg: the lineup's Opus id or Cursor Fable.
+  if [ "${CLAUDE_SKU:-fable}" = opus ]; then
+    printf '%s' "${CLAUDE_OPUS_MODEL:-}"
+  else
+    printf '%s' "${CURSOR_FABLE:-}"
+  fi
+}
+
+claude_cursor_family() {
+  # The word the Cursor stream init model must carry.
+  if [ "${CLAUDE_SKU:-fable}" = opus ]; then
+    printf 'opus'
+  else
+    printf 'fable'
+  fi
+}
+
+claude_apply_launch_line() {
+  # $1 is a lineup.py launch line. 0 when it set the claude leg, 1 when it is not one.
+  # cursor-fable: Fable on cursor-agent. opus:<via>:<model>: Opus high on that pool.
+  local line="$1" via model
+  case "$line" in
+    cursor-fable)
+      CLAUDE_SKU="cursor-fable"
+      CLAUDE_MODEL_ALIAS="${CURSOR_FABLE:-}"
+      return 0
+      ;;
+    opus:*:*)
+      via="${line#opus:}"
+      model="${via#*:}"
+      via="${via%%:*}"
+      case "$via" in
+        claude|cursor|agy) ;;
+        *) return 1 ;;
+      esac
+      CLAUDE_SKU="opus"
+      CLAUDE_VIA="$via"
+      CLAUDE_OPUS_MODEL="$model"
+      CLAUDE_EFFORT="high"
+      if [ "$via" = claude ]; then
+        CLAUDE_MODEL_ALIAS="opus"
+      else
+        CLAUDE_MODEL_ALIAS="$model"
+      fi
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 grok_native_requested() {
@@ -2769,11 +2907,11 @@ grok_native_requested() {
 }
 
 claude_launch_cli() {
-  if claude_leg_uses_cursor; then
-    printf 'cursor-agent'
-  else
-    printf 'claude'
-  fi
+  case "$(claude_leg_via)" in
+    cursor) printf 'cursor-agent' ;;
+    agy) printf 'agy' ;;
+    *) printf 'claude' ;;
+  esac
 }
 
 grok_launch_cli() {
@@ -2795,11 +2933,23 @@ grok_launch_model() {
 claude_leg_available() {
   # $1 is a fail-file path, or empty to log_err. Returns 1 when the leg cannot start.
   local dest="${1:-}" msg=""
+  local bin
   if claude_leg_uses_cursor; then
-    if [ -z "${CURSOR_FABLE:-}" ]; then
-      msg="claude: Cursor Fable id is unresolved"
+    if [ -z "$(claude_cursor_model)" ]; then
+      if [ "${CLAUDE_SKU:-fable}" = opus ]; then
+        msg="claude: Cursor Opus id is unresolved"
+      else
+        msg="claude: Cursor Fable id is unresolved"
+      fi
     elif ! command -v "$(conclave_env CURSOR_AGENT cursor-agent)" >/dev/null 2>&1; then
       msg="claude: cursor-agent not found"
+    fi
+  elif claude_leg_uses_agy; then
+    bin="$(argon_agy_bin)"
+    if [ -z "${CLAUDE_OPUS_MODEL:-}" ]; then
+      msg="claude: agy Opus id is unresolved"
+    elif [ -z "$bin" ] || [ ! -x "$bin" ]; then
+      msg="claude: agy not found: ${bin:-agy}"
     fi
   elif ! command -v claude >/dev/null 2>&1; then
     msg="claude: CLI not found"
@@ -2873,6 +3023,10 @@ run_claude() {
     run_cursor_fable_packet
     return
   fi
+  if claude_leg_uses_agy; then
+    run_claude_agy_packet
+    return
+  fi
   local out="$DIR/voter-claude.md"
   local err="$DIR/voter-claude.err"
   local prompt ec
@@ -2898,20 +3052,45 @@ run_claude() {
   mark_voter_ok claude
 }
 
+run_claude_agy_packet() {
+  # Opus on agy (Google AI Pro). The argon launcher with the claude voter's files.
+  # run_argon is fail-soft; the claude leg is not, so a skip is a leg failure.
+  if [ -z "${CLAUDE_OPUS_MODEL:-}" ]; then
+    log_err "claude: agy Opus id is unresolved"
+    return 1
+  fi
+  rm -f "$DIR/voter-claude.skipped"
+  AGY_VOTER=claude AGY_MODEL="$CLAUDE_OPUS_MODEL" run_argon
+  if [ -s "$DIR/voter-claude.md" ] && [ ! -s "$DIR/voter-claude.skipped" ]; then
+    return 0
+  fi
+  log_err "claude: Opus on agy failed; see voter-claude.skipped"
+  rm -f "$DIR/voter-claude.md"
+  return 1
+}
+
 run_cursor_fable_packet() {
   # Design and mixed stay packet-first. Ask mode is read-only. The workspace
   # is the packet, not the target repo. Review keeps its own worktree launcher.
+  # The claude leg on cursor-agent: Cursor Fable, or the lineup's Opus id.
   local out="$DIR/voter-claude.md" err="$DIR/voter-claude.err"
   local stream="$DIR/voter-claude.stream.jsonl" ec=0
-  if [ -z "${CURSOR_FABLE:-}" ] || [ ! -s "$PACKET/PROMPT.md" ]; then
-    log_err "claude: Cursor Fable id is unresolved: approve a downgraded leg"
+  local model family
+  model="$(claude_cursor_model)"
+  family="$(claude_cursor_family)"
+  if [ -z "$model" ] || [ ! -s "$PACKET/PROMPT.md" ]; then
+    if [ "$family" = opus ]; then
+      log_err "claude: Cursor Opus id is unresolved"
+    else
+      log_err "claude: Cursor Fable id is unresolved: approve a downgraded leg"
+    fi
     rm -f "$out"
     return 1
   fi
   (
     cd -- "$PACKET" || exit 97
     "$(conclave_env CURSOR_AGENT cursor-agent)" -p --mode ask \
-      --model "$CURSOR_FABLE" \
+      --model "$model" \
       --output-format stream-json \
       --trust --workspace "$PACKET" \
       "$(cat "$PACKET/PROMPT.md")"
@@ -2921,10 +3100,10 @@ run_cursor_fable_packet() {
     rm -f "$out"
     return 1
   fi
-  if ! python3 - "$DIR" "$CURSOR_FABLE" "$out" <<'PY'
+  if ! python3 - "$DIR" "$model" "$out" "$family" <<'PY'
 import json, re, sys
 from pathlib import Path
-d, model, out_path = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+d, model, out_path, family = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3]), sys.argv[4]
 lines = (d / "voter-claude.stream.jsonl").read_text(encoding="utf-8").split("\n")
 if lines and lines[-1] == "":
     lines.pop()
@@ -2937,17 +3116,21 @@ if (last.get("type") != "result" or last.get("is_error") is not False
 init = next((e for e in events if e.get("type") == "system"), {})
 display = str(init.get("model") or "unknown")
 shown = re.sub(r"\s", "_", display)
-ok = "fable" in display.lower()
+ok = family in display.lower()
 proof = (f"claude: ok via=cursor model={model} display={shown}" if ok else
          f"claude: FAIL via=cursor ran={shown} (lineup said {model})")
 (d / "voter-claude.model.txt").write_text(proof + "\n", encoding="utf-8")
 if not ok:
-    sys.stderr.write("claude: Cursor init model has no fable proof\n")
+    sys.stderr.write(f"claude: Cursor init model has no {family} proof\n")
     raise SystemExit(1)
 out_path.write_text(last["result"].strip() + "\n", encoding="utf-8")
 PY
   then
-    log_err "claude: Cursor Fable output missing or model unproven; see voter-claude.stream.jsonl"
+    if [ "$family" = opus ]; then
+      log_err "claude: Cursor Opus output missing or model unproven; see voter-claude.stream.jsonl"
+    else
+      log_err "claude: Cursor Fable output missing or model unproven; see voter-claude.stream.jsonl"
+    fi
     rm -f "$out"
     return 1
   fi
