@@ -11,9 +11,53 @@ export COUNCIL_SOURCE_ONLY=1
 fail() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
 work="$(mktemp -d)"
 trap 'review_cleanup_worktrees; rm -rf "$work"' EXIT
-mkdir -p "$work/bin" "$work/council"
+mkdir -p "$work/bin" "$work/council" "$work/home/.codex"
 printf '#!/bin/sh\necho "gh $*" >>"%s/gh-calls"\nexit 1\n' "$work" >"$work/bin/gh"
-chmod +x "$work/bin/gh"
+# Stubs only. A codex with no version line is skipped, and a later real
+# binary on PATH wins, so CONCLAVE_CODEX_BIN names this one. The catalog
+# is what muse-models.py reads; it does not start muse.
+cat >"$work/bin/codex" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then echo "codex-cli 0.200.0"; exit 0; fi
+exit 0
+EOF
+cat >"$work/bin/claude" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then echo "claude 0"; exit 0; fi
+exit 0
+EOF
+cat >"$work/bin/grok" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "models" ]; then echo "Default model: grok-test-1"; exit 0; fi
+if [ "${1:-}" = "--version" ]; then echo "grok 0"; exit 0; fi
+exit 0
+EOF
+cat >"$work/bin/cursor-agent" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "models" ]; then
+  printf '%s\n' claude-fable-9-9-thinking-xhigh grok-9.9-xhigh grok-9.9-xhigh-fast grok-9.9-high-fast
+  exit 0
+fi
+if [ "${1:-}" = "--version" ]; then echo "cursor-agent 0"; exit 0; fi
+exit 0
+EOF
+cat >"$work/bin/muse" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then echo "muse 0"; exit 0; fi
+exit 0
+EOF
+chmod +x "$work/bin/gh" "$work/bin/codex" "$work/bin/claude" "$work/bin/grok" "$work/bin/cursor-agent" "$work/bin/muse"
+cat >"$work/home/.codex/models_cache.json" <<'EOF'
+{"models": [{"slug": "gpt-test-astra", "visibility": "list", "priority": 1}]}
+EOF
+printf '[user]\n\tname = t\n\temail = t@example.com\n' >"$work/home/.gitconfig"
+cat >"$work/muse-catalog.json" <<'EOF'
+{"models":[
+  {"modelId":"muse-spark-1.3","releaseDate":"2026-11-01"},
+  {"modelId":"muse-wonder-1.0","releaseDate":"2026-10-12"},
+  {"modelId":"muse-wonder-full-1.0","releaseDate":"2026-10-12"}
+]}
+EOF
 export PATH="$work/bin:$PATH"
 export CONCLAVE_ROUNDS_DIR="$work/rounds"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com
@@ -250,6 +294,8 @@ printf -- '--- cap at record: exit %s\n' "$rc"; cat "$work/late.out"; cat "$DIR/
 
 # The real entry point. gh names a head the repo lacks, so if the cap ever
 # failed to refuse, the run would die at the fetch, before any leg.
+# resolve-models runs first. HOME, CONCLAVE_CODEX_BIN, and the catalog
+# keep that off the real vendor CLIs.
 cli="$work/rounds3"
 mkdir -p "$cli"
 jq -n '{pr_url: "https://github.com/example/app/pull/7", rounds: [range(1;4) |
@@ -265,7 +311,11 @@ id="test-rounds-cli-$$"
 mkdir -p "$ROOT/tmp/council/$id"
 printf 'kind: review\n\nReview the change.\n' >"$ROOT/tmp/council/$id/brief.md"
 rc=0
-CONCLAVE_ROUNDS_DIR="$cli" CONCLAVE_PREFLIGHT=0 CONCLAVE_SKIP_UPDATE_CHECK=1 CONCLAVE_JEV_OP=/bin/false \
+env -u COUNCIL_CODEX_BIN \
+  HOME="$work/home" \
+  CONCLAVE_CODEX_BIN="$work/bin/codex" \
+  CONCLAVE_MUSE_CATALOG="$work/muse-catalog.json" \
+  CONCLAVE_ROUNDS_DIR="$cli" CONCLAVE_PREFLIGHT=0 CONCLAVE_SKIP_UPDATE_CHECK=1 CONCLAVE_JEV_OP=/bin/false \
   "$ROOT/scripts/conclave.sh" "$id" --repo "$REPO" --pr 7 --delta --voters claude,codex >"$work/cli.out" 2>&1 || rc=$?
 rm -rf "$ROOT/tmp/council/$id"
 printf -- '--- conclave.sh round 4: exit %s\n' "$rc"
@@ -274,8 +324,9 @@ tail -3 "$work/cli.out"
 [ -s "$cli/github.com_example_app_7.park.md" ] || fail "conclave.sh round 4 wrote no park note"
 grep -q 'refused round 4' "$work/cli.out" || fail "conclave.sh round 4 message"
 
-# review_run with review_launch replaced, so no vendor CLI can start. Every leg
-# failing leaves the log unwritten. A leg returning records after the legs.
+# review_run with review_launch replaced, so no voter leg starts. The lineup
+# still asks claude and cursor-agent for --version; those hit the stubs.
+# Every leg failing leaves the log unwritten. A leg returning records after the legs.
 head="$(g -C "$REPO" rev-parse HEAD)"
 g -C "$REPO" push -q -f origin "HEAD:refs/heads/feature"
 review_parse_shortstat "$(g -C "$REPO" diff --shortstat master HEAD)"
@@ -284,11 +335,18 @@ review_reseat_failed() { :; }
 review_launch() { [ ! -e "$(review_rounds_dir)/github.com_example_app_7.json" ] || fail "recorded before the legs"; fake_legs "$LEGS"; }
 export CONCLAVE_ROUNDS_DIR="$work/rounds5" CONCLAVE_PREFLIGHT=0
 run_review() { # $1 = ballot id, $2 = ok or fail
-  ( ID="$1" LEGS="$2" KIND=review VOTERS=claude,codex VOTERS_EXPLICIT=1 FLAG_REPO="$REPO" FLAG_PR=7 FLAG_DELTA=0
+  (
+    unset COUNCIL_CODEX_BIN
+    export HOME="$work/home"
+    export CONCLAVE_CODEX_BIN="$work/bin/codex"
+    export CONCLAVE_MUSE_CATALOG="$work/muse-catalog.json"
+    ID="$1" LEGS="$2" KIND=review VOTERS=claude,codex VOTERS_EXPLICIT=1 FLAG_REPO="$REPO" FLAG_PR=7 FLAG_DELTA=0
     FLAG_BASE="" FLAG_HEAD="" FLAG_WHOLE=0 HEADER_PR="" HEADER_BRANCH="" REVIEW_DELTA_BASE=""
     DIR="$work/council/$ID" ERRORS_FILE="$work/council/$ID/errors.md" BRIEF="$work/council/$ID/brief.md"
-    mkdir -p "$DIR"; printf 'Review the change.\n' >"$BRIEF"
-    review_run ) >"$work/$1.out" 2>&1
+    mkdir -p "$DIR"
+    printf 'Review the change.\n' >"$BRIEF"
+    review_run
+  ) >"$work/$1.out" 2>&1
 }
 log="$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.json"
 rc=0; run_review full-fail fail || rc=$?
