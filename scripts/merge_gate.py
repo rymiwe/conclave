@@ -5,6 +5,7 @@
     merge_gate.py parse <gate.md>
     merge_gate.py merge [--builder-bot NAME] <pr_url> <out_dir>
     merge_gate.py pick <gate-route.json>
+    merge_gate.py eligible <gate-route.json>
     merge_gate.py cursor-result|claude-result|plain-result|muse-result <reviewer output> <gate.md>
 
 The reviewer ends its answer with `one_way: yes` or `one_way: no`, and on yes
@@ -26,7 +27,8 @@ records verdict approve and gate.md still parses to that same verdict. It also
 refuses when the one_way verdict is missing, conflicting, or malformed, when gate-head.txt is missing, when
 the PR has the `one-way` label, when gh cannot read the labels, or when
 gate-route.json is missing, unreadable, or records no builder vendor, no
-reviewer vendor, or the same vendor for both. Every reason is printed.
+reviewer vendor, the same vendor for both, or a reviewer vendor listed in its
+excluded_vendors. Every reason is printed, and so is excluded_vendors.
 Otherwise it runs `gh pr merge <pr> --squash --match-head-commit <reviewed
 sha>` and returns gh's exit code. MERGE_GATE_GH overrides the gh binary.
 
@@ -50,6 +52,11 @@ list, else reviewers[0].runner. When the route asked, named no reviewer, has
 no argv list (an older seat-usage), the model or argv is unsafe, or the
 recorded builder vendor and reviewer vendor are missing or the same, it prints
 one line saying why and exits 3. grok and xai are the same vendor.
+
+eligible prints the route's eligible reviewer vendors, one per line: the
+seated reviewers plus each skipped seat with code lower_rank, minus the
+builder vendor and every excluded vendor. grok and xai are the same vendor.
+seat-usage seats one reviewer here, so every other eligible seat loses the rank.
 
 cursor-result, claude-result, plain-result, and muse-result write the
 reviewer's answer to gate.md from a cursor-agent stream, a claude JSON result,
@@ -400,6 +407,9 @@ def merge(pr: str, out_dir: str, flag: str | None = None) -> int:
     elif any(l.lower() == LABEL for l in labels) and ack is None:
         reasons.append(f"the PR has the `{LABEL}` label")
     reasons.extend(route_file_reasons(out / "gate-route.json"))
+    excluded = excluded_notes(out / "gate-route.json")
+    if excluded:
+        print(f"merge-gate: excluded vendors: {excluded}", flush=True)
     if reasons:
         print(f"merge-gate: REFUSED to merge {pr}", file=sys.stderr)
         for r in reasons:
@@ -469,22 +479,61 @@ def pick(route_json: str) -> tuple[dict | None, str]:
     return {"model": model, "runner": runner}, ""
 
 
+def _route_row(data: object) -> dict:
+    if isinstance(data, list):
+        return data[0] if data and isinstance(data[0], dict) else {}
+    return data if isinstance(data, dict) else {}
+
+
+def _reviewer_vendor(row: dict) -> str:
+    reviewers = row.get("reviewers") if isinstance(row.get("reviewers"), list) else []
+    first = reviewers[0] if reviewers and isinstance(reviewers[0], dict) else {}
+    return normalize_vendor(first.get("vendor"))
+
+
+def _excluded(row: dict) -> list[dict]:
+    rows = row.get("excluded_vendors")
+    return [e for e in rows if isinstance(e, dict)] if isinstance(rows, list) else []
+
+
+def excluded_notes(path: Path) -> str:
+    """"vendor (reason); ..." from gate-route.json, or "" when none is readable."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return ""
+    return "; ".join(f"{e.get('vendor')} ({e.get('reason')})" for e in _excluded(_route_row(data)))
+
+
+def excluded_reasons(data: object) -> list[str]:
+    """One reason when the recorded reviewer vendor is in excluded_vendors."""
+    row = _route_row(data)
+    reviewer = _reviewer_vendor(row)
+    return [f"the recorded reviewer vendor {reviewer} is in excluded_vendors: {e.get('reason')} (gate-route.json)"
+            for e in _excluded(row) if reviewer and normalize_vendor(e.get("vendor")) == reviewer]
+
+
+def eligible_vendors(data: object) -> list[str]:
+    """Seated and lower_rank vendors, minus the builder and excluded_vendors."""
+    row = _route_row(data)
+    seats = row.get("reviewers") if isinstance(row.get("reviewers"), list) else []
+    skipped = row.get("skipped") if isinstance(row.get("skipped"), list) else []
+    seats = seats + [s for s in skipped if isinstance(s, dict) and s.get("code") == "lower_rank"]
+    vendors = {normalize_vendor(s.get("vendor")) for s in seats if isinstance(s, dict)}
+    banned = {normalize_vendor(row.get("builder_vendor"))}
+    banned.update(normalize_vendor(e.get("vendor")) for e in _excluded(row))
+    return sorted(vendors - banned - {""})
+
+
 def vendor_conflict_reasons(data: object) -> list[str]:
     """Empty when the recorded builder and reviewer vendors differ.
 
     grok and xai compare equal. A missing side is its own reason, so a route
     that lacks both still lists both.
     """
-    if isinstance(data, list):
-        row = data[0] if data and isinstance(data[0], dict) else {}
-    elif isinstance(data, dict):
-        row = data
-    else:
-        row = {}
+    row = _route_row(data)
     builder = normalize_vendor(row.get("builder_vendor"))
-    reviewers = row.get("reviewers") if isinstance(row.get("reviewers"), list) else []
-    first = reviewers[0] if reviewers and isinstance(reviewers[0], dict) else {}
-    reviewer = normalize_vendor(first.get("vendor"))
+    reviewer = _reviewer_vendor(row)
     reasons: list[str] = []
     if not builder:
         reasons.append("no recorded builder vendor (gate-route.json)")
@@ -504,7 +553,7 @@ def route_file_reasons(path: Path) -> list[str]:
         data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
         return ["gate-route.json is unreadable"]
-    return vendor_conflict_reasons(data)
+    return vendor_conflict_reasons(data) + excluded_reasons(data)
 
 
 def cursor_result(stream: str, md: str) -> int:
@@ -644,6 +693,13 @@ def main(argv: list[str]) -> int:
             print(why)
             return REFUSED
         print(json.dumps(picked))
+        return 0
+    if len(argv) == 2 and argv[0] == "eligible":
+        try:
+            data = json.loads(Path(argv[1]).read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            return 1
+        print("\n".join(eligible_vendors(data)))
         return 0
     if len(argv) == 3 and argv[0] in ("cursor-result", "claude-result", "plain-result", "muse-result"):
         return {"cursor-result": cursor_result, "claude-result": claude_result,
