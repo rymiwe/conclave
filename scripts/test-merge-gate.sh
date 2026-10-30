@@ -789,6 +789,55 @@ has "cap-thin: asks Ryan" "$review_out" "merge-gate: ask Ryan: with anthropic ex
 [ -z "$run_log" ] && ok "cap-thin: no reviewer ran" || bad "cap-thin: ran: $run_log"
 [ ! -e "$T/cap-thin/out/gate-verdict.json" ] && ok "cap-thin: no verdict written" || bad "cap-thin: verdict written"
 
+# cap-rank: seat-usage marks the excluded vendor, and the builder (grok == xai),
+# as lower_rank. Neither counts. One vendor is left, so the gate asks Ryan.
+CAP_RANK="$(BUILDER=grok route astra openai gpt-6-astra '["codex","exec","-m","gpt-6-astra"]' \
+  '[{"family":"fable","vendor":"anthropic","code":"lower_rank"},{"family":"grok","vendor":"grok","code":"lower_rank"}]')"
+FAKE_COMMITS="$SEVERAL_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" FAKE_ROUTE_EXCLUDED="$CAP_RANK" run cap-rank "$ANSWER"
+[ "$review_rc" = 4 ] && ok "cap-rank: review rc 4" || bad "cap-rank: review rc $review_rc: $review_out"
+[ "$(printf '%s\n' "$review_out" | wc -l)" = 1 ] && ok "cap-rank: one line" || bad "cap-rank: lines: $review_out"
+has "cap-rank: asks Ryan" "$review_out" "merge-gate: ask Ryan: with anthropic excluded only 1 eligible reviewer vendor is left (openai), and the gate needs 2"
+elig=$(python3 "$ROOT/scripts/merge_gate.py" eligible "$T/cap-rank/out/gate-route.json")
+[ "$elig" = openai ] && ok "cap-rank: eligible is openai only" || bad "cap-rank: eligible: $elig"
+[ -z "$run_log" ] && ok "cap-rank: no reviewer ran" || bad "cap-rank: ran: $run_log"
+[ ! -e "$T/cap-rank/out/gate-verdict.json" ] && ok "cap-rank: no verdict written" || bad "cap-rank: verdict written"
+
+# cap-zero: eligible prints no vendor. wc -l of an empty here-string is 1, so
+# the message must say 0 and none, not 1 and an empty list.
+real_py=$(command -v python3)
+mkdir -p "$T/pywrap"
+cat > "$T/pywrap/python3" << EOF
+#!/usr/bin/env bash
+if [ "\${2:-}" = eligible ]; then
+  exit 0
+fi
+exec $(printf '%q' "$real_py") "\$@"
+EOF
+chmod +x "$T/pywrap/python3"
+PATH="$T/pywrap:$PATH" FAKE_COMMITS="$SEVERAL_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" FAKE_ROUTE_EXCLUDED="$CAP_THIN" run cap-zero "$ANSWER"
+[ "$review_rc" = 4 ] && ok "cap-zero: review rc 4" || bad "cap-zero: review rc $review_rc: $review_out"
+[ "$(printf '%s\n' "$review_out" | wc -l)" = 1 ] && ok "cap-zero: one line" || bad "cap-zero: lines: $review_out"
+has "cap-zero: asks Ryan" "$review_out" "merge-gate: ask Ryan: with anthropic excluded only 0 eligible reviewer vendor is left (none), and the gate needs 2"
+[ -z "$run_log" ] && ok "cap-zero: no reviewer ran" || bad "cap-zero: ran: $run_log"
+[ ! -e "$T/cap-zero/out/gate-verdict.json" ] && ok "cap-zero: no verdict written" || bad "cap-zero: verdict written"
+
+# A route whose seats are only the excluded vendor and the builder has none eligible.
+# A capped seat is not eligible either. grok and xai are the same vendor.
+python3 - "$T/zero-route.json" << 'PY'
+import json, sys
+json.dump([{
+    "builder_vendor": "grok",
+    "reviewers": [{"vendor": "Anthropic", "family": "fable"}],
+    "skipped": [
+        {"vendor": "grok", "code": "lower_rank", "family": "grok"},
+        {"vendor": "openai", "code": "capped", "family": "astra"},
+    ],
+    "excluded_vendors": [{"vendor": "anthropic", "reason": "named in commit trailers"}],
+}], open(sys.argv[1], "w"))
+PY
+elig=$(python3 "$ROOT/scripts/merge_gate.py" eligible "$T/zero-route.json"); elig_rc=$?
+[ "$elig_rc" = 0 ] && [ -z "$elig" ] && ok "zero route: no eligible vendor" || bad "zero route: rc=$elig_rc eligible=$elig"
+
 # mv5b: a reviewer from a named vendor refuses, even if seat-usage returns one.
 FAKE_COMMITS="$SEVERAL_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" \
   FAKE_ROUTE_EXCLUDED="$(route fable anthropic fable-5 '["claude","--model","fable-5"]')" run mv5b "$ANSWER"
