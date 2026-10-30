@@ -8,10 +8,15 @@
 # for the reviewer and its launch argv (saved as gate-route.json). Before
 # that, it reads the PR commits and checks V against Co-authored-by trailers.
 # One named vendor must match V (grok counts as xai; Claude and an
-# @anthropic.com mailbox count as anthropic). Several named vendors, a known
-# vendor beside a co-author outside the known families, or a commits read that
-# fails, refuse (exit 3, one line) before seat-usage runs. No model trailer,
-# or only co-authors outside the known families, keeps V and prints one note.
+# @anthropic.com mailbox count as anthropic). Two or more named vendors make V
+# the primary builder: V must be one of them, or it refuses (exit 3, one line).
+# seat-usage is then asked with --builder-vendor V plus one --exclude-vendor
+# per other named vendor. No named vendor is ever seated: a reviewer from one
+# refuses (exit 3), and no eligible reviewer left stops with "merge-gate: ask
+# Ryan: ..." (exit 4, one line). A known vendor beside a co-author outside the
+# known families, or a commits read that fails, refuses (exit 3, one line)
+# before seat-usage runs. No model trailer, or only co-authors outside the
+# known families, keeps V and prints one note.
 # gate-route.json then records vendor_source (trailer when a trailer matched
 # V, caller when V is the caller's value), and the review summary line says
 # the same. The PR author controls the trailers, so a match is a consistency
@@ -30,11 +35,14 @@
 # seat-usage picks agy for a prompt over CONCLAVE_ARGON_MAX_BYTES (default
 # 150000, the review Argon packet cap), agy never runs. The gate keeps that
 # route as gate-route-first.json and asks seat-usage again with the same
-# --builder-vendor plus --exclude-vendor <agy reviewer's vendor>. seat-usage
-# still skips stale and capped seats, so the swap only lands on a seat it
-# reports eligible. The new gate-route.json carries a "swap" record (from,
-# excluded_vendor, reason), and gate.md ends with the same note in a fenced
-# block the verdict parser skips. When the re-ask leaves no eligible reviewer,
+# --builder-vendor, every trailer exclusion, and --exclude-vendor <agy
+# reviewer's vendor>, each vendor once. seat-usage still skips stale and
+# capped seats, so the swap only lands on a seat it reports eligible. The new
+# gate-route.json carries a "swap" record (from, excluded_vendor, reason), and
+# gate.md ends with the same note in a fenced block the verdict parser skips.
+# gate-route.json lists each excluded vendor and why under "excluded_vendors"
+# ("named in commit trailers" or "agy prompt over cap"), and the same fenced
+# block in gate.md says so. When the re-ask leaves no eligible reviewer,
 # it stops with "merge-gate: ask Ryan: ..." (exit 4, one line) and writes no
 # verdict. Any other re-ask failure refuses (exit 3). It writes
 # gate-prompt.md, gate.stream.jsonl (the reviewer's raw output), gate.err,
@@ -76,18 +84,47 @@ newest() { # $1 = regex with one capture group for the version; reads IDs on std
     sort -V | tail -1 | cut -d' ' -f2
 }
 
-# Ask seat-usage for the review route into gate-route.json. Extra args (an
-# --exclude-vendor) go after --builder-vendor, which every ask keeps.
+# Exclude a vendor from every later ask, once, with the reason to record.
+exclude_add() { # $1 vendor, $2 reason
+  local v
+  for v in "${exclude_vendors[@]}"; do [ "$v" != "$1" ] || return 0; done
+  exclude_vendors+=("$1")
+  exclude_why+=("$2")
+}
+
+# "a, b": the excluded vendors for a message.
+exclude_list() { local IFS=,; printf '%s' "${exclude_vendors[*]}" | sed 's/,/, /g'; }
+
+# Refuse a reviewer from a vendor the trailers name. seat-usage should never
+# return one, and vendor_conflict_reasons only covers the builder vendor.
+refuse_named() {
+  local got v
+  got=$(jq -r 'if type == "array" then .[0] else . end | .reviewers[0].vendor // empty' "$out/gate-route.json")
+  got=$(python3 "$ROOT/scripts/trailer_vendor.py" normalize "$got")
+  for v in "${named[@]}"; do
+    [ "$got" != "$v" ] || refuse "seat-usage reviewer vendor $got is named in the PR commit trailers"
+  done
+}
+
+# Ask seat-usage for the review route into gate-route.json. Every ask keeps
+# --builder-vendor and all of exclude_vendors.
 route_ask() {
-  if ! "$SEAT_USAGE" --route review --cached --json --builder-vendor "$vendor" "$@" \
+  local v i add
+  local -a flags=()
+  for v in "${exclude_vendors[@]}"; do flags+=(--exclude-vendor "$v"); done
+  if ! "$SEAT_USAGE" --route review --cached --json --builder-vendor "$vendor" "${flags[@]}" \
       > "$out/gate-route.json" 2> "$out/gate-route.err"; then
     why=$(grep -v '^\[seat-usage\]' "$out/gate-route.err" | head -n 1)
     refuse "seat-usage --route review failed: ${why:-no output}"
   fi
   # Record where the builder vendor came from, beside the vendors seat-usage recorded.
   # A route that is not JSON is left as is for pick to refuse.
-  route_add "{\"vendor_source\": $(jq -n --arg s "$source" '$s')}" \
-    || refuse "could not record vendor_source in gate-route.json"
+  add=$(jq -n --arg s "$source" '{vendor_source: $s}')
+  if [ "${#exclude_vendors[@]}" -gt 0 ]; then
+    add=$(for i in "${!exclude_vendors[@]}"; do printf '%s\t%s\n' "${exclude_vendors[i]}" "${exclude_why[i]}"; done |
+      jq -Rn --argjson a "$add" '$a + {excluded_vendors: [inputs | split("\t") | {vendor: .[0], reason: .[1]}]}')
+  fi
+  route_add "$add" || refuse "could not record vendor_source in gate-route.json"
 }
 
 # Merge one JSON object into the route row(s) of gate-route.json. Not JSON: left as is.
@@ -141,7 +178,8 @@ pick_reviewer() {
 review() {
   [ "$#" -eq 6 ] || [ "$#" -eq 7 ] || usage
   local repo=$1 base=$2 head=$3 pr=$4 out=$5 vendor=$6 bot=${7:-} picked model why name bin
-  local commits derived status listed source=caller
+  local commits derived status listed several v source=caller
+  local -a named=() exclude_vendors=() exclude_why=()
   mkdir -p "$out" || exit 1
   # A refusal must not leave an earlier verdict for merge to read.
   rm -f "$out/gate.md" "$out/gate-verdict.json" "$out/gate-head.txt" "$out/gate-route.json" "$out/gate-route-first.json" "$out/builder-bot.txt"
@@ -156,7 +194,19 @@ review() {
   listed=${listed%%$'\n'*}
   case "$status" in
     ambiguous)
-      refuse "the PR commit trailers name several vendors or an unrecognised co-author ($listed), so no single builder vendor can be verified" ;;
+      several=$(printf '%s' "$commits" | python3 "$ROOT/scripts/trailer_vendor.py" several) \
+        || refuse "could not read the PR commits for $pr"
+      if [ -n "$several" ]; then
+        mapfile -t named <<<"$several"
+        grep -qxF -- "$vendor" <<<"$several" \
+          || refuse "builder vendor $vendor is not among the vendors the PR commit trailers name ($listed)"
+        for v in "${named[@]}"; do
+          [ "$v" = "$vendor" ] || exclude_add "$v" "named in commit trailers"
+        done
+        source=trailer
+      else
+        refuse "the PR commit trailers name several vendors or an unrecognised co-author ($listed), so no single builder vendor can be verified"
+      fi ;;
     unknown)
       echo "merge-gate: note: co-author $listed names no known model family; builder vendor $vendor is the caller's" ;;
     "")
@@ -168,8 +218,14 @@ review() {
   local -a runner
   local swap_note=""
   route_ask
-  pick_reviewer || refuse "$why"
-  echo "merge-gate: reviewer $model on $name (seat-usage --route review, builder vendor $vendor, vendor_source=$source)"
+  if ! pick_reviewer; then
+    case "$why" in
+      "no eligible reviewer"*) [ "${#exclude_vendors[@]}" -eq 0 ] || ask_ryan "with $(exclude_list) excluded there is $why" ;;
+    esac
+    refuse "$why"
+  fi
+  refuse_named
+  echo "merge-gate: reviewer $model on $name (seat-usage --route review, builder vendor $vendor, vendor_source=$source${exclude_vendors[*]:+, excluded: $(exclude_list)})"
   GATE_TMP=$(mktemp -d) || exit 1
   trap 'rm -rf "$GATE_TMP"' EXIT
   local P=$GATE_TMP W=$GATE_TMP/ws
@@ -209,19 +265,21 @@ review() {
       [[ "$from_vendor" =~ ^[a-z0-9_-]+$ ]] || refuse "$reason, and the route names no reviewer vendor to exclude"
       echo "merge-gate: $reason; asking seat-usage again without $from_vendor"
       mv "$out/gate-route.json" "$out/gate-route-first.json" || refuse "could not keep the first route"
-      route_ask --exclude-vendor "$from_vendor"
+      exclude_add "$from_vendor" "agy prompt over cap"
+      route_ask
       swap=$(jq -n --arg m "$from_model" --arg v "$from_vendor" --arg r "$reason" \
         '{swap: {from: {runner: "agy", model: $m, vendor: $v}, excluded_vendor: $v, reason: $r}}')
       route_add "$swap" || refuse "could not record the swap in gate-route.json"
       if ! pick_reviewer; then
         case "$why" in
-          "no eligible reviewer"*) ask_ryan "$reason, and with $from_vendor excluded there is $why" ;;
+          "no eligible reviewer"*) ask_ryan "$reason, and with $(exclude_list) excluded there is $why" ;;
           *) refuse "$why" ;;
         esac
       fi
+      refuse_named
       [ "$name" != agy ] || refuse "$reason, and the route without $from_vendor still names agy"
-      swap_note="merge-gate swap: reviewer $from_model on agy ($from_vendor) -> $model on $name; $reason; seat-usage asked again with --exclude-vendor $from_vendor and --builder-vendor $vendor"
-      echo "merge-gate: swapped reviewer to $model on $name (seat-usage --route review --exclude-vendor $from_vendor, builder vendor $vendor)"
+      swap_note="merge-gate swap: reviewer $from_model on agy ($from_vendor) -> $model on $name; $reason; seat-usage asked again with --exclude-vendor $(exclude_list) and --builder-vendor $vendor"
+      echo "merge-gate: swapped reviewer to $model on $name (seat-usage --route review --exclude-vendor $(exclude_list), builder vendor $vendor)"
     fi
   fi
   printf '%s\n' "$headsha" > "$out/gate-head.txt"
@@ -282,6 +340,13 @@ A
   esac
   # The parser skips fenced blocks, so the note cannot change the verdict.
   [ -z "$swap_note" ] || printf '\n```text\n%s\n```\n' "$swap_note" >> "$out/gate.md"
+  if [ "${#exclude_vendors[@]}" -gt 0 ]; then
+    local i exclude_note=""
+    for i in "${!exclude_vendors[@]}"; do
+      exclude_note+="${exclude_note:+; }${exclude_vendors[i]} (${exclude_why[i]})"
+    done
+    printf '\n```text\nmerge-gate excluded vendors: %s\n```\n' "$exclude_note" >> "$out/gate.md"
+  fi
   python3 "$ROOT/scripts/merge_gate.py" parse "$out/gate.md" > "$out/gate-verdict.json"
   cat "$out/gate-verdict.json"
   return "$ec"

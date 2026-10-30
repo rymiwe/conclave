@@ -8,7 +8,9 @@ Claude) or through an @anthropic.com mailbox. A display name of Cursor or
 Cursor Agent names no model. Several vendors, or a known vendor beside a
 co-author who names no known family, are "ambiguous". The from-commits
 command prints "unknown" and the names when the only trailers name someone
-but no known family. grok and xai are the same vendor.
+but no known family. The several command prints the named vendors, one per
+line, only when two or more are named and every co-author is recognised.
+grok and xai are the same vendor.
 
 The PR author controls the trailers. They are a consistency check on the
 builder vendor the caller passes, not proof of who wrote the code.
@@ -121,16 +123,21 @@ def main(argv: list[str]) -> int:
     if len(argv) == 2 and argv[0] == "normalize":
         print(normalize_vendor(argv[1]))
         return 0
-    if argv == ["from-commits"]:
+    if argv in (["from-commits"], ["several"]):
         try:
             doc = json.loads(sys.stdin.read())
         except ValueError:
             return 1
         if not isinstance(doc, dict):
             return 1
+        if argv == ["several"]:
+            vendors = vendors_named(doc)
+            if len(vendors) > 1 and not unmatched_names(doc):
+                print("\n".join(sorted(vendors)))
+            return 0
         sys.stdout.write(_emit(doc))
         return 0
-    print("usage: trailer_vendor.py normalize <token> | from-commits", file=sys.stderr)
+    print("usage: trailer_vendor.py normalize <token> | from-commits | several", file=sys.stderr)
     return 2
 
 
