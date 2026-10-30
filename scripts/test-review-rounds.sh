@@ -324,6 +324,37 @@ tail -3 "$work/cli.out"
 [ -s "$cli/github.com_example_app_7.park.md" ] || fail "conclave.sh round 4 wrote no park note"
 grep -q 'refused round 4' "$work/cli.out" || fail "conclave.sh round 4 message"
 
+# A capped PR with no --voters. The stub lineup demands a downgrade approval,
+# so a run that reached seating would die there. The cap must refuse first.
+cap="$work/rounds-cap"
+mkdir -p "$cap"
+cp "$cli/github.com_example_app_7.json" "$cap/"
+cat >"$work/bin/seat-usage" <<EOF2
+#!/bin/sh
+echo "seat-usage \$*" >>"$work/seat-calls"
+printf '%s\n' '[{"role":"lineup","mode":"default","reason":"stub","lineup":{"voters":[{"family":"astra","seat":"chatgpt","vendor":"openai"}]},"downgrade":{"family":"fable","reason":"stub: approve a downgraded leg"}}]'
+EOF2
+chmod +x "$work/bin/seat-usage"
+id="test-rounds-cap-$$"
+mkdir -p "$ROOT/tmp/council/$id"
+printf 'kind: review\n\nReview the change.\n' >"$ROOT/tmp/council/$id/brief.md"
+rc=0
+env -u COUNCIL_CODEX_BIN -u COUNCIL_SEAT_USAGE \
+  HOME="$work/home" \
+  CONCLAVE_CODEX_BIN="$work/bin/codex" \
+  CONCLAVE_MUSE_CATALOG="$work/muse-catalog.json" \
+  CONCLAVE_SEAT_USAGE="$work/bin/seat-usage" \
+  CONCLAVE_ROUNDS_DIR="$cap" CONCLAVE_SKIP_UPDATE_CHECK=1 CONCLAVE_JEV_OP=/bin/false \
+  "$ROOT/scripts/conclave.sh" "$id" --repo "$REPO" --pr 7 --delta >"$work/cap.out" 2>&1 || rc=$?
+rm -rf "$ROOT/tmp/council/$id"
+printf -- '--- conclave.sh capped PR, no --voters: exit %s\n' "$rc"
+tail -3 "$work/cap.out"
+[ "$rc" -eq 3 ] || fail "capped PR exit $rc: $(cat "$work/cap.out")"
+[ -s "$cap/github.com_example_app_7.park.md" ] || fail "capped PR wrote no park note"
+grep -q 'refused round 4' "$work/cap.out" || fail "capped PR message"
+[ ! -e "$work/seat-calls" ] || fail "capped PR reached seat-usage: $(cat "$work/seat-calls")"
+if grep -q 'approve a downgraded leg' "$work/cap.out"; then fail "capped PR asked for a downgrade"; fi
+
 # review_run with review_launch replaced, so no voter leg starts. The lineup
 # still asks claude and cursor-agent for --version; those hit the stubs.
 # Every leg failing leaves the log unwritten. A leg returning records after the legs.

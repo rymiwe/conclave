@@ -1344,6 +1344,9 @@ resolve_routing() {
   if [ "$KIND" = "review" ] && [ -z "${REPO:-}" ]; then
     review_resolve_repo
   fi
+  if [ "$KIND" = "review" ]; then
+    review_rounds_cap_gate
+  fi
   apply_kind_voters
 }
 

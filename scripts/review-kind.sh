@@ -1188,6 +1188,22 @@ review_rounds_plan() {
     "$([ "$rerun" = 1 ] && printf ' (rerun of this ballot)')"
 }
 
+review_rounds_cap_gate() {
+  # Before the lineup: a capped PR exits 3 without seating anyone.
+  # review_run plans again with the full PR facts. A failed lookup stays its failure.
+  local mode="" json
+  [ -n "$(review_pr_number)" ] || return 0
+  review_target_mode
+  json="$(cd "$REPO" && gh pr view "$FLAG_PR" --json number,url,headRefName,headRefOid 2>/dev/null)" || return 0
+  PR_URL="$(printf '%s' "$json" | jq -r '.url // empty' 2>/dev/null)" || return 0
+  PR_HEAD="$(printf '%s' "$json" | jq -r '.headRefName // empty')"
+  PR_OID="$(printf '%s' "$json" | jq -r '.headRefOid // empty')"
+  [ -n "$PR_URL" ] && [ -n "$PR_OID" ] || return 0
+  review_check_pr_header
+  [ "${DRY_RUN:-0}" -eq 1 ] && mode=dry-run
+  review_rounds_plan $mode >/dev/null
+}
+
 review_rounds_files() {
   # After the worktrees are proven, before any leg can touch them.
   local wt
