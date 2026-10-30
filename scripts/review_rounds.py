@@ -5,13 +5,18 @@ One JSON log per pull request under the rounds dir (CONCLAVE_ROUNDS_DIR,
 default tmp/council/rounds/). A round is one (ballot id, reviewed head) pair.
 A rerun of the same ballot at the same head is the same round.
 
-  plan     --rounds-dir D --pr-url U --ballot B --head H --mode pr|delta [--council-dir C] [--dry-run]
-           prints "<round> <delta base or -> <rerun 0|1>". A new round past the cap
-           exits 3 and writes <key>.park.md (not on --dry-run).
+  plan     --rounds-dir D --pr-url U --ballot B --head H --mode pr|delta [--council-dir C]
+           [--owner-pid P] [--dry-run]
+           prints "<round> <delta base or -> <rerun 0|1>" and reserves a slot for a new
+           round (not on --dry-run). The round number is the next one free in the log;
+           record assigns the final number. A new round past the cap exits 3 and writes
+           <key>.park.md (not on --dry-run).
   record   --rounds-dir D --pr-url U --ballot B --ballot-dir DIR --council-dir C
            --mode M --base SHA --head SHA --files-file F
            appends the round and writes DIR/round.json and DIR/carried-findings.md.
            A new delta round must name the last recorded head as --base, or exit 2.
+           A new round past the cap exits 3 and writes <key>.park.md. Every outcome
+           releases this ballot's reservation.
   snapshot --rounds-dir D --ballot-dir DIR
            copies DIR/findings.json into that round's log entry. A fresh run of a
            ballot deletes findings.json, so conclave.sh calls this first.
@@ -19,6 +24,12 @@ A rerun of the same ballot at the same head is the same round.
 Each command holds <key>.lock for its whole read-modify-write of the log, so two
 ballots on one pull request cannot lose an entry. A dry run only reads and takes
 no lock: the log is replaced atomically.
+
+A reservation holds one slot against the cap from plan to record, so a concurrent
+ballot hits the cap before it builds a worktree. It lives in the log's
+"reservations" list. It goes stale when its owner process is gone, or after
+RESERVATION_TTL seconds, whichever comes first. Plan ignores stale reservations and
+drops them on its next write, so a crashed ballot does not block the PR.
 """
 from __future__ import annotations
 
@@ -30,11 +41,14 @@ import os
 import re
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 MAX_ROUNDS = 3
 MODES = ("pr", "delta")
+# Plan to record covers the fetch and the worktree build, not the legs.
+RESERVATION_TTL = 3600
 
 
 class Refused(Exception):
@@ -156,24 +170,63 @@ def findings_md(findings: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def park_note(doc: dict, ballot: str, head: str, council_dir: Path | None) -> str:
-    last = doc["rounds"][-1]
+def owner_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+def live_reservations(doc: dict, ballot: str) -> list[dict]:
+    """Other ballots' reservations that still hold a slot."""
+    now = time.time()
+    return [r for r in doc.get("reservations") or []
+            if r["ballot"] != ballot and now - r["reserved_at"] < RESERVATION_TTL and owner_alive(r["owner_pid"])]
+
+
+def release_reservation(rounds_dir: Path, url: str, ballot: str) -> None:
+    path = log_path(rounds_dir, url)
+    doc = load_log(path, url)
+    kept = [r for r in doc.get("reservations") or [] if r["ballot"] != ballot]
+    if len(kept) != len(doc.get("reservations") or []):
+        doc["reservations"] = kept
+        write_json(path, doc)
+
+
+def park_note(doc: dict, ballot: str, head: str, council_dir: Path | None, held: list[dict]) -> str:
+    last = doc["rounds"][-1] if doc["rounds"] else None
     still = open_findings(doc["rounds"], council_dir)
     rows = "\n".join(
         f"| {r['round']} | {r['ballot']} | {r['mode']} | {r['base'][:12]}..{r['head'][:12]} |"
         for r in doc["rounds"]
     )
-    known = "" if round_findings(last, council_dir) is not None else (
+    known = "" if last is None or round_findings(last, council_dir) is not None else (
         f"\nRound {last['round']} has no findings.json yet, so its own findings are not listed.\n")
+    open_after = f"after round {last['round']}" if last else "with no round recorded"
+    reserved = f", and {', '.join(r['ballot'] for r in held)} holds a reservation" if held else ""
     return (
         f"# Parked: {doc['pr_url']}\n\n"
-        f"Stopped: round {len(doc['rounds']) + 1} refused (ballot {ballot}, head {head[:12]}). "
-        f"The cap is {MAX_ROUNDS} review rounds per pull request, and {len(doc['rounds'])} ran. "
-        f"{len(still)} finding(s) are still open after round {last['round']}.\n\n"
+        f"Stopped: round {len(doc['rounds']) + len(held) + 1} refused (ballot {ballot}, head {head[:12]}). "
+        f"The cap is {MAX_ROUNDS} review rounds per pull request, and {len(doc['rounds'])} ran{reserved}. "
+        f"{len(still)} finding(s) are still open {open_after}.\n\n"
         f"A human decides what happens next. Nothing was posted.\n\n"
         f"## Unresolved findings\n\n{findings_md(still)}{known}\n"
         f"## Rounds\n\n| round | ballot | mode | reviewed |\n|---|---|---|---|\n{rows}\n"
     )
+
+
+def refuse_cap(a, doc: dict, council_dir: Path | None, held: list[dict], dry_run: bool = False) -> None:
+    rounds_dir = Path(a.rounds_dir)
+    msg = (f"review rounds: refused round {len(doc['rounds']) + len(held) + 1} on {a.pr_url}: "
+           f"the cap is {MAX_ROUNDS} rounds per pull request")
+    if dry_run:
+        raise Refused(3, msg + " (dry run: no park note written)")
+    park = park_path(rounds_dir, a.pr_url)
+    write_atomic(park, park_note(doc, a.ballot, a.head, council_dir, held))
+    raise Refused(3, f"{msg}; park note: {park}")
 
 
 def cmd_plan(a) -> str:
@@ -201,21 +254,23 @@ def plan_round(a) -> str:
             raise Refused(2, f"review rounds: --delta needs an earlier round on {a.pr_url}; run --pr first")
         if last["head"] == a.head:
             raise Refused(2, f"review rounds: nothing to review; round {last['round']} already reviewed head {a.head[:12]}")
-    if len(rounds) >= MAX_ROUNDS:
-        msg = (f"review rounds: refused round {len(rounds) + 1} on {a.pr_url}: "
-               f"the cap is {MAX_ROUNDS} rounds per pull request")
-        if a.dry_run:
-            raise Refused(3, msg + " (dry run: no park note written)")
-        park = park_path(rounds_dir, a.pr_url)
-        write_atomic(park, park_note(doc, a.ballot, a.head, council_dir))
-        raise Refused(3, f"{msg}; park note: {park}")
+    held = live_reservations(doc, a.ballot)
+    if len(rounds) + len(held) >= MAX_ROUNDS:
+        refuse_cap(a, doc, council_dir, held, a.dry_run)
+    if not a.dry_run:
+        doc["reservations"] = held + [{"ballot": a.ballot, "head": a.head, "owner_pid": a.owner_pid,
+                                       "reserved_at": int(time.time())}]
+        write_json(log_path(rounds_dir, a.pr_url), doc)
     base = last["head"] if a.mode == "delta" else "-"
     return f"{len(rounds) + 1} {base} 0"
 
 
 def cmd_record(a) -> str:
     with pr_lock(Path(a.rounds_dir), a.pr_url):
-        return record_round(a)
+        try:
+            return record_round(a)
+        finally:
+            release_reservation(Path(a.rounds_dir), a.pr_url, a.ballot)
 
 
 def record_round(a) -> str:
@@ -229,7 +284,7 @@ def record_round(a) -> str:
     entry = find_round(rounds, a.ballot, a.head)
     if entry is None:
         if len(rounds) >= MAX_ROUNDS:
-            raise Refused(3, f"review rounds: refused round {len(rounds) + 1}: the cap is {MAX_ROUNDS}")
+            refuse_cap(a, doc, council_dir, [])
         if a.mode == "delta" and (not last or last["head"] != a.base):
             raise Refused(2, f"review rounds: ballot {a.ballot} planned a delta from {a.base[:12]}, "
                              f"but the last recorded head is {last['head'][:12] if last else 'none'}: "
@@ -308,6 +363,7 @@ def main(argv: list[str]) -> int:
         s.add_argument("--mode", required=True, choices=MODES)
     plan.add_argument("--council-dir")
     plan.add_argument("--dry-run", action="store_true")
+    plan.add_argument("--owner-pid", type=int, default=os.getppid())
     rec.add_argument("--council-dir", required=True)
     rec.add_argument("--ballot-dir", required=True)
     rec.add_argument("--base", required=True)

@@ -157,6 +157,62 @@ REVIEW_MODE=refs FLAG_HEAD=topic FLAG_BASE=master REVIEW_DELTA_BASE=""
 REVIEW_MODE=whole
 [ "$(review_codex_title)" = "whole codebase" ] || fail "whole title: $(review_codex_title)"
 
+# Two concurrent ballots with 2 rounds recorded: one takes round 3, the other
+# hits the cap at plan. Each trial logs which ballots reached the worktree build.
+eval "orig_$(declare -f review_build_and_prove)"
+review_build_and_prove() { printf '%s\n' "$ID" >>"$work/built"; orig_review_build_and_prove; }
+seed_two() { # $1 = rounds dir; a log with 2 recorded rounds
+  mkdir -p "$1"
+  jq -n '{pr_url: "https://github.com/example/app/pull/7", rounds: [range(1;3) |
+    {round: ., ballot: "seed\(.)", mode: "pr", base: ("0" * 40), head: ("\(.)" * 40), carried_open: []}]}' \
+    >"$1/github.com_example_app_7.json"
+}
+for trial in 1 2 3 4 5; do
+  export CONCLAVE_ROUNDS_DIR="$work/rounds-c$trial"
+  seed_two "$CONCLAVE_ROUNDS_DIR"
+  rm -f "$work/built"
+  mkfifo "$work/go"
+  exec 9<>"$work/go"
+  a="c$trial-a" b="c$trial-b"
+  ( read -r _ <&9; review_round "$a" 0 ) >"$work/$a.out" 2>&1 & pa=$!
+  ( read -r _ <&9; review_round "$b" 0 ) >"$work/$b.out" 2>&1 & pb=$!
+  printf 'go\ngo\n' >&9
+  ra=0; rb=0; wait "$pa" || ra=$?; wait "$pb" || rb=$?
+  exec 9>&-
+  rm -f "$work/go"
+  case "$ra $rb" in
+    "0 3") won="$a" lost="$b" ;;
+    "3 0") won="$b" lost="$a" ;;
+    *) fail "concurrent ballots exit $ra $rb: $(cat "$work/$a.out" "$work/$b.out")" ;;
+  esac
+  [ "$(cat "$work/built")" = "$won" ] || fail "worktree build ran for: $(tr '\n' ' ' <"$work/built")"
+  [ ! -e "$work/council/$lost/review-files.txt" ] || fail "refused ballot $lost built worktrees"
+  [ "$(jq -c '[.rounds[-1].round, .rounds[-1].ballot, (.reservations | length)]' "$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.json")" = "[3,\"$won\",0]" ] \
+    || fail "round 3: $(cat "$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.json")"
+  park="$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.park.md"
+  [ -s "$park" ] || fail "refused ballot wrote no park note"
+  grep -q "ballot $lost" "$park" || fail "park note names another ballot"
+done
+printf -- '--- concurrent ballots, 5 trials; last trial: %s exit 0 round 3, %s exit 3\n' "$won" "$lost"
+printf -- '--- worktree builds in that trial: %s\n' "$(cat "$work/built")"
+printf -- '--- refused ballot output\n'; cat "$work/$lost.out"
+printf -- '--- park note %s\n' "$park"; cat "$park"
+review_build_and_prove() { orig_review_build_and_prove; }
+
+# A cap refusal at record: exit 3 from review_rounds_record, and a park note.
+export CONCLAVE_ROUNDS_DIR="$work/rounds-rec"
+mkdir -p "$CONCLAVE_ROUNDS_DIR"
+jq -n '{pr_url: "https://github.com/example/app/pull/7", rounds: [range(1;4) |
+  {round: ., ballot: "seed\(.)", mode: "pr", base: ("0" * 40), head: ("\(.)" * 40), carried_open: []}]}' \
+  >"$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.json"
+ID=late DIR="$work/council/late" REVIEW_WORKTREES="$REPO" REVIEW_DELTA_BASE="" PR_URL=https://github.com/example/app/pull/7
+REVIEW_LEG_BASE="$(g -C "$REPO" rev-parse master)" REVIEW_HEAD_OID="$(g -C "$REPO" rev-parse HEAD)"
+mkdir -p "$DIR"
+rc=0; ( review_rounds_record ) >"$work/late.out" 2>&1 || rc=$?
+[ "$rc" -eq 3 ] || fail "cap at record exit $rc: $(cat "$work/late.out")"
+[ -s "$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.park.md" ] || fail "cap at record wrote no park note"
+printf -- '--- cap at record: exit %s\n' "$rc"; cat "$work/late.out"
+
 # The real entry point. gh names a head the repo lacks, so if the cap ever
 # failed to refuse, the run would die at the fetch, before any leg.
 cli="$work/rounds3"
@@ -182,5 +238,23 @@ tail -3 "$work/cli.out"
 [ "$rc" -eq 3 ] || fail "conclave.sh round 4 exit $rc: $(cat "$work/cli.out")"
 [ -s "$cli/github.com_example_app_7.park.md" ] || fail "conclave.sh round 4 wrote no park note"
 grep -q 'refused round 4' "$work/cli.out" || fail "conclave.sh round 4 message"
+
+# Same entry point, 2 rounds recorded and another ballot's live reservation.
+cli="$work/rounds4"
+seed_two "$cli"
+jq --argjson pid "$$" --argjson now "$(date +%s)" \
+  '.reservations = [{ballot: "other", head: ("3" * 40), owner_pid: $pid, reserved_at: $now}]' \
+  "$cli/github.com_example_app_7.json" >"$work/held.json"
+mv "$work/held.json" "$cli/github.com_example_app_7.json"
+mkdir -p "$ROOT/tmp/council/$id"
+printf 'kind: review\n\nReview the change.\n' >"$ROOT/tmp/council/$id/brief.md"
+rc=0
+CONCLAVE_ROUNDS_DIR="$cli" CONCLAVE_PREFLIGHT=0 CONCLAVE_SKIP_UPDATE_CHECK=1 CONCLAVE_JEV_OP=/bin/false \
+  "$ROOT/scripts/conclave.sh" "$id" --repo "$REPO" --pr 7 --voters claude,codex >"$work/cli2.out" 2>&1 || rc=$?
+rm -rf "$ROOT/tmp/council/$id"
+printf -- '--- conclave.sh with a reserved round 3: exit %s\n' "$rc"
+tail -3 "$work/cli2.out"
+[ "$rc" -eq 3 ] || fail "conclave.sh reserved cap exit $rc: $(cat "$work/cli2.out")"
+[ -s "$cli/github.com_example_app_7.park.md" ] || fail "conclave.sh reserved cap wrote no park note"
 
 echo "test-review-rounds: all passed"

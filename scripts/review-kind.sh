@@ -1158,11 +1158,12 @@ review_rounds_dir() {
 review_rounds_plan() {
   # PR targets only. Sets REVIEW_ROUND, and REVIEW_DELTA_BASE on --delta.
   # A new round past the cap exits 3 here, before any worktree or leg.
-  # $1 = dry-run previews without writing the park note.
+  # A new round also reserves a slot under this process until record.
+  # $1 = dry-run previews without writing the park note or a reservation.
   local mode=pr out rc=0 base rerun
   [ "${FLAG_DELTA:-0}" -eq 1 ] && mode=delta
   local -a args=(plan --rounds-dir "$(review_rounds_dir)" --pr-url "$PR_URL"
-    --ballot "$ID" --head "$PR_OID" --mode "$mode" --council-dir "$(dirname "$DIR")")
+    --ballot "$ID" --head "$PR_OID" --mode "$mode" --council-dir "$(dirname "$DIR")" --owner-pid "$$")
   [ "${1:-}" = dry-run ] && args+=(--dry-run)
   out="$(python3 "$REVIEW_KIND_DIR/review_rounds.py" "${args[@]}")" || rc=$?
   case "$rc" in
@@ -1181,15 +1182,19 @@ review_rounds_plan() {
 
 review_rounds_record() {
   # After the worktrees are proven: the reviewed file list goes in the log.
-  local wt files
+  local wt files rc=0
   wt="$(printf '%s\n' "$REVIEW_WORKTREES" | head -1)"
   files="$DIR/review-files.txt"
   git -C "$wt" diff --name-only HEAD >"$files" || die "diff --name-only failed: $wt"
   python3 "$REVIEW_KIND_DIR/review_rounds.py" record --rounds-dir "$(review_rounds_dir)" \
     --pr-url "$PR_URL" --ballot "$ID" --ballot-dir "$DIR" --council-dir "$(dirname "$DIR")" \
     --mode "$([ -n "$REVIEW_DELTA_BASE" ] && echo delta || echo pr)" \
-    --base "$REVIEW_LEG_BASE" --head "$REVIEW_HEAD_OID" --files-file "$files" \
-    || die "review rounds record failed"
+    --base "$REVIEW_LEG_BASE" --head "$REVIEW_HEAD_OID" --files-file "$files" || rc=$?
+  case "$rc" in
+    0) ;;
+    3) log_err "round cap: see $(review_rounds_dir)"; exit 3 ;;
+    *) die "review rounds record failed (exit $rc)" ;;
+  esac
 }
 
 review_delta_base() {

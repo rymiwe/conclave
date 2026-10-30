@@ -843,9 +843,16 @@ get distinct rounds. A `--delta` ballot whose planned base is no longer the last
 recorded head exits before any leg: another ballot recorded first. Rerun it with
 a new ballot id.
 
-The cap is 3 rounds per PR. A 4th round exits 3 before any worktree is built,
-and writes `<key>.park.md` beside the round log: the open findings and why it
-stopped. Nothing is posted. A PR body links to the round log or the park note;
+Plan reserves a slot in the round log, so with 2 rounds recorded, a second
+concurrent ballot hits the cap before it builds a worktree. Record releases the
+reservation. A crashed ballot's reservation goes stale when its `conclave.sh`
+process is gone, or after one hour, and then it stops counting.
+
+The cap is 3 rounds per PR. Recorded rounds plus other ballots' live
+reservations count against it. A refusal exits 3 and writes `<key>.park.md`
+beside the round log: the open findings and why it stopped. Plan refuses before
+any worktree is built. Record refuses the same way if a ballot's reservation
+went stale and another ballot took the slot. Nothing is posted. A PR body links to the round log or the park note;
 it does not list each round. Getting past the cap is a human decision. Do not
 loosen the findings gate to reach clean sooner.
 

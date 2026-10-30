@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -140,6 +141,67 @@ def scenario_b(w):
     return note
 
 
+def seed(w, count, reservations=()):
+    """A log with count recorded rounds and the given reservations."""
+    (w / "rounds").mkdir()
+    rounds = [{"round": n, "ballot": f"s{n}", "mode": "pr", "base": "0" * 40, "head": str(n) * 40}
+              for n in range(1, count + 1)]
+    (w / "rounds" / f"{KEY}.json").write_text(json.dumps(
+        {"pr_url": URL, "rounds": rounds, "reservations": list(reservations)}))
+
+
+def held(ballot, pid, age=0):
+    return {"ballot": ballot, "head": H3, "owner_pid": pid, "reserved_at": int(time.time()) - age}
+
+
+def dead_pid():
+    p = subprocess.Popen(["true"])
+    p.wait()
+    return p.pid
+
+
+def reservations():
+    """Live reservations block; a dead owner, an old one, and a released one do not."""
+    with tempfile.TemporaryDirectory() as t:
+        w = Path(t)
+        seed(w, 2, [held("live", os.getpid())])
+        p = plan(w, "next", H4, "pr")
+        if p.returncode != 3 or "refused round 4" not in p.stderr:
+            fail(f"a live reservation does not block: {p.returncode} {p.stderr}")
+        note = (w / "rounds" / f"{KEY}.park.md").read_text()
+        if "live holds a reservation" not in note:
+            fail(f"park note misses the holder:\n{note}")
+    for name, stale in (("dead owner", held("gone", dead_pid())), ("expired", held("old", os.getpid(), 3600))):
+        with tempfile.TemporaryDirectory() as t:
+            w = Path(t)
+            seed(w, 2, [stale])
+            p = plan(w, "next", H4, "pr")
+            if p.stdout.strip() != "3 - 0":
+                fail(f"{name} reservation blocked: {p.returncode} {p.stderr}")
+            if [r["ballot"] for r in log(w)["reservations"]] != ["next"]:
+                fail(f"{name} reservation not dropped: {log(w)}")
+    with tempfile.TemporaryDirectory() as t:
+        w = Path(t)
+        seed(w, 2)
+        if plan(w, "a", H3, "pr").returncode:
+            fail("plan a")
+        rec = subprocess.run(record_argv(w, "a", H3, "pr", "0" * 40), capture_output=True, text=True)
+        if rec.returncode or log(w)["reservations"]:
+            fail(f"record keeps its reservation: {rec.stderr} {log(w)}")
+    with tempfile.TemporaryDirectory() as t:
+        w = Path(t)
+        seed(w, 3, [held("late", os.getpid())])
+        rec = subprocess.run(record_argv(w, "late", H4, "pr", "0" * 40), capture_output=True, text=True)
+        if rec.returncode != 3 or not (w / "rounds" / f"{KEY}.park.md").is_file() or log(w)["reservations"]:
+            fail(f"cap at record: {rec.returncode} {rec.stderr} {log(w)}")
+    with tempfile.TemporaryDirectory() as t:
+        w = Path(t)
+        seed(w, 0, [held(b, os.getpid()) for b in ("a", "b", "c")])
+        p = plan(w, "d", H4, "pr")
+        if p.returncode != 3 or "with no round recorded" not in (w / "rounds" / f"{KEY}.park.md").read_text():
+            fail(f"cap on an empty log: {p.returncode} {p.stderr}")
+
+
 def main():
     last = None
     refused = None
@@ -155,6 +217,8 @@ def main():
     with tempfile.TemporaryDirectory() as t:
         print("--- park note after a round 1 rerun added r1-f2")
         print(scenario_b(Path(t)))
+    reservations()
+    print("--- reservations: live blocks; dead owner and expired do not; record releases; cap at record parks")
     print("test-review-rounds-race: all passed")
 
 
