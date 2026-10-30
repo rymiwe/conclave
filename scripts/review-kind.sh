@@ -46,6 +46,7 @@ REVIEW_HEAD_OID=""
 REVIEW_ROUND=""
 REVIEW_DELTA_BASE=""
 REVIEW_PLANNED_LATEST=""
+REVIEW_PLANNED_ROUNDS=""
 REVIEW_DELTA_ADD=""
 REVIEW_DELTA_DEL=""
 
@@ -1157,18 +1158,18 @@ review_rounds_dir() {
 }
 
 review_rounds_plan() {
-  # PR targets only. Sets REVIEW_ROUND, REVIEW_PLANNED_LATEST, and
-  # REVIEW_DELTA_BASE on --delta. Advisory: it never writes the round log.
+  # PR targets only. Sets REVIEW_ROUND, REVIEW_PLANNED_LATEST,
+  # REVIEW_PLANNED_ROUNDS, and REVIEW_DELTA_BASE on --delta. Advisory: it never writes the round log.
   # A new round past the cap exits 3 here, before any worktree or leg.
   # $1 = dry-run previews without writing the park note.
   # $1 = recheck runs after the worktree build, before the legs: it also exits 3
   # when another ballot recorded since this plan.
-  local mode=pr out rc=0 base rerun latest
+  local mode=pr out rc=0 base rerun latest recorded
   [ "${FLAG_DELTA:-0}" -eq 1 ] && mode=delta
   local -a args=(plan --rounds-dir "$(review_rounds_dir)" --pr-url "$PR_URL"
     --ballot "$ID" --head "$PR_OID" --mode "$mode" --council-dir "$(dirname "$DIR")")
   [ "${1:-}" = dry-run ] && args+=(--dry-run)
-  [ "${1:-}" = recheck ] && args+=(--planned-latest "$REVIEW_PLANNED_LATEST")
+  [ "${1:-}" = recheck ] && args+=(--planned-latest "$REVIEW_PLANNED_LATEST" --planned-rounds "$REVIEW_PLANNED_ROUNDS")
   out="$(python3 "$REVIEW_KIND_DIR/review_rounds.py" "${args[@]}")" || rc=$?
   case "$rc" in
     0) ;;
@@ -1176,8 +1177,9 @@ review_rounds_plan() {
     *) die "review rounds plan failed (exit $rc)" ;;
   esac
   [ "${1:-}" = recheck ] && return 0
-  read -r REVIEW_ROUND base rerun latest <<<"$out"
+  read -r REVIEW_ROUND base rerun latest recorded <<<"$out"
   REVIEW_PLANNED_LATEST="$latest"
+  REVIEW_PLANNED_ROUNDS="$recorded"
   if [ "$mode" = delta ]; then
     REVIEW_DELTA_BASE="$base"
   fi
@@ -1207,7 +1209,7 @@ review_rounds_record() {
     --pr-url "$PR_URL" --ballot "$ID" --ballot-dir "$DIR" --council-dir "$(dirname "$DIR")" \
     --mode "$([ -n "$REVIEW_DELTA_BASE" ] && echo delta || echo pr)" \
     --base "$REVIEW_LEG_BASE" --head "$REVIEW_HEAD_OID" \
-    --planned-latest "$REVIEW_PLANNED_LATEST" --files-file "$DIR/review-files.txt" || rc=$?
+    --planned-latest "$REVIEW_PLANNED_LATEST" --planned-rounds "$REVIEW_PLANNED_ROUNDS" --files-file "$DIR/review-files.txt" || rc=$?
   case "$rc" in
     0) ;;
     3) log_err "round refused: see $DIR/round-refused.md"; exit 3 ;;

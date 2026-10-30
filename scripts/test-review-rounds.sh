@@ -128,7 +128,7 @@ printf '{"target": "pr 7 delta", "resolved": ["r2-f1"], "findings": [{"id": "f1"
 out="$(python3 "$ROOT/scripts/review_rounds.py" plan --rounds-dir "$CONCLAVE_ROUNDS_DIR" \
   --pr-url https://github.com/example/app/pull/7 --ballot r1 --head "$h1" --mode pr)" \
   || fail "a rerun of round 1 after round 3 was refused"
-[ "$out" = "1 - 1 $h3" ] || fail "a rerun of round 1 after round 3 is round 1, got '$out'"
+[ "$out" = "1 - 1 $h3 3" ] || fail "a rerun of round 1 after round 3 is round 1, got '$out'"
 
 h4="$(push_head d.txt)"
 rc=0
@@ -238,7 +238,7 @@ jq -n '{pr_url: "https://github.com/example/app/pull/7", rounds: [range(1;4) |
   >"$CONCLAVE_ROUNDS_DIR/github.com_example_app_7.json"
 ID=late DIR="$work/council/late" REVIEW_WORKTREES="$REPO" REVIEW_DELTA_BASE="" PR_URL=https://github.com/example/app/pull/7
 REVIEW_LEG_BASE="$(g -C "$REPO" rev-parse master)" REVIEW_HEAD_OID="$(g -C "$REPO" rev-parse HEAD)"
-REVIEW_PLANNED_LATEST="$(printf '2%.0s' $(seq 40))"
+REVIEW_PLANNED_LATEST="$(printf '2%.0s' $(seq 40))" REVIEW_PLANNED_ROUNDS=2
 mkdir -p "$DIR"
 printf 'a.txt\n' >"$DIR/review-files.txt"
 fake_legs ok

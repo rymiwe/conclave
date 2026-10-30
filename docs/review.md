@@ -852,8 +852,8 @@ the round log: why it stopped, the open findings, and the rounds. Nothing is
 posted.
 
 Concurrent ballots can both pass plan, so record decides the race. The first to
-record wins. A later ballot is refused when the cap is reached or the latest
-recorded head moved since its plan. It records nothing, exits 3, and writes
+record wins. A later ballot is refused when the cap is reached or another round
+was recorded since its plan, even at the same head. It records nothing, exits 3, and writes
 `round-refused.md` in the ballot and the park note. Both name the winning round
 and its head. Its reports stay on disk. Rerun with a new ballot id, if the cap
 allows.

@@ -42,11 +42,12 @@ def prep(w, ballot):
     return d
 
 
-def record_argv(w, ballot, head, mode, base, planned="-"):
+def record_argv(w, ballot, head, mode, base, planned="-", rounds=0):
     d = prep(w, ballot)
     return argv("record", "--rounds-dir", str(w / "rounds"), "--pr-url", URL, "--ballot", ballot,
                 "--ballot-dir", str(d), "--council-dir", str(w / "council"), "--mode", mode,
-                "--base", base, "--head", head, "--planned-latest", planned, "--files-file", str(d / "files.txt"))
+                "--base", base, "--head", head, "--planned-latest", planned, "--planned-rounds", str(rounds),
+                "--files-file", str(d / "files.txt"))
 
 
 def together(*cmds):
@@ -93,7 +94,7 @@ def race(w, seeded, ballots, *record):
 def race_pr(w):
     """Two --pr ballots on an empty log."""
     for b in ("a", "b"):
-        if plan(w, b, H1, "pr").stdout.strip() != "1 - 0 -":
+        if plan(w, b, H1, "pr").stdout.strip() != "1 - 0 - 0":
             fail("both ballots plan round 1 on an empty log")
     if (w / "rounds" / f"{KEY}.json").exists():
         fail("plan wrote the log")
@@ -107,11 +108,12 @@ def race_delta(w):
         fail(record.stderr)
     before = (w / "rounds" / f"{KEY}.json").read_bytes()
     for b, h in (("x", H2), ("y", H3)):
-        if plan(w, b, h, "delta").stdout.strip() != f"2 {H1} 0 {H1}":
+        if plan(w, b, h, "delta").stdout.strip() != f"2 {H1} 0 {H1} 1":
             fail("both delta ballots plan round 2")
     if (w / "rounds" / f"{KEY}.json").read_bytes() != before:
         fail("plan wrote the log")
-    refused = race(w, 1, ("x", "y"), record_argv(w, "x", H2, "delta", H1, H1), record_argv(w, "y", H3, "delta", H1, H1))
+    refused = race(w, 1, ("x", "y"), record_argv(w, "x", H2, "delta", H1, H1, 1),
+                  record_argv(w, "y", H3, "delta", H1, H1, 1))
     if log(w)["rounds"][1]["base"] != H1:
         fail(f"delta log: {log(w)}")
     return refused
@@ -120,8 +122,33 @@ def race_delta(w):
 def race_cap(w):
     """Two ballots plan round 3 with 2 recorded."""
     seed(w, 2)
-    return race(w, 2, ("x", "y"), record_argv(w, "x", H3, "pr", "0" * 40, "2" * 40),
-                record_argv(w, "y", H4, "pr", "0" * 40, "2" * 40))
+    return race(w, 2, ("x", "y"), record_argv(w, "x", H3, "pr", "0" * 40, "2" * 40, 2),
+                record_argv(w, "y", H4, "pr", "0" * 40, "2" * 40, 2))
+
+
+def race_same_head(w):
+    """Round 1 reviewed H1. Two --pr ballots plan at H1: same planned head, one open round."""
+    seed_rec = subprocess.run(record_argv(w, "r1", H1, "pr", "0" * 40), capture_output=True, text=True)
+    if seed_rec.returncode:
+        fail(seed_rec.stderr)
+    for b in ("x", "y"):
+        if plan(w, b, H1, "pr").stdout.strip() != f"2 - 0 {H1} 1":
+            fail("both ballots plan round 2 at the latest recorded head")
+    refused = race(w, 1, ("x", "y"), record_argv(w, "x", H1, "pr", "0" * 40, H1, 1),
+                   record_argv(w, "y", H1, "pr", "0" * 40, H1, 1))
+    won = log(w)["rounds"][-1]["ballot"]
+    lost = "y" if won == "x" else "x"
+    p = run("plan", "--rounds-dir", str(w / "rounds"), "--pr-url", URL, "--ballot", lost, "--head", H1,
+            "--mode", "pr", "--planned-latest", H1, "--planned-rounds", "1")
+    if p.returncode != 3:
+        fail(f"same-head recheck: {p.returncode} {p.stderr}")
+    same = plan(w, won, H1, "pr").stdout.strip()
+    if same != f"2 - 1 {H1} 2":
+        fail(f"same-ballot rerun: {same}")
+    rerun = subprocess.run(record_argv(w, won, H1, "pr", "0" * 40, H1, 2), capture_output=True, text=True)
+    if rerun.returncode or len(log(w)["rounds"]) != 2:
+        fail(f"same-ballot rerun record: {rerun.stderr} {log(w)}")
+    return refused
 
 
 def scenario_b(w):
@@ -129,13 +156,13 @@ def scenario_b(w):
     rec = lambda *x: subprocess.run(record_argv(w, *x), capture_output=True, text=True, check=True)
     rec("r1", H1, "pr", "0" * 40)
     write_findings(w, "r1", "f1", "first finding of round 1")
-    rec("r2", H2, "delta", H1, H1)
+    rec("r2", H2, "delta", H1, H1, 1)
     write_findings(w, "r2", "f1", "finding of round 2", resolved=["r1-f1"])
-    rec("r3", H3, "delta", H2, H2)
+    rec("r3", H3, "delta", H2, H2, 2)
     write_findings(w, "r3", "f1", "finding of round 3")
     doc = json.loads((w / "council" / "r1" / "findings.json").read_text())
     doc["findings"].append({"id": "f2", "claim": "added by the round 1 rerun", "file": "a.txt", "line": 2})
-    if plan(w, "r1", H1, "pr").stdout.strip() != f"1 - 1 {H3}":
+    if plan(w, "r1", H1, "pr").stdout.strip() != f"1 - 1 {H3} 3":
         fail("rerun of round 1 is round 1")
     rec("r1", H1, "pr", "0" * 40)
     (w / "council" / "r1" / "findings.json").write_text(json.dumps(doc))
@@ -166,13 +193,13 @@ def stale():
         w = Path(t)
         seed(w, 2)
         before = log(w)
-        rec = subprocess.run(record_argv(w, "stale", H4, "pr", "0" * 40, "1" * 40), capture_output=True, text=True)
+        rec = subprocess.run(record_argv(w, "stale", H4, "pr", "0" * 40, "1" * 40, 1), capture_output=True, text=True)
         note = w / "council" / "stale" / "round-refused.md"
         if rec.returncode != 3 or log(w) != before or not note.is_file():
             fail(f"stale ballot: {rec.returncode} {rec.stderr} {log(w)}")
         print(f"--- stale record: exit {rec.returncode}; rounds still {len(log(w)['rounds'])}; note: {note.read_text()}", end="")
         p = run("plan", "--rounds-dir", str(w / "rounds"), "--pr-url", URL, "--ballot", "stale", "--head", H4,
-                "--mode", "delta", "--planned-latest", H1)
+                "--mode", "delta", "--planned-latest", H1, "--planned-rounds", "1")
         if p.returncode != 3 or "park note" not in p.stderr or log(w) != before:
             fail(f"stale recheck: {p.returncode} {p.stderr}")
         print(f"--- stale recheck before the legs: exit {p.returncode}: {p.stderr}", end="")
@@ -180,7 +207,7 @@ def stale():
 
 def main():
     refused = None
-    for fn in (race_pr, race_delta, race_cap):
+    for fn in (race_pr, race_delta, race_same_head, race_cap):
         for _ in range(TRIALS):
             with tempfile.TemporaryDirectory() as t:
                 refused = fn(Path(t))

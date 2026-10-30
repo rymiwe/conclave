@@ -8,17 +8,19 @@ the same head is the same round. Only completed rounds count against the cap or
 move the delta base, so a launch that failed outright changes nothing.
 
   plan     --rounds-dir D --pr-url U --ballot B --head H --mode pr|delta [--council-dir C]
-           [--planned-latest H|-] [--dry-run]
-           prints "<round> <delta base or -> <rerun 0|1> <latest recorded head or ->".
+           [--planned-latest H|- --planned-rounds N] [--dry-run]
+           prints "<round> <delta base or -> <rerun 0|1> <latest recorded head or ->
+           <recorded rounds>".
            An advisory check: it never writes the log or holds a slot, and record
            assigns the final number. It refuses a new round past the cap. With
-           --planned-latest it also refuses when the latest recorded head moved.
+           --planned-latest it also refuses when another round was recorded.
            Both refusals exit 3 and write <key>.park.md (not on --dry-run).
   record   --rounds-dir D --pr-url U --ballot B --ballot-dir DIR --council-dir C
-           --mode M --base SHA --head SHA --planned-latest H|- --files-file F
+           --mode M --base SHA --head SHA --planned-latest H|- --planned-rounds N
+           --files-file F
            appends the round and writes DIR/round.json and DIR/carried-findings.md.
-           A new round past the cap, or one whose planned latest head is no longer
-           the latest, records nothing, exits 3, and writes <key>.park.md and
+           A new round past the cap, or one whose planned head and round count are
+           no longer the latest, records nothing, exits 3, and writes <key>.park.md and
            DIR/round-refused.md, which name the winning round and its head.
   snapshot --rounds-dir D --ballot-dir DIR
            copies DIR/findings.json into that round's log entry. A fresh run of a
@@ -191,9 +193,11 @@ def refusal(a, rounds: list[dict]) -> str | None:
         return (f"refused round {len(rounds) + 1} (ballot {a.ballot}, head {a.head[:12]}): "
                 f"the cap is {MAX_ROUNDS} rounds per pull request, and {won}.")
     latest = last["head"] if last else "-"
-    if a.planned_latest is not None and a.planned_latest != latest:
+    # A head alone does not identify a round: two rounds can review the same head.
+    if a.planned_latest is not None and (a.planned_latest, a.planned_rounds) != (latest, len(rounds)):
         return (f"refused ballot {a.ballot} (head {a.head[:12]}): it planned from "
-                f"{a.planned_latest[:12]}, but {won} first; rerun with a new ballot id.")
+                f"{a.planned_rounds} recorded round(s) at {a.planned_latest[:12]}, "
+                f"but {won} first; rerun with a new ballot id.")
     return None
 
 
@@ -219,7 +223,7 @@ def cmd_plan(a) -> str:
             raise Refused(2, f"review rounds: ballot {a.ballot} already reviewed head {a.head[:12]} "
                              f"as mode {same['mode']}; use a new ballot id")
         base = same["base"] if a.mode == "delta" else "-"
-        return f"{same['round']} {base} 1 {latest}"
+        return f"{same['round']} {base} 1 {latest} {len(rounds)}"
     if a.mode == "delta" and a.planned_latest is None:
         if not last:
             raise Refused(2, f"review rounds: --delta needs an earlier round on {a.pr_url}; run --pr first")
@@ -229,7 +233,7 @@ def cmd_plan(a) -> str:
     if reason:
         refuse(a, doc, reason, council_dir, a.dry_run)
     base = latest if a.mode == "delta" else "-"
-    return f"{len(rounds) + 1} {base} 0 {latest}"
+    return f"{len(rounds) + 1} {base} 0 {latest} {len(rounds)}"
 
 
 def cmd_record(a) -> str:
@@ -325,10 +329,12 @@ def main(argv: list[str]) -> int:
     plan.add_argument("--council-dir")
     plan.add_argument("--dry-run", action="store_true")
     plan.add_argument("--planned-latest")
+    plan.add_argument("--planned-rounds", type=int)
     rec.add_argument("--council-dir", required=True)
     rec.add_argument("--ballot-dir", required=True)
     rec.add_argument("--base", required=True)
     rec.add_argument("--planned-latest", required=True)
+    rec.add_argument("--planned-rounds", type=int, required=True)
     rec.add_argument("--files-file", required=True)
     snap.add_argument("--ballot-dir", required=True)
     a = p.parse_args(argv)
