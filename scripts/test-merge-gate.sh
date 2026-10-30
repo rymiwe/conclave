@@ -387,7 +387,9 @@ hasnt "missing: no gh pr merge" "$gh_log" "pr merge"
 # mv6: multi-vendor trailers plus the agy swap keep every exclusion, once each.
 MV6_COMMITS='{"commits":[{"messageHeadline":"a","messageBody":"Co-authored-by: Grok <a@b>\nCo-authored-by: Opus 4 <c@d>\n"}]}'
 MV_CODEX="$(route astra openai gpt-6-astra '["codex","exec","-m","gpt-6-astra"]')"
-FAKE_COMMITS="$MV6_COMMITS" FAKE_ROUTE_EXCLUDED="$ROUTE_ARGON" FAKE_ROUTE_SWAPPED="$MV_CODEX" overcap mv6
+# A seat that lost the rank is eligible. The first trailer ask needs two vendors.
+MV_ARGON="$(route argon google gemini-4-argon-high '["agy","--model","gemini-4-argon-high"]' '[{"family":"astra","vendor":"openai","code":"lower_rank"}]')"
+FAKE_COMMITS="$MV6_COMMITS" FAKE_ROUTE_EXCLUDED="$MV_ARGON" FAKE_ROUTE_SWAPPED="$MV_CODEX" overcap mv6
 d="$T/mv6"
 [ "$review_rc" = 0 ] && ok "mv6: review rc 0" || bad "mv6: review rc $review_rc: $review_err"
 [ "$(sed -n 1p "$FAKE_SU_LOG")" = "seat-usage --route review --cached --json --builder-vendor xai --exclude-vendor anthropic" ] \
@@ -401,7 +403,7 @@ jq -e '.[0].excluded_vendors == [{vendor:"anthropic",reason:"named in commit tra
 has "mv6: gate.md records both and why" "$(cat "$d/out/gate.md")" "merge-gate excluded vendors: anthropic (named in commit trailers); google (agy prompt over cap)"
 has "mv6: swap note names both" "$(cat "$d/out/gate.md")" "--exclude-vendor anthropic, google and --builder-vendor xai"
 has "mv6: verdict still parses" "$(cat "$d/out/gate-verdict.json")" '"verdict": "approve"'
-FAKE_COMMITS="$MV6_COMMITS" FAKE_ROUTE_EXCLUDED="$ROUTE_ARGON" FAKE_ROUTE_SWAPPED="$ASK" overcap mv6-ask
+FAKE_COMMITS="$MV6_COMMITS" FAKE_ROUTE_EXCLUDED="$MV_ARGON" FAKE_ROUTE_SWAPPED="$ASK" overcap mv6-ask
 [ "$review_rc" = 4 ] && ok "mv6-ask: review rc 4" || bad "mv6-ask: review rc $review_rc: $review_err"
 has "mv6-ask: names both" "$review_err" "with anthropic, google excluded there is no eligible reviewer"
 [ ! -e "$T/mv6-ask/out/gate-verdict.json" ] && ok "mv6-ask: no verdict written" || bad "mv6-ask: verdict written"
@@ -718,7 +720,8 @@ jq -e '.[0] | has("excluded_vendors") | not' "$T/mv1/out/gate-route.json" > /dev
 hasnt "mv1: gate.md has no exclusion note" "$(cat "$T/mv1/out/gate.md")" "excluded vendors"
 
 # mv2: anthropic plus xai trailers: neither reviews.
-FAKE_COMMITS="$SEVERAL_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" FAKE_ROUTE_EXCLUDED="$ROUTE_ASTRA" run mv2 "$ANSWER"
+MV_ASTRA="$(route astra openai gpt-6-astra '["codex","exec","-m","gpt-6-astra"]' '[{"family":"argon","vendor":"google","code":"lower_rank"}]')"
+FAKE_COMMITS="$SEVERAL_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" FAKE_ROUTE_EXCLUDED="$MV_ASTRA" run mv2 "$ANSWER"
 [ "$review_rc" = 0 ] && ok "mv2: review rc 0" || bad "mv2: review rc $review_rc: $review_out"
 [ "$merge_rc" = 0 ] && ok "mv2: merge rc 0" || bad "mv2: merge rc $merge_rc"
 [ "$su_log" = "seat-usage --route review --cached --json --builder-vendor xai --exclude-vendor anthropic" ] \
@@ -731,7 +734,7 @@ has "mv2: gate.md records the exclusion" "$(cat "$T/mv2/out/gate.md")" "merge-ga
 has "mv2: verdict still parses" "$(cat "$T/mv2/out/gate-verdict.json")" '"verdict": "approve"'
 # The other primary: the argv swaps, and both named vendors are covered.
 FAKE_COMMITS="$SEVERAL_COMMITS" BUILDER=anthropic FAKE_ROUTE="$ROUTE_ARGON" \
-  FAKE_ROUTE_EXCLUDED="$(BUILDER=anthropic route astra openai gpt-6-astra '["codex","exec","-m","gpt-6-astra"]')" run mv2b "$ANSWER"
+  FAKE_ROUTE_EXCLUDED="$(BUILDER=anthropic route astra openai gpt-6-astra '["codex","exec","-m","gpt-6-astra"]' '[{"family":"argon","vendor":"google","code":"lower_rank"}]')" run mv2b "$ANSWER"
 [ "$su_log" = "seat-usage --route review --cached --json --builder-vendor anthropic --exclude-vendor xai" ] \
   && ok "mv2b: argv names anthropic as builder and excludes xai" || bad "mv2b: argv: $su_log"
 
@@ -746,18 +749,45 @@ FAKE_COMMITS="$MV4_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" run mv4 "$ANSWER"
 refused "mv4" "merge-gate: refused: the PR commit trailers name several vendors or an unrecognised co-author (anthropic, xai, unrecognised co-author jane doe), so no single builder vendor can be verified"
 [ -z "$su_log" ] && ok "mv4: seat-usage not called" || bad "mv4: seat-usage ran: $su_log"
 
-# mv5: every other vendor excluded: ask Ryan, no reviewer, no verdict.
-ALL_TRAILERS='{"commits":[{"messageHeadline":"a","messageBody":"Co-authored-by: Grok <a@b>\nCo-authored-by: Opus 4 <c@d>\nCo-authored-by: Astra <e@f>\nCo-authored-by: Argon <g@h>\nCo-authored-by: Muse <i@j>\n"}]}'
+# mv5: one vendor excluded and none eligible: ask Ryan, no reviewer, no verdict.
 MV_ASK='[{"role": "review", "mode": "ask", "builder_vendor": "xai", "runner": null, "reason": "need 1 review seat(s); 0 eligible: ask Ryan", "reviewers": [], "skipped": []}]'
-FAKE_COMMITS="$ALL_TRAILERS" FAKE_ROUTE="$ROUTE_ARGON" FAKE_ROUTE_EXCLUDED="$MV_ASK" run mv5 "$ANSWER"
+FAKE_COMMITS="$SEVERAL_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" FAKE_ROUTE_EXCLUDED="$MV_ASK" run mv5 "$ANSWER"
 [ "$review_rc" = 4 ] && ok "mv5: review rc 4" || bad "mv5: review rc $review_rc: $review_out"
 [ "$(printf '%s\n' "$review_out" | wc -l)" = 1 ] && ok "mv5: one line" || bad "mv5: lines: $review_out"
-has "mv5: asks Ryan" "$review_out" "merge-gate: ask Ryan: with anthropic, google, meta, openai excluded there is no eligible reviewer"
+has "mv5: asks Ryan" "$review_out" "merge-gate: ask Ryan: with anthropic excluded there is no eligible reviewer"
 [ -z "$run_log" ] && ok "mv5: no reviewer ran" || bad "mv5: ran: $run_log"
 [ ! -e "$T/mv5/out/gate-verdict.json" ] && ok "mv5: no verdict written" || bad "mv5: verdict written"
-mv_excluded mv5 '[{"vendor":"anthropic","reason":"named in commit trailers"},{"vendor":"google","reason":"named in commit trailers"},{"vendor":"meta","reason":"named in commit trailers"},{"vendor":"openai","reason":"named in commit trailers"}]'
+mv_excluded mv5 '[{"vendor":"anthropic","reason":"named in commit trailers"}]'
 [ "$merge_rc" != 0 ] && ok "mv5: merge refuses" || bad "mv5: merge rc 0"
 hasnt "mv5: no gh pr merge" "$gh_log" "pr merge"
+
+# cap3: three named vendors pass the cap of one exclusion: ask before seat-usage.
+CAP3_COMMITS='{"commits":[{"messageHeadline":"a","messageBody":"Co-authored-by: Grok <a@b>\nCo-authored-by: Opus 4 <c@d>\nCo-authored-by: Astra <e@f>\n"}]}'
+FAKE_COMMITS="$CAP3_COMMITS" FAKE_ROUTE="$MV_ASTRA" run cap3 "$ANSWER"
+[ "$review_rc" = 4 ] && ok "cap3: review rc 4" || bad "cap3: review rc $review_rc: $review_out"
+[ "$(printf '%s\n' "$review_out" | wc -l)" = 1 ] && ok "cap3: one line" || bad "cap3: lines: $review_out"
+has "cap3: lists the vendors" "$review_out" "merge-gate: ask Ryan: the PR commit trailers name anthropic, openai, xai"
+[ -z "$su_log" ] && ok "cap3: seat-usage not called" || bad "cap3: seat-usage ran: $su_log"
+[ -z "$run_log" ] && ok "cap3: no reviewer ran" || bad "cap3: ran: $run_log"
+[ ! -e "$T/cap3/out/gate-verdict.json" ] && ok "cap3: no verdict written" || bad "cap3: verdict written"
+hasnt "cap3: no gh pr merge" "$gh_log" "pr merge"
+
+# cap2: two named vendors: one exclusion, review passes, merge prints it.
+FAKE_COMMITS="$SEVERAL_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" FAKE_ROUTE_EXCLUDED="$MV_ASTRA" run cap2 "$ANSWER"
+[ "$review_rc" = 0 ] && ok "cap2: review rc 0" || bad "cap2: review rc $review_rc: $review_out"
+[ "$merge_rc" = 0 ] && ok "cap2: merge rc 0" || bad "cap2: merge rc $merge_rc: $merge_out"
+[ "$(jq '.[0].excluded_vendors | length' "$T/cap2/out/gate-route.json")" = 1 ] \
+  && ok "cap2: exactly one exclusion" || bad "cap2: route: $(cat "$T/cap2/out/gate-route.json")"
+has "cap2: merge prints the exclusion" "$merge_out" "merge-gate: excluded vendors: anthropic (named in commit trailers)"
+
+# cap-thin: one eligible vendor left. A capped seat does not count as a second.
+CAP_THIN="$(route astra openai gpt-6-astra '["codex","exec","-m","gpt-6-astra"]' '[{"family":"argon","vendor":"google","code":"capped"}]')"
+FAKE_COMMITS="$SEVERAL_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" FAKE_ROUTE_EXCLUDED="$CAP_THIN" run cap-thin "$ANSWER"
+[ "$review_rc" = 4 ] && ok "cap-thin: review rc 4" || bad "cap-thin: review rc $review_rc: $review_out"
+[ "$(printf '%s\n' "$review_out" | wc -l)" = 1 ] && ok "cap-thin: one line" || bad "cap-thin: lines: $review_out"
+has "cap-thin: asks Ryan" "$review_out" "merge-gate: ask Ryan: with anthropic excluded only 1 eligible reviewer vendor is left (openai), and the gate needs 2"
+[ -z "$run_log" ] && ok "cap-thin: no reviewer ran" || bad "cap-thin: ran: $run_log"
+[ ! -e "$T/cap-thin/out/gate-verdict.json" ] && ok "cap-thin: no verdict written" || bad "cap-thin: verdict written"
 
 # mv5b: a reviewer from a named vendor refuses, even if seat-usage returns one.
 FAKE_COMMITS="$SEVERAL_COMMITS" FAKE_ROUTE="$ROUTE_ARGON" \
@@ -879,6 +909,17 @@ PY
 merge_saved route-nobuilder
 has "route-nobuilder: missing builder" "$vmerge_out" "reason: no recorded builder vendor (gate-route.json)"
 hasnt "route-nobuilder: reviewer was recorded" "$vmerge_out" "no recorded reviewer vendor"
+
+rm -rf "$T/route-excluded"; cp -a "$T/cap2/out" "$T/route-excluded"
+python3 - "$T/route-excluded/gate-route.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+data = json.load(open(p))
+data[0]["reviewers"][0]["vendor"] = "anthropic"
+json.dump(data, open(p, "w"))
+PY
+merge_saved route-excluded
+has "route-excluded: names the reason" "$vmerge_out" "reason: the recorded reviewer vendor anthropic is in excluded_vendors: named in commit trailers (gate-route.json)"
 
 rm -rf "$T/route-bad"; cp -a "$T/pass/out" "$T/route-bad"
 printf '{\n' > "$T/route-bad/gate-route.json"

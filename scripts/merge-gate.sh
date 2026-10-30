@@ -11,9 +11,13 @@
 # @anthropic.com mailbox count as anthropic). Two or more named vendors make V
 # the primary builder: V must be one of them, or it refuses (exit 3, one line).
 # seat-usage is then asked with --builder-vendor V plus one --exclude-vendor
-# per other named vendor. No named vendor is ever seated: a reviewer from one
-# refuses (exit 3), and no eligible reviewer left stops with "merge-gate: ask
-# Ryan: ..." (exit 4, one line). A known vendor beside a co-author outside the
+# per other named vendor. The trailers can exclude one vendor on their own: the
+# builder writes them, so three or more named vendors stop with "merge-gate:
+# ask Ryan: ..." (exit 4, one line) that lists them, before seat-usage runs.
+# No named vendor is ever seated: a reviewer from one refuses (exit 3). With a
+# trailer exclusion, fewer than 2 eligible reviewer vendors on the route also
+# stops with ask Ryan (exit 4): the seated reviewer plus each seat skipped with
+# code lower_rank. Neither ask writes a verdict. A known vendor beside a co-author outside the
 # known families, or a commits read that fails, refuses (exit 3, one line)
 # before seat-usage runs. No model trailer, or only co-authors outside the
 # known families, keeps V and prints one note.
@@ -56,7 +60,8 @@
 # refuses). It also refuses when its one_way line is missing or unparseable,
 # when the PR has the one-way label, when the labels cannot be read, or when
 # gate-route.json is missing, unreadable, or records no builder vendor, no
-# reviewer vendor, or the same vendor for both. one_way: yes refuses unless
+# reviewer vendor, the same vendor for both, or a reviewer vendor listed in its
+# excluded_vendors. merge prints excluded_vendors. one_way: yes refuses unless
 # <out_dir>/acks/one-way-ack.json records Ryan's yes for this PR, this head
 # and exactly these one-way steps, written by a bot other than the builder
 # bot (builder-bot.txt, or --builder-bot for an older gate dir); a valid ack
@@ -200,6 +205,8 @@ review() {
         mapfile -t named <<<"$several"
         grep -qxF -- "$vendor" <<<"$several" \
           || refuse "builder vendor $vendor is not among the vendors the PR commit trailers name ($listed)"
+        [ "${#named[@]}" -le 2 ] \
+          || ask_ryan "the PR commit trailers name $listed, and the gate excludes at most one vendor beyond builder vendor $vendor on its own"
         for v in "${named[@]}"; do
           [ "$v" = "$vendor" ] || exclude_add "$v" "named in commit trailers"
         done
@@ -225,6 +232,14 @@ review() {
     refuse "$why"
   fi
   refuse_named
+  # Only trailers can have excluded a vendor this early.
+  if [ "${#exclude_vendors[@]}" -gt 0 ]; then
+    local eligible
+    eligible=$(python3 "$ROOT/scripts/merge_gate.py" eligible "$out/gate-route.json") \
+      || refuse "could not read the eligible reviewer vendors from gate-route.json"
+    [ "$(wc -l <<<"$eligible")" -ge 2 ] \
+      || ask_ryan "with $(exclude_list) excluded only 1 eligible reviewer vendor is left ($eligible), and the gate needs 2"
+  fi
   echo "merge-gate: reviewer $model on $name (seat-usage --route review, builder vendor $vendor, vendor_source=$source${exclude_vendors[*]:+, excluded: $(exclude_list)})"
   GATE_TMP=$(mktemp -d) || exit 1
   trap 'rm -rf "$GATE_TMP"' EXIT
