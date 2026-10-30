@@ -11,13 +11,20 @@ A rerun of the same ballot at the same head is the same round.
   record   --rounds-dir D --pr-url U --ballot B --ballot-dir DIR --council-dir C
            --mode M --base SHA --head SHA --files-file F
            appends the round and writes DIR/round.json and DIR/carried-findings.md.
+           A new delta round must name the last recorded head as --base, or exit 2.
   snapshot --rounds-dir D --ballot-dir DIR
            copies DIR/findings.json into that round's log entry. A fresh run of a
            ballot deletes findings.json, so conclave.sh calls this first.
+
+Each command holds <key>.lock for its whole read-modify-write of the log, so two
+ballots on one pull request cannot lose an entry. A dry run only reads and takes
+no lock: the log is replaced atomically.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -49,6 +56,14 @@ def log_path(rounds_dir: Path, url: str) -> Path:
 
 def park_path(rounds_dir: Path, url: str) -> Path:
     return rounds_dir / f"{pr_key(url)}.park.md"
+
+
+@contextlib.contextmanager
+def pr_lock(rounds_dir: Path, url: str):
+    rounds_dir.mkdir(parents=True, exist_ok=True)
+    with open(rounds_dir / f"{pr_key(url)}.lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
 
 
 def load_log(path: Path, url: str) -> dict:
@@ -102,28 +117,31 @@ def find_round(rounds: list[dict], ballot: str, head: str) -> dict | None:
     return next((r for r in rounds if r["ballot"] == ballot and r["head"] == head), None)
 
 
-def open_after(entry: dict, council_dir: Path | None) -> list[dict]:
-    """Findings still open once a round is done.
+def open_findings(rounds: list[dict], council_dir: Path | None) -> list[dict]:
+    """Findings still open after the given rounds, in order.
 
-    Carried findings plus the round's own findings, less the ids its
-    findings.json lists under "resolved". A round's own ids get an r<N>- prefix
-    so they stay unique across rounds.
+    Replays each round's current findings.json, so a rerun of an earlier round
+    counts. Each round adds its own findings and drops the ids it lists under
+    "resolved". A round's own ids get an r<N>- prefix so they stay unique across
+    rounds.
     """
-    carried = list(entry.get("carried_open") or [])
-    doc = round_findings(entry, council_dir) or {}
-    resolved = {str(x) for x in doc.get("resolved") or []}
-    own = []
-    for f in doc.get("findings") or []:
-        if not isinstance(f, dict):
-            continue
-        own.append({
-            "id": f"r{entry['round']}-{f.get('id', '?')}",
-            "round": entry["round"],
-            "claim": f.get("claim", ""),
-            "file": f.get("file", ""),
-            "line": f.get("line"),
-        })
-    return [f for f in carried + own if f["id"] not in resolved]
+    still: list[dict] = []
+    for entry in rounds:
+        doc = round_findings(entry, council_dir) or {}
+        resolved = {str(x) for x in doc.get("resolved") or []}
+        own = []
+        for f in doc.get("findings") or []:
+            if not isinstance(f, dict):
+                continue
+            own.append({
+                "id": f"r{entry['round']}-{f.get('id', '?')}",
+                "round": entry["round"],
+                "claim": f.get("claim", ""),
+                "file": f.get("file", ""),
+                "line": f.get("line"),
+            })
+        still = [f for f in still + own if f["id"] not in resolved]
+    return still
 
 
 def findings_md(findings: list[dict]) -> str:
@@ -140,7 +158,7 @@ def findings_md(findings: list[dict]) -> str:
 
 def park_note(doc: dict, ballot: str, head: str, council_dir: Path | None) -> str:
     last = doc["rounds"][-1]
-    still = open_after(last, council_dir)
+    still = open_findings(doc["rounds"], council_dir)
     rows = "\n".join(
         f"| {r['round']} | {r['ballot']} | {r['mode']} | {r['base'][:12]}..{r['head'][:12]} |"
         for r in doc["rounds"]
@@ -159,6 +177,13 @@ def park_note(doc: dict, ballot: str, head: str, council_dir: Path | None) -> st
 
 
 def cmd_plan(a) -> str:
+    if a.dry_run:
+        return plan_round(a)
+    with pr_lock(Path(a.rounds_dir), a.pr_url):
+        return plan_round(a)
+
+
+def plan_round(a) -> str:
     rounds_dir = Path(a.rounds_dir)
     council_dir = Path(a.council_dir) if a.council_dir else None
     doc = load_log(log_path(rounds_dir, a.pr_url), a.pr_url)
@@ -189,6 +214,11 @@ def cmd_plan(a) -> str:
 
 
 def cmd_record(a) -> str:
+    with pr_lock(Path(a.rounds_dir), a.pr_url):
+        return record_round(a)
+
+
+def record_round(a) -> str:
     rounds_dir = Path(a.rounds_dir)
     council_dir = Path(a.council_dir)
     path = log_path(rounds_dir, a.pr_url)
@@ -200,6 +230,10 @@ def cmd_record(a) -> str:
     if entry is None:
         if len(rounds) >= MAX_ROUNDS:
             raise Refused(3, f"review rounds: refused round {len(rounds) + 1}: the cap is {MAX_ROUNDS}")
+        if a.mode == "delta" and (not last or last["head"] != a.base):
+            raise Refused(2, f"review rounds: ballot {a.ballot} planned a delta from {a.base[:12]}, "
+                             f"but the last recorded head is {last['head'][:12] if last else 'none'}: "
+                             f"another ballot recorded first; rerun with a new ballot id")
         entry = {
             "round": len(rounds) + 1,
             "ballot": a.ballot,
@@ -207,10 +241,15 @@ def cmd_record(a) -> str:
             "base": a.base,
             "head": a.head,
             "started": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "carried_open": open_after(last, council_dir) if last else [],
         }
         rounds.append(entry)
     entry["files"] = files
+    entry["carried_open"] = open_findings(rounds[:entry["round"] - 1], council_dir)
+    # Keep each round's findings in the log: the replay outlives the ballot dir.
+    for r in rounds:
+        kept = round_findings(r, council_dir)
+        if kept is not None:
+            r["findings_doc"] = kept
     write_json(path, doc)
     ballot_dir = Path(a.ballot_dir)
     write_json(ballot_dir / "round.json", {
@@ -239,16 +278,18 @@ def cmd_snapshot(a) -> str:
     if not rj.is_file() or not fj.is_file():
         return ""
     meta = json.loads(rj.read_text(encoding="utf-8"))
-    findings = read_json(fj)
-    if findings is None:
-        return ""
-    path = log_path(Path(a.rounds_dir), meta["pr_url"])
-    doc = load_log(path, meta["pr_url"])
-    for entry in doc["rounds"]:
-        if entry["round"] == meta["round"] and entry["ballot"] == ballot_dir.name:
-            entry["findings_doc"] = findings
-            write_json(path, doc)
-            return f"kept round {entry['round']} findings in {path}"
+    rounds_dir = Path(a.rounds_dir)
+    with pr_lock(rounds_dir, meta["pr_url"]):
+        findings = read_json(fj)
+        if findings is None:
+            return ""
+        path = log_path(rounds_dir, meta["pr_url"])
+        doc = load_log(path, meta["pr_url"])
+        for entry in doc["rounds"]:
+            if entry["round"] == meta["round"] and entry["ballot"] == ballot_dir.name:
+                entry["findings_doc"] = findings
+                write_json(path, doc)
+                return f"kept round {entry['round']} findings in {path}"
     return ""
 
 

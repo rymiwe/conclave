@@ -834,7 +834,14 @@ round number, the reviewed range, the files, and the open findings carried
 from earlier rounds. Those findings are also in `carried-findings.md`, for the
 chair only. The reviewer brief does not list them. A finding stays open until
 a later round's `findings.json` lists its id (`r<round>-<id>`) under
-`"resolved"`, as fixed or dismissed.
+`"resolved"`, as fixed or dismissed. The open list replays every round's current
+`findings.json` in order, so a rerun of an earlier round counts in later rounds
+and in the park note.
+
+Ballots on one PR take a per-PR lock around the round log, so concurrent ballots
+get distinct rounds. A `--delta` ballot whose planned base is no longer the last
+recorded head exits before any leg: another ballot recorded first. Rerun it with
+a new ballot id.
 
 The cap is 3 rounds per PR. A 4th round exits 3 before any worktree is built,
 and writes `<key>.park.md` beside the round log: the open findings and why it
