@@ -16,8 +16,10 @@
 # ask Ryan: ..." (exit 4, one line) that lists them, before seat-usage runs.
 # No named vendor is ever seated: a reviewer from one refuses (exit 3). With a
 # trailer exclusion, fewer than 2 eligible reviewer vendors on the route also
-# stops with ask Ryan (exit 4): the seated reviewer plus each seat skipped with
-# code lower_rank. Neither ask writes a verdict. A known vendor beside a co-author outside the
+# stops with ask Ryan (exit 4). Eligible is the seated reviewer plus each seat
+# skipped with code lower_rank, minus the builder vendor and every excluded
+# vendor (grok and xai are the same). The message states that count, including
+# 0. Neither ask writes a verdict. A known vendor beside a co-author outside the
 # known families, or a commits read that fails, refuses (exit 3, one line)
 # before seat-usage runs. No model trailer, or only co-authors outside the
 # known families, keeps V and prints one note.
@@ -234,11 +236,13 @@ review() {
   refuse_named
   # Only trailers can have excluded a vendor this early.
   if [ "${#exclude_vendors[@]}" -gt 0 ]; then
-    local eligible
+    local eligible n
     eligible=$(python3 "$ROOT/scripts/merge_gate.py" eligible "$out/gate-route.json") \
       || refuse "could not read the eligible reviewer vendors from gate-route.json"
-    [ "$(wc -l <<<"$eligible")" -ge 2 ] \
-      || ask_ryan "with $(exclude_list) excluded only 1 eligible reviewer vendor is left ($eligible), and the gate needs 2"
+    # wc -l on an empty here-string counts 1.
+    n=$(printf '%s\n' "$eligible" | sed '/^$/d' | wc -l | tr -d ' ')
+    [ "$n" -ge 2 ] \
+      || ask_ryan "with $(exclude_list) excluded only $n eligible reviewer vendor is left (${eligible:-none}), and the gate needs 2"
   fi
   echo "merge-gate: reviewer $model on $name (seat-usage --route review, builder vendor $vendor, vendor_source=$source${exclude_vendors[*]:+, excluded: $(exclude_list)})"
   GATE_TMP=$(mktemp -d) || exit 1

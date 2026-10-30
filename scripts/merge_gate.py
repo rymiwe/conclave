@@ -54,8 +54,9 @@ recorded builder vendor and reviewer vendor are missing or the same, it prints
 one line saying why and exits 3. grok and xai are the same vendor.
 
 eligible prints the route's eligible reviewer vendors, one per line: the
-seated reviewers plus each skipped seat with code lower_rank. seat-usage seats
-one reviewer here, so every other eligible seat loses the rank.
+seated reviewers plus each skipped seat with code lower_rank, minus the
+builder vendor and every excluded vendor. grok and xai are the same vendor.
+seat-usage seats one reviewer here, so every other eligible seat loses the rank.
 
 cursor-result, claude-result, plain-result, and muse-result write the
 reviewer's answer to gate.md from a cursor-agent stream, a claude JSON result,
@@ -513,12 +514,15 @@ def excluded_reasons(data: object) -> list[str]:
 
 
 def eligible_vendors(data: object) -> list[str]:
-    """Distinct vendors on the seated and lower_rank seats of a review route."""
+    """Seated and lower_rank vendors, minus the builder and excluded_vendors."""
     row = _route_row(data)
     seats = row.get("reviewers") if isinstance(row.get("reviewers"), list) else []
     skipped = row.get("skipped") if isinstance(row.get("skipped"), list) else []
     seats = seats + [s for s in skipped if isinstance(s, dict) and s.get("code") == "lower_rank"]
-    return sorted({normalize_vendor(s.get("vendor")) for s in seats if isinstance(s, dict)} - {""})
+    vendors = {normalize_vendor(s.get("vendor")) for s in seats if isinstance(s, dict)}
+    banned = {normalize_vendor(row.get("builder_vendor"))}
+    banned.update(normalize_vendor(e.get("vendor")) for e in _excluded(row))
+    return sorted(vendors - banned - {""})
 
 
 def vendor_conflict_reasons(data: object) -> list[str]:
