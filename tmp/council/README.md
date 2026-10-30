@@ -29,6 +29,14 @@ tmp/council/<id>/
   judgment.md                # header, then the convergence table
   convergence.md             # the table without the header
 
+  round.json                 # kind: review on a PR: round number, reviewed range, carried findings
+  carried-findings.md        # open findings from earlier rounds, for the chair
+  review-files.txt           # files the legs reviewed
+
+tmp/council/rounds/
+  <host>_<owner>_<repo>_<N>.json      # one round log per PR (docs/review.md, Revision recipes)
+  <host>_<owner>_<repo>_<N>.park.md   # written when a 4th round is refused
+
 tmp/council/examples/
   design-high-brief.md
   review-med-brief.md

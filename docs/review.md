@@ -810,11 +810,64 @@ An old-tip-to-new-tip diff includes unrelated commits the rebase pulled in
 (2026-09-12, a work ticket: 26 files, +386/-108, versus the author's 8 files,
 +97/-45).
 
-The script does not build these worktrees. Construct the delta, then point the
-script at a ref pair, or run the recipe inside worktrees you keep with
-`--keep-worktrees` before launch. `commit.gpgsign=false` on every baseline
-commit. `set -e`: a failed baseline commit otherwise leaves the new tree
-checked out and `git diff HEAD` empty with exit 0.
+Run the second pass with `--delta` on the same PR and a new ballot id:
+
+```sh
+scripts/conclave.sh <new-id> --pr N --delta
+```
+
+The script reads the PR's round log, `tmp/council/rounds/<host>_<owner>_<repo>_<N>.json`
+(`CONCLAVE_ROUNDS_DIR` moves it). It builds each leg worktree at the new head,
+soft-reset to the last reviewed head, so `git diff HEAD` equals
+`git diff <last reviewed> <new>`. The diffstat check holds the legs to that
+range, and `review-files.txt` in the ballot lists the files. The reviewer brief
+says the target is a later state of the branch and asks the completeness
+question (below). Opus native reviews the worktree, not the PR number. Astra
+stays on its native review of the same worktree.
+
+Every PR review is a round: `--pr N` and `--pr N --delta` both count. A round
+is one ballot id at one head. A rerun of that ballot at that head is the same
+round. Use a new ballot id per round so each round's files stay. A reused id
+also works: the run copies that ballot's `findings.json` into the round log
+before it clears the ballot. Each round's `round.json` records the
+round number, the reviewed range, the files, and the open findings carried
+from earlier rounds. Those findings are also in `carried-findings.md`, for the
+chair only. The reviewer brief does not list them. A finding stays open until
+a later round's `findings.json` lists its id (`r<round>-<id>`) under
+`"resolved"`, as fixed or dismissed. The open list replays every round's current
+`findings.json` in order, so a rerun of an earlier round counts in later rounds
+and in the park note.
+
+The round log holds completed rounds only. The run records its round after the
+legs, under a per-PR lock, and nothing else adds a round. A round counts, and the
+delta base moves, only when at least one reviewer returned a ballot. A launch
+where every leg failed records nothing: the count and the delta base stay put.
+
+The plan step is an advisory read and holds no slot. It runs before any worktree,
+and again after the worktree build, just before the legs. The second check also
+refuses when another ballot recorded since the first.
+
+The cap is 3 rounds per PR. A refusal exits 3 and writes `<key>.park.md` beside
+the round log: why it stopped, the open findings, and the rounds. Nothing is
+posted.
+
+Concurrent ballots can both pass plan, so record decides the race. The first to
+record wins. A later ballot is refused when the cap is reached or another round
+was recorded since its plan, even at the same head. It records nothing, exits 3, and writes
+`round-refused.md` in the ballot and the park note. Both name the winning round
+and its head. Its reports stay on disk. Rerun with a new ballot id, if the cap
+allows.
+
+A PR body links to the round log or the park note; it does not list each round.
+Getting past the cap is a human decision. Do not loosen the findings gate to
+reach clean sooner.
+
+`--delta` refuses when the PR's fork point from its base moved since the last
+reviewed head (a rebase onto a newer base, or a merge from it). Then
+old-tip-to-new-tip carries the base's commits, so build the baseline by hand
+with the recipes below. `commit.gpgsign=false` on every baseline commit.
+`set -e`: a failed baseline commit otherwise leaves the new tree checked out
+and `git diff HEAD` empty with exit 0.
 
 **Ordinary revision.** For each leg worktree, check out the new head, restore
 each path that either revision touches to the old blob (or delete it), commit
@@ -832,22 +885,11 @@ patch onto the new merge-base, commit the baseline, then
 carried another ticket's commit; the patch baseline was 3 files, +32/-7, with
 no parent content.
 
-**Rewritten commit, same base.** When the author replaces the reviewed commit
-instead of adding one, the old and new heads are siblings, so `--base OLD
---head NEW` takes their merge-base and reviews the whole branch again. Build
-each leg worktree at the old head with `git worktree add --detach <wt> <old>`,
-then `git -C <wt> checkout --no-overlay <new> -- .`. `git diff HEAD --stat` must
-equal `git diff <old> <new> --stat`. Copy `config/database.yml` and `.env` in,
-as phase 1 does. The script cannot launch these legs: it has no delta target,
-and on review kind it runs Astra native, not on the brief. So the chair writes
-a launch script that runs Fable on the brief from stdin and Astra as `codex
-exec` with the brief as its argument, then runs `scripts/blind.sh` on the two
-reports. `--findings` then works on that ballot, but it writes no `decide.md`
-and its header reads `kind: unknown`. Write `decide.md` by hand in the
-script's format and say so at its top. Verified 2026-10-13 on a work pull request:
-the delta was 4 files, +36/-78, against a 145-line branch. The only finding
-came from the leg on the brief, and the chair's own repro of the old findings
-had already shown it.
+**Rewritten commit, same base.** `--delta` covers this. The old and new heads
+are siblings, and `--base OLD --head NEW` would take their merge-base and
+review the whole branch again. `--delta` diffs the two heads directly. The
+hand-built version of this recipe, on 2026-10-13 on a work pull request, gave
+a delta of 4 files, +36/-78, against a 145-line branch.
 
 Brief extras, and say nothing about what the previous pass found: the target
 is a later state of the same branch, and the one instruction is to check
@@ -859,9 +901,9 @@ follows the diff's topic, and a revision's risk is usually one step to the
 side. The default Anthropic leg is already on the script's reviewer brief
 for every diff, including a fresh PR (Targets). OpenAI stays on its native
 review command. Grok uses `cursor-agent` unless `CONCLAVE_GROK_NATIVE=1`.
-A revision wants the targeted completeness question, so put
-every voter on that brief for a revision. The script does not do that
-switch; the chair runs the brief-mode commands below, or says so and does
+A revision wants the targeted completeness question. `--delta` puts it in
+the reviewer brief. Astra's native review does not read that brief, so the
+chair runs the brief-mode commands below for that leg, or says so and does
 not pretend the diff review asked the completeness question.
 
 Skip a structural pass on a revision. It is dropped anyway (below).

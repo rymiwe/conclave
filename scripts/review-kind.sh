@@ -41,6 +41,14 @@ PR_TITLE=""
 PR_URL=""
 # Commit the worktrees were built from. Set in review_build_worktrees.
 REVIEW_HEAD_OID=""
+# Per-PR round (scripts/review_rounds.py). REVIEW_DELTA_BASE is the last
+# reviewed head on a --delta run, empty otherwise.
+REVIEW_ROUND=""
+REVIEW_DELTA_BASE=""
+REVIEW_PLANNED_LATEST=""
+REVIEW_PLANNED_ROUNDS=""
+REVIEW_DELTA_ADD=""
+REVIEW_DELTA_DEL=""
 
 # House rules for codex review. One line: -c values do not want embedded newlines.
 # The clean-list sentence is the codex form (only findings and overall_explanation
@@ -242,6 +250,9 @@ review_target_mode() {
     fi
     FLAG_PR="$hpr"
     npr=1
+  fi
+  if [ "${FLAG_DELTA:-0}" -eq 1 ] && [ "$npr" -eq 0 ]; then
+    die "--delta needs a PR target: --pr N or a brief 'pr:' header"
   fi
   if [ "$npr" -eq 1 ]; then
     case "$FLAG_PR" in
@@ -556,7 +567,12 @@ review_brief_target_line() {
   local base head
   case "$REVIEW_MODE" in
     pr)
-      printf 'pr %s\n' "$FLAG_PR"
+      if [ -n "${REVIEW_DELTA_BASE:-}" ]; then
+        printf 'pr %s, changes since %s only (review round %s)\n' \
+          "$FLAG_PR" "${REVIEW_DELTA_BASE:0:12}" "$REVIEW_ROUND"
+      else
+        printf 'pr %s\n' "$FLAG_PR"
+      fi
       ;;
     refs)
       base="$(git -C "$REPO" rev-parse --short "$FLAG_BASE" 2>/dev/null || true)"
@@ -1137,6 +1153,84 @@ review_copy_ignored_config() {
   done
 }
 
+review_rounds_dir() {
+  conclave_env ROUNDS_DIR "$ROOT/tmp/council/rounds"
+}
+
+review_rounds_plan() {
+  # PR targets only. Sets REVIEW_ROUND, REVIEW_PLANNED_LATEST,
+  # REVIEW_PLANNED_ROUNDS, and REVIEW_DELTA_BASE on --delta. Advisory: it never writes the round log.
+  # A new round past the cap exits 3 here, before any worktree or leg.
+  # $1 = dry-run previews without writing the park note.
+  # $1 = recheck runs after the worktree build, before the legs: it also exits 3
+  # when another ballot recorded since this plan.
+  local mode=pr out rc=0 base rerun latest recorded
+  [ "${FLAG_DELTA:-0}" -eq 1 ] && mode=delta
+  local -a args=(plan --rounds-dir "$(review_rounds_dir)" --pr-url "$PR_URL"
+    --ballot "$ID" --head "$PR_OID" --mode "$mode" --council-dir "$(dirname "$DIR")")
+  [ "${1:-}" = dry-run ] && args+=(--dry-run)
+  [ "${1:-}" = recheck ] && args+=(--planned-latest "$REVIEW_PLANNED_LATEST" --planned-rounds "$REVIEW_PLANNED_ROUNDS")
+  out="$(python3 "$REVIEW_KIND_DIR/review_rounds.py" "${args[@]}")" || rc=$?
+  case "$rc" in
+    0) ;;
+    3) log_err "round refused: see $(review_rounds_dir)"; exit 3 ;;
+    *) die "review rounds plan failed (exit $rc)" ;;
+  esac
+  [ "${1:-}" = recheck ] && return 0
+  read -r REVIEW_ROUND base rerun latest recorded <<<"$out"
+  REVIEW_PLANNED_LATEST="$latest"
+  REVIEW_PLANNED_ROUNDS="$recorded"
+  if [ "$mode" = delta ]; then
+    REVIEW_DELTA_BASE="$base"
+  fi
+  printf 'review round %s of 3%s%s\n' "$REVIEW_ROUND" \
+    "$([ "$mode" = delta ] && printf ', delta from %s' "${base:0:12}")" \
+    "$([ "$rerun" = 1 ] && printf ' (rerun of this ballot)')"
+}
+
+review_rounds_files() {
+  # After the worktrees are proven, before any leg can touch them.
+  local wt
+  wt="$(printf '%s\n' "$REVIEW_WORKTREES" | head -1)"
+  git -C "$wt" diff --name-only HEAD >"$DIR/review-files.txt" || die "diff --name-only failed: $wt"
+}
+
+review_rounds_record() {
+  # After the legs. Only a round with at least one returned ballot counts, so a
+  # failed launch leaves the cap and the delta base alone.
+  local rc=0
+  review_count_reports
+  if [ "$REVIEW_REPORTS_PRESENT" -eq 0 ]; then
+    log_err "round not recorded: no reviewer returned a ballot; the round count and the delta base did not change"
+    printf 'Round not recorded: no reviewer returned a ballot.\n'
+    return 0
+  fi
+  python3 "$REVIEW_KIND_DIR/review_rounds.py" record --rounds-dir "$(review_rounds_dir)" \
+    --pr-url "$PR_URL" --ballot "$ID" --ballot-dir "$DIR" --council-dir "$(dirname "$DIR")" \
+    --mode "$([ -n "$REVIEW_DELTA_BASE" ] && echo delta || echo pr)" \
+    --base "$REVIEW_LEG_BASE" --head "$REVIEW_HEAD_OID" \
+    --planned-latest "$REVIEW_PLANNED_LATEST" --planned-rounds "$REVIEW_PLANNED_ROUNDS" --files-file "$DIR/review-files.txt" || rc=$?
+  case "$rc" in
+    0) ;;
+    3) log_err "round refused: see $DIR/round-refused.md"; exit 3 ;;
+    *) die "review rounds record failed (exit $rc)" ;;
+  esac
+}
+
+review_delta_base() {
+  # Echoes the delta base after review_fetch_pr. $1 = merge-base of the PR.
+  # A moved fork point means old-tip-to-new-tip carries the base's own commits.
+  local mb="$1" old="$REVIEW_DELTA_BASE" old_mb
+  git -C "$REPO" cat-file -e "${old}^{commit}" 2>/dev/null \
+    || die "--delta: last reviewed head $old is not in $REPO (fetch it, or review the whole PR with --pr)"
+  old_mb="$(git -C "$REPO" merge-base "origin/$PR_BASE" "$old")" \
+    || die "merge-base origin/$PR_BASE $old failed"
+  if [ "$old_mb" != "$mb" ]; then
+    die "--delta: the PR's fork point from $PR_BASE moved since head ${old:0:12} (rebase or merge), so the delta would include $PR_BASE's own commits; build the baseline by hand (docs/review.md, Revision recipes)"
+  fi
+  printf '%s\n' "$old"
+}
+
 review_make_leg() {
   # $1 = commitish to check out, $2 = soft-reset target. Echoes the worktree path.
   local ref="$1" base="$2" leg wt
@@ -1203,7 +1297,12 @@ review_check_diffstat() {
       DIFFSHAPE="$(review_nfiles "$SS_FILES"), +${SS_INS}/-0, base: synthesized empty tree"
       ;;
     pr)
-      if [ "$SS_INS" -ne "$PR_ADD" ] || [ "$SS_DEL" -ne "$PR_DEL" ]; then
+      if [ -n "$REVIEW_DELTA_BASE" ]; then
+        if [ "$SS_INS" -ne "$REVIEW_DELTA_ADD" ] || [ "$SS_DEL" -ne "$REVIEW_DELTA_DEL" ]; then
+          die "worktree diffstat +${SS_INS}/-${SS_DEL} != delta +${REVIEW_DELTA_ADD}/-${REVIEW_DELTA_DEL} ($stat)"
+        fi
+        DIFFSHAPE="$(review_nfiles "$SS_FILES"), +${SS_INS}/-${SS_DEL}, delta: ${REVIEW_DELTA_BASE:0:12}..${PR_OID:0:12} (round ${REVIEW_ROUND})"
+      elif [ "$SS_INS" -ne "$PR_ADD" ] || [ "$SS_DEL" -ne "$PR_DEL" ]; then
         # A mismatch is the wrong base. Fetch once more and rebuild.
         if [ "${REVIEW_DIFFSTAT_RETRIED:-0}" -eq 0 ]; then
           REVIEW_DIFFSTAT_RETRIED=1
@@ -1215,7 +1314,8 @@ review_check_diffstat() {
         fi
         die "worktree diffstat +${SS_INS}/-${SS_DEL} != PR +${PR_ADD}/-${PR_DEL} after refetch ($stat)"
       fi
-      DIFFSHAPE="$(review_nfiles "$SS_FILES"), +${SS_INS}/-${SS_DEL}, base: ${PR_BASE}"
+      [ -n "$REVIEW_DELTA_BASE" ] \
+        || DIFFSHAPE="$(review_nfiles "$SS_FILES"), +${SS_INS}/-${SS_DEL}, base: ${PR_BASE}"
       ;;
     refs)
       review_check_size "$SS_FILES"
@@ -1260,6 +1360,12 @@ review_build_worktrees() {
       review_fetch_pr
       base="$(git -C "$REPO" merge-base "origin/$PR_BASE" "$PR_OID")" \
         || die "merge-base origin/$PR_BASE $PR_OID failed"
+      if [ -n "$REVIEW_DELTA_BASE" ]; then
+        base="$(review_delta_base "$base")" || exit 1
+        review_parse_shortstat "$(git -C "$REPO" diff --shortstat "$base" "$PR_OID")"
+        REVIEW_DELTA_ADD="$SS_INS"
+        REVIEW_DELTA_DEL="$SS_DEL"
+      fi
       ref="$PR_OID"
       REVIEW_HEAD_OID="$PR_OID"
       ;;
@@ -1323,7 +1429,7 @@ review_build_and_prove() {
 
 review_prompt_claude() {
   # Opus override only. The Fable leg reads the reviewer brief on stdin.
-  if [ "$REVIEW_MODE" = "pr" ]; then
+  if [ "$REVIEW_MODE" = "pr" ] && [ -z "$REVIEW_DELTA_BASE" ]; then
     printf '/code-review %s high\n' "$FLAG_PR"
   else
     printf '/code-review high\n'
@@ -1409,6 +1515,9 @@ review_write_claude_brief() {
   local dest="$1" body word instructions diff_how target assembled
   REVIEW_BRIEF_REJECT=""
   diff_how='From this worktree, `git diff HEAD` is the change under review. The soft reset already made that diff the change against the real base.'
+  if [ -n "${REVIEW_DELTA_BASE:-}" ]; then
+    diff_how='From this worktree, `git diff HEAD` is the change under review: only what changed since the last reviewed state of this branch. Check whether each change is complete: a fix applied on one path but not another, a helper added but not used everywhere, a test that covers the happy case but not the case that motivated the change.'
+  fi
   body="$(brief_body)"
   instructions="$(review_claude_brief_instructions)"
   target="$(review_brief_target_line)"
@@ -1899,14 +2008,24 @@ review_toolchain_bins() {
   printf '%s' "$bins"
 }
 
+review_codex_title() {
+  case "$REVIEW_MODE" in
+    pr)
+      if [ -n "${REVIEW_DELTA_BASE:-}" ]; then
+        printf '%s, changes since %s\n' "$FLAG_PR" "${REVIEW_DELTA_BASE:0:12}"
+      else
+        printf '%s\n' "$FLAG_PR"
+      fi
+      ;;
+    refs) printf '%s against %s\n' "$FLAG_HEAD" "$FLAG_BASE" ;;
+    *) printf 'whole codebase\n' ;;
+  esac
+}
+
 review_run_codex() {
   local wt="$1" ec title bins rules extra=""
   local out="$DIR/voter-codex.md" err="$DIR/voter-codex.err"
-  case "$REVIEW_MODE" in
-    pr) title="$FLAG_PR" ;;
-    refs) title="$FLAG_HEAD against $FLAG_BASE" ;;
-    *) title="whole codebase" ;;
-  esac
+  title="$(review_codex_title)"
   if [ ! -x "$CODEX" ]; then
     echo "codex: resolver binary is not executable: $CODEX" >"$DIR/voter-codex.fail"
     return 1
@@ -2934,6 +3053,7 @@ review_dry_run() {
   review_resolve_repo
   review_target_mode
   review_prepare_shape
+  [ "$REVIEW_MODE" = "pr" ] && review_rounds_plan dry-run
   review_write_lineup "$DIR/preview/lineup.md"
   if voter_is_named claude && [ "${CLAUDE_SKU:-fable}" != "opus" ]; then
     review_write_claude_brief "$DIR/preview/voter-claude.brief.md" \
@@ -3470,6 +3590,8 @@ review_run() {
   review_preflight
   : >"$ERRORS_FILE"
   ballot_move_decide
+  python3 "$REVIEW_KIND_DIR/review_rounds.py" snapshot --rounds-dir "$(review_rounds_dir)" \
+    --ballot-dir "$DIR" || die "review rounds snapshot failed"
   rm -f \
     "$DIR"/voter-*.md "$DIR"/voter-*.err "$DIR"/voter-*.fail \
     "$DIR"/voter-*.json "$DIR"/voter-*.model.txt "$DIR"/voter-*.turn.txt \
@@ -3483,10 +3605,12 @@ review_run() {
     "$DIR"/voter-codex.usage.txt \
     "$DIR"/voter-claude.via "$DIR"/voter-claude.stream.jsonl \
     "$DIR"/header.json \
-    "$DIR"/pr-context.json
+    "$DIR"/pr-context.json \
+    "$DIR"/round.json "$DIR"/carried-findings.md "$DIR"/review-files.txt "$DIR"/round-refused.md
   rm -rf "$DIR/blind"
   if [ "$REVIEW_MODE" = "pr" ]; then
     review_load_pr_meta
+    review_rounds_plan
   fi
   review_alloc_scratch
   review_readonly_hash
@@ -3509,6 +3633,10 @@ review_run() {
       || die "$REVIEW_BRIEF_REJECT"
   fi
   review_build_and_prove
+  if [ "$REVIEW_MODE" = "pr" ]; then
+    review_rounds_files
+    review_rounds_plan recheck
+  fi
   review_record_leg_setup
   # Lock the scratch so a leg cannot list its siblings. Known paths still work.
   chmod 311 "$SCRATCH" || die "chmod scratch failed"
@@ -3533,6 +3661,9 @@ EOF
   review_blind || true
   if [ ! -s "$ERRORS_FILE" ]; then
     printf '(none)\n' >"$ERRORS_FILE"
+  fi
+  if [ "$REVIEW_MODE" = "pr" ]; then
+    review_rounds_record
   fi
   review_print_result
 }
