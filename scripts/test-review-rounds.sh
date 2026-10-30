@@ -50,6 +50,7 @@ review_round() { # $1 = ballot id, $2 = 1 for --delta
   PR_ADD="$SS_INS" PR_DEL="$SS_DEL"
   review_target_mode
   python3 "$ROOT/scripts/review_rounds.py" snapshot --rounds-dir "$CONCLAVE_ROUNDS_DIR" --ballot-dir "$DIR"
+  rm -f "$DIR/findings.json" "$DIR/round.json" "$DIR/carried-findings.md" "$DIR/review-files.txt"
   review_rounds_plan
   review_write_claude_brief "$DIR/voter-claude.brief.md" || fail "$REVIEW_BRIEF_REJECT"
   review_alloc_scratch
@@ -106,6 +107,12 @@ printf '{"target": "pr 7 delta", "resolved": ["r2-f1"], "findings": [{"id": "f1"
 
 review_round r3 1 >/dev/null
 [ "$(jq -r '.rounds | length' "$work/rounds/github.com_example_app_7.json")" = 3 ] || fail "a rerun of round 3 added a round"
+printf '{"target": "pr 7 delta", "resolved": ["r2-f1"], "findings": [{"id": "f1", "claim": "c.txt loops on a blank line", "file": "c.txt", "line": 1}, {"id": "f2", "claim": "c.txt rerun found this", "file": "c.txt", "line": 2}]}\n' \
+  >"$work/council/r3/findings.json"
+out="$(python3 "$ROOT/scripts/review_rounds.py" plan --rounds-dir "$CONCLAVE_ROUNDS_DIR" \
+  --pr-url https://github.com/example/app/pull/7 --ballot r1 --head "$h1" --mode pr)" \
+  || fail "a rerun of round 1 after round 3 was refused"
+[ "$out" = "1 - 1" ] || fail "a rerun of round 1 after round 3 is round 1, got '$out'"
 
 h4="$(push_head d.txt)"
 rc=0
@@ -119,7 +126,7 @@ park="$work/rounds/github.com_example_app_7.park.md"
 [ -s "$park" ] || fail "no park note"
 printf -- '--- park note %s\n' "$park"
 cat "$park"
-for id in r1-f2 r3-f1; do grep -q "$id" "$park" || fail "park note misses $id"; done
+for id in r1-f2 r3-f1 r3-f2; do grep -q "$id" "$park" || fail "park note misses $id"; done
 for id in r1-f1 r2-f1; do grep -q "$id" "$park" && fail "park note lists resolved $id"; done
 [ ! -e "$work/gh-calls" ] || fail "gh was called: $(cat "$work/gh-calls")"
 

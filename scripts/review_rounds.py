@@ -72,20 +72,34 @@ def write_json(path: Path, doc: dict) -> None:
     write_atomic(path, json.dumps(doc, indent=2) + "\n")
 
 
-def round_findings(entry: dict, council_dir: Path | None) -> dict | None:
-    """The round's findings.json: the log snapshot, else the ballot dir's file."""
-    if isinstance(entry.get("findings_doc"), dict):
-        return entry["findings_doc"]
-    if council_dir is None:
-        return None
-    path = council_dir / str(entry.get("ballot", "")) / "findings.json"
-    if not path.is_file():
-        return None
+def read_json(path: Path) -> dict | None:
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     return doc if isinstance(doc, dict) else None
+
+
+def round_findings(entry: dict, council_dir: Path | None) -> dict | None:
+    """The round's findings.json.
+
+    The ballot dir's file wins while that ballot's round.json still names this
+    round, so findings the chair revises after a rerun count. Once the ballot id
+    moves on to a later round, the log snapshot is the only copy.
+    """
+    if council_dir is not None:
+        ballot = council_dir / str(entry.get("ballot", ""))
+        meta = read_json(ballot / "round.json")
+        if meta and meta.get("round") == entry["round"] and meta.get("head") == entry["head"]:
+            doc = read_json(ballot / "findings.json")
+            if doc is not None:
+                return doc
+    doc = entry.get("findings_doc")
+    return doc if isinstance(doc, dict) else None
+
+
+def find_round(rounds: list[dict], ballot: str, head: str) -> dict | None:
+    return next((r for r in rounds if r["ballot"] == ballot and r["head"] == head), None)
 
 
 def open_after(entry: dict, council_dir: Path | None) -> list[dict]:
@@ -150,12 +164,13 @@ def cmd_plan(a) -> str:
     doc = load_log(log_path(rounds_dir, a.pr_url), a.pr_url)
     rounds = doc["rounds"]
     last = rounds[-1] if rounds else None
-    if last and last["ballot"] == a.ballot and last["head"] == a.head:
-        if last["mode"] != a.mode:
+    same = find_round(rounds, a.ballot, a.head)
+    if same:
+        if same["mode"] != a.mode:
             raise Refused(2, f"review rounds: ballot {a.ballot} already reviewed head {a.head[:12]} "
-                             f"as mode {last['mode']}; use a new ballot id")
-        base = last["base"] if a.mode == "delta" else "-"
-        return f"{last['round']} {base} 1"
+                             f"as mode {same['mode']}; use a new ballot id")
+        base = same["base"] if a.mode == "delta" else "-"
+        return f"{same['round']} {base} 1"
     if a.mode == "delta":
         if not last:
             raise Refused(2, f"review rounds: --delta needs an earlier round on {a.pr_url}; run --pr first")
@@ -181,9 +196,8 @@ def cmd_record(a) -> str:
     rounds = doc["rounds"]
     files = [ln for ln in Path(a.files_file).read_text(encoding="utf-8").splitlines() if ln]
     last = rounds[-1] if rounds else None
-    if last and last["ballot"] == a.ballot and last["head"] == a.head:
-        entry = last
-    else:
+    entry = find_round(rounds, a.ballot, a.head)
+    if entry is None:
         if len(rounds) >= MAX_ROUNDS:
             raise Refused(3, f"review rounds: refused round {len(rounds) + 1}: the cap is {MAX_ROUNDS}")
         entry = {
@@ -225,9 +239,8 @@ def cmd_snapshot(a) -> str:
     if not rj.is_file() or not fj.is_file():
         return ""
     meta = json.loads(rj.read_text(encoding="utf-8"))
-    try:
-        findings = json.loads(fj.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    findings = read_json(fj)
+    if findings is None:
         return ""
     path = log_path(Path(a.rounds_dir), meta["pr_url"])
     doc = load_log(path, meta["pr_url"])
