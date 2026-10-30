@@ -39,6 +39,8 @@ run "header and flag differ" "die:conflicts with brief header" 'HEADER_PR=7' 'FL
 run "header and --base conflict" "die:conflicts with --whole or --base" 'HEADER_PR=7' 'FLAG_BASE=main'
 run "header and --whole conflict" "die:conflicts with --whole or --base" 'HEADER_PR=7' 'FLAG_WHOLE=1'
 run "refs still work" "ok:refs:" 'FLAG_BASE=main'
+run "--delta with refs dies" "die:--delta needs a PR target" 'FLAG_DELTA=1' 'FLAG_BASE=main'
+run "--delta with --pr" "ok:pr:7" 'FLAG_DELTA=1' 'FLAG_PR=7'
 run "header URL .diff" "ok:pr:3523" 'HEADER_PR=https://github.com/example/app/pull/3523.diff'
 run "header URL query holds another pull" "ok:pr:3523" 'HEADER_PR=https://github.com/example/app/pull/3523?next=https://github.com/evil/repo/pull/1'
 

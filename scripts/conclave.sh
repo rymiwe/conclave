@@ -53,6 +53,7 @@ FLAG_PR=""
 FLAG_BASE=""
 FLAG_HEAD=""
 FLAG_WHOLE=0
+FLAG_DELTA=0
 FLAG_TARGET=""
 FLAG_TARGET_TYPE=""
 CONTEXT_FILES=()
@@ -436,6 +437,10 @@ Options:
   --head REF             Review kind: head ref
   --whole                Review kind: whole codebase against a synthesized empty tree
                          (never the default; a brief 'pr:' header or --pr is the usual target)
+  --delta                Review kind, with a PR target: review only what changed since the
+                         last reviewed head of that PR (round log in tmp/council/rounds/).
+                         Every PR review is a round; a 4th round is refused (exit 3) and
+                         writes a park note.
   --keep-worktrees       Review or audit: leave voter worktrees in place
   --findings             Review or audit phase 3: judge findings.json (no voters)
   --verdicts             Audit proposal: Jev choice per change (no voters)
@@ -613,8 +618,8 @@ voter_is_named() {
 
 reject_review_only_flags() {
   # --repo is every kind. These four are review worktree flags.
-  if [ -n "${FLAG_PR}${FLAG_BASE}${FLAG_HEAD}" ] || [ "$KEEP_WORKTREES" -eq 1 ] || [ "$FLAG_WHOLE" -eq 1 ]; then
-    die "--pr, --base, --head, --whole, and --keep-worktrees require kind: review"
+  if [ -n "${FLAG_PR}${FLAG_BASE}${FLAG_HEAD}" ] || [ "$KEEP_WORKTREES" -eq 1 ] || [ "$FLAG_WHOLE" -eq 1 ] || [ "$FLAG_DELTA" -eq 1 ]; then
+    die "--pr, --base, --head, --whole, --delta, and --keep-worktrees require kind: review"
   fi
 }
 
@@ -1171,7 +1176,7 @@ resolve_routing() {
   elif [ -n "$HEADER_KIND" ]; then
     KIND="$HEADER_KIND"
     kind_src="header"
-  elif [ -n "${FLAG_PR}${FLAG_BASE}${FLAG_HEAD}${HEADER_PR}" ] || [ "$FLAG_WHOLE" -eq 1 ]; then
+  elif [ -n "${FLAG_PR}${FLAG_BASE}${FLAG_HEAD}${HEADER_PR}" ] || [ "$FLAG_WHOLE" -eq 1 ] || [ "$FLAG_DELTA" -eq 1 ]; then
     KIND="review"
     kind_src="flags"
   else
@@ -3685,6 +3690,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --whole)
       FLAG_WHOLE=1
+      shift
+      ;;
+    --delta)
+      FLAG_DELTA=1
       shift
       ;;
     --keep-worktrees)
