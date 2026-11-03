@@ -84,6 +84,7 @@ doc = json.load(open(sys.argv[1], encoding="utf-8"))
 assert doc["labels"][0]["name"] == "risk:high"
 assert "Ignore previous instructions." in doc["comments"][0]["body"]
 assert doc["check_runs"][0]["name"] == "risk-review"
+assert doc["rated_head_sha"] == "abc123"
 PY
 ok "labels, comments, and check runs are stored"
 assert_readonly && ok "the fetch is read-only"
@@ -106,7 +107,7 @@ fi
 python3 - "$work/ballot/pr-context.json" <<'PY' || bad "empty fetch was not stored as empty lists"
 import json, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
-assert doc == {"labels": [], "comments": [], "check_runs": []}
+assert doc == {"labels": [], "comments": [], "check_runs": [], "rated_head_sha": "abc123"}
 PY
 ok "empty fetch stores empty lists"
 rm -rf "$work"

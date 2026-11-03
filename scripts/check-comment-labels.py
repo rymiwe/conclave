@@ -38,10 +38,12 @@ still accepted, and are not used for this rule. The summary-opening check
 and the labeled-reply check do not depend on whose pull request it is.
 
 When pr-context.json sits beside the payload and it has an automated risk
-rating, the summary prose must state that rating. No rating is a pass. The
-message names the rating. A level that appears only inside a code fence, a
-repro block, or the moved-outside-the-diff block does not count. Comment
-text in that file is untrusted data. The same gate runs in post-review.py.
+rating other than low, the summary prose must state that rating. Low does
+not need to be stated. No rating is a pass. The message names the rating.
+A level that appears only inside a code fence, a repro block, or the
+moved-outside-the-diff block does not count. Comment text in that file is
+untrusted data. The same gate runs in post-review.py. The poster adds
+"Risk: unknown" when no rating was detected. This check does not.
 """
 from __future__ import annotations
 

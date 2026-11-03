@@ -20,6 +20,16 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / 'scripts'
 FIXTURES = SCRIPTS / 'fixtures' / 'post-review'
 HEAD = '1' * 40
+UNKNOWN_RISK_LINE = 'Risk: unknown'
+
+
+def with_unknown(text: str) -> str:
+    """The body the poster sends when no rating was detected."""
+    if UNKNOWN_RISK_LINE in text:
+        return text
+    if not text.strip():
+        return UNKNOWN_RISK_LINE
+    return text.rstrip() + '\n\n' + UNKNOWN_RISK_LINE
 
 
 def check(cond: bool, label: str) -> None:
@@ -318,8 +328,8 @@ def test_other_reviewer_same_body(root: Path) -> None:
 
     f = Fixture(root / 'own-reviewer')
     f.set_payload(payload)
-    reviews.write_text(json.dumps([{'id': 42, 'state': 'COMMENTED', 'commit_id': HEAD, 'body': '',
-                                    'user': {'login': 'me'}}]))
+    reviews.write_text(json.dumps([{'id': 42, 'state': 'COMMENTED', 'commit_id': HEAD,
+                                    'body': UNKNOWN_RISK_LINE, 'user': {'login': 'me'}}]))
     proc = f.post(env={'GH_REVIEWS': str(reviews)})
     check(proc.returncode != 0 and 'review 42 already exists on GitHub' in proc.stderr and f.posts() == 0,
           f'your own identical review on the same commit still blocks ({proc.returncode} {proc.stderr.strip()})')
@@ -1016,6 +1026,28 @@ def write_voters(f: Fixture, count: int) -> None:
     (blind / 'key.txt').write_text(rows)
 
 
+def write_named_voters(f: Fixture, names: list[str]) -> None:
+    blind = f.council / 'demo-1' / 'blind'
+    blind.mkdir(parents=True)
+    rows = ''.join(f'{letter}=/tmp/{name}\n' for letter, name in zip('ABCDEFGH', names))
+    (blind / 'key.txt').write_text(rows)
+
+
+def write_risk(f: Fixture, level: str | None, *, raw: str | None = None) -> None:
+    path = f.council / 'demo-1' / 'pr-context.json'
+    if raw is not None:
+        path.write_text(raw)
+        return
+    if level is None:
+        path.unlink(missing_ok=True)
+        return
+    path.write_text(json.dumps({
+        'labels': [{'name': f'risk:{level}'}],
+        'comments': [],
+        'check_runs': [],
+    }))
+
+
 def inline_only(f: Fixture, comments: list, body: str = 'One note on the widget change.') -> dict:
     payload = f.payload()
     payload.pop('event', None)
@@ -1397,7 +1429,7 @@ def test_own_pr_comment_event(root: Path) -> None:
     print(f'info own PR, payload event COMMENT, Requested finding: event={req.get("event")!r} '
           f'first line={body.splitlines()[0] if body else ""!r} body={body!r}')
     soft(proc.returncode == 0 and req.get('event') == 'COMMENT'
-         and body == 'Verdict: request changes' + SELF_NOTE_FOLDS + '\n\nOne note on the widget change.'
+         and body == with_unknown('Verdict: request changes' + SELF_NOTE_FOLDS + '\n\nOne note on the widget change.')
          and req['comments'][0]['body'].startswith('**Requested:**'),
          f'own PR, payload event COMMENT with a Requested finding: posts as COMMENT with the verdict line '
          f'({proc.returncode} {proc.stderr.strip()})')
@@ -1502,7 +1534,7 @@ def test_self_authored(root: Path) -> None:
     write_voters(f, 2)
     proc = f.post('--dry-run', '--human-verdict', 'COMMENT', env=mine)
     req = request_of(f) if proc.returncode == 0 else {}
-    soft(proc.returncode == 0 and req.get('event') == 'COMMENT' and req.get('body') == 'One note on the widget change.',
+    soft(proc.returncode == 0 and req.get('event') == 'COMMENT' and req.get('body') == with_unknown('One note on the widget change.'),
          f'own PR, COMMENT chosen: no verdict line is added ({proc.returncode} {proc.stderr.strip()} {req.get("body")!r})')
 
     f = Fixture(root / 'other-requested')
@@ -1510,7 +1542,7 @@ def test_self_authored(root: Path) -> None:
     proc = f.post('--dry-run', env=theirs)
     req = request_of(f) if proc.returncode == 0 else {}
     soft(proc.returncode == 0 and req.get('event') == 'REQUEST_CHANGES'
-         and req.get('body') == 'One note on the widget change.' and 'own PR' not in proc.stdout
+         and req.get('body') == with_unknown('One note on the widget change.') and 'own PR' not in proc.stdout
          and 'own PR' not in json.dumps(req),
          f'someone else\'s PR, Requested finding: still REQUEST_CHANGES with the body unchanged '
          f'({proc.returncode} {proc.stderr.strip()} {req.get("event")!r} {req.get("body")!r})')
@@ -1520,7 +1552,7 @@ def test_self_authored(root: Path) -> None:
     write_voters(f, 2)
     proc = f.post('--dry-run', '--human-verdict', 'APPROVE', env=theirs)
     req = request_of(f) if proc.returncode == 0 else {}
-    soft(proc.returncode == 0 and req.get('event') == 'APPROVE' and req.get('body') == 'One note on the widget change.',
+    soft(proc.returncode == 0 and req.get('event') == 'APPROVE' and req.get('body') == with_unknown('One note on the widget change.'),
          f'someone else\'s PR, APPROVE chosen: still APPROVE with the body unchanged '
          f'({proc.returncode} {proc.stderr.strip()} {req.get("event")!r} {req.get("body")!r})')
 
@@ -1528,7 +1560,7 @@ def test_self_authored(root: Path) -> None:
     inline_only(f, [one_inline('**Requested:** size counts deleted items.')])
     proc = f.post('--dry-run')
     req = request_of(f) if proc.returncode == 0 else {}
-    soft(proc.returncode == 0 and req.get('event') == 'REQUEST_CHANGES' and req.get('body') == 'One note on the widget change.',
+    soft(proc.returncode == 0 and req.get('event') == 'REQUEST_CHANGES' and req.get('body') == with_unknown('One note on the widget change.'),
          f'a PR response with no author is not treated as your own ({proc.returncode} {proc.stderr.strip()} {req.get("event")!r})')
     if failed:
         raise SystemExit(f'FAIL {len(failed)} self-authored check(s)')
@@ -1894,6 +1926,139 @@ def test_question_bound_for_body(root: Path) -> None:
               f'posts={f.posts()} {proc.stderr.strip()[-200:]})')
 
 
+def test_risk_in_body(root: Path) -> None:
+    def summary(name: str, body: str) -> Fixture:
+        f = Fixture(root / name)
+        payload = inline_only(f, [], body=body)
+        payload['event'] = 'COMMENT'
+        f.set_payload(payload)
+        return f
+
+    f = summary('risk-low', 'Looks fine.')
+    write_risk(f, 'low')
+    proc = f.post('--dry-run')
+    req = request_of(f) if proc.returncode == 0 else {}
+    check(proc.returncode == 0 and req.get('body') == 'Looks fine.'
+          and UNKNOWN_RISK_LINE not in req.get('body', '') and 'low' not in req.get('body', ''),
+          f'a low rating adds no risk line ({proc.returncode} {req.get("body")!r} {proc.stderr.strip()})')
+
+    f = summary('risk-medium', 'The rating is medium.')
+    write_risk(f, 'medium')
+    proc = f.post('--dry-run')
+    req = request_of(f) if proc.returncode == 0 else {}
+    check(proc.returncode == 0 and req.get('body') == 'The rating is medium.'
+          and UNKNOWN_RISK_LINE not in req.get('body', ''),
+          f'a stated medium rating stays in the body ({proc.returncode} {req.get("body")!r} {proc.stderr.strip()})')
+
+    f = summary('risk-medium-missing', 'Looks fine.')
+    write_risk(f, 'medium')
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and 'summary does not state the risk rating medium' in proc.stderr and f.posts() == 0,
+          f'a medium rating omitted from the summary is refused ({proc.returncode} {proc.stderr.strip()})')
+
+    f = summary('risk-high', 'The rating is high.')
+    write_risk(f, 'high')
+    proc = f.post('--dry-run')
+    req = request_of(f) if proc.returncode == 0 else {}
+    check(proc.returncode == 0 and req.get('body') == 'The rating is high.'
+          and UNKNOWN_RISK_LINE not in req.get('body', ''),
+          f'a stated high rating stays in the body ({proc.returncode} {req.get("body")!r} {proc.stderr.strip()})')
+
+    f = summary('risk-high-missing', 'Looks fine.')
+    write_risk(f, 'high')
+    proc = f.post('--dry-run')
+    check(proc.returncode != 0 and 'summary does not state the risk rating high' in proc.stderr and f.posts() == 0,
+          f'a high rating omitted from the summary is refused ({proc.returncode} {proc.stderr.strip()})')
+
+    f = summary('risk-unknown', 'Looks fine.')
+    proc = f.post('--dry-run')
+    req = request_of(f) if proc.returncode == 0 else {}
+    check(proc.returncode == 0 and req.get('body') == with_unknown('Looks fine.') and f.posts() == 0,
+          f'a missing context adds the unknown line and does not block ({proc.returncode} {req.get("body")!r} {proc.stderr.strip()})')
+
+    f = summary('risk-unreadable', 'Looks fine.')
+    write_risk(f, None, raw='not json')
+    proc = f.post('--dry-run')
+    req = request_of(f) if proc.returncode == 0 else {}
+    check(proc.returncode == 0 and req.get('body') == with_unknown('Looks fine.'),
+          f'an unreadable context adds the unknown line ({proc.returncode} {req.get("body")!r} {proc.stderr.strip()})')
+
+    f = summary('risk-none-found', 'Looks fine.')
+    write_risk(f, None, raw='{"labels":[],"comments":[],"check_runs":[]}\n')
+    proc = f.post('--dry-run')
+    req = request_of(f) if proc.returncode == 0 else {}
+    check(proc.returncode == 0 and req.get('body') == with_unknown('Looks fine.'),
+          f'a context with no rating adds the unknown line ({proc.returncode} {req.get("body")!r} {proc.stderr.strip()})')
+
+
+def test_approve_without_labeled_findings(root: Path) -> None:
+    def clean(name: str, body: str = 'Looks fine.') -> Fixture:
+        f = Fixture(root / name)
+        payload = inline_only(f, [], body=body)
+        payload['event'] = 'COMMENT'
+        f.set_payload(payload)
+        return f
+
+    f = clean('approve-missing-rating')
+    write_named_voters(f, ['voter-a.json', 'voter-b.json'])
+    proc = f.post('--dry-run', '--human-verdict', 'APPROVE')
+    check(proc.returncode != 0 and 'the risk rating is missing' in proc.stderr
+          and 'voters: voter-a.json, voter-b.json' in proc.stderr and f.posts() == 0,
+          f'APPROVE with no rating is refused and names the voters ({proc.returncode} {proc.stderr.strip()})')
+
+    f = clean('approve-high', 'The rating is high.')
+    write_named_voters(f, ['voter-a.json', 'voter-b.json'])
+    write_risk(f, 'high')
+    proc = f.post('--dry-run', '--human-verdict', 'APPROVE')
+    check(proc.returncode != 0 and 'the risk rating is high' in proc.stderr and f.posts() == 0,
+          f'APPROVE with a high rating is refused ({proc.returncode} {proc.stderr.strip()})')
+
+    f = clean('approve-one-name')
+    write_risk(f, 'low')
+    blind = f.council / 'demo-1' / 'blind'
+    blind.mkdir(parents=True)
+    (blind / 'key.txt').write_text('A=/tmp/voter-a.json\nB=/tmp/voter-a.json\n')
+    proc = f.post('--dry-run', '--human-verdict', 'APPROVE')
+    check(proc.returncode != 0 and '1 distinct voter finished (voter-a.json)' in proc.stderr
+          and 'need 2' in proc.stderr and f.posts() == 0,
+          f'two rows of one name are one voter ({proc.returncode} {proc.stderr.strip()})')
+
+    f = clean('approve-no-names')
+    write_risk(f, 'low')
+    proc = f.post('--dry-run', '--human-verdict', 'APPROVE')
+    check(proc.returncode != 0 and 'voter names are not available' in proc.stderr and f.posts() == 0,
+          f'APPROVE with no key file is refused ({proc.returncode} {proc.stderr.strip()})')
+
+    f = clean('approve-open')
+    write_named_voters(f, ['voter-a.json', 'voter-b.json'])
+    write_risk(f, 'low')
+    payload = f.payload()
+    payload['body_findings'] = ['f9']
+    f.set_payload(payload)
+    proc = f.post('--dry-run', '--human-verdict', 'APPROVE')
+    check(proc.returncode != 0 and 'an open finding remains (demo-1:f9 review body no label)' in proc.stderr
+          and f.posts() == 0,
+          f'APPROVE with an open finding is refused ({proc.returncode} {proc.stderr.strip()})')
+
+    f = clean('approve-clean')
+    write_named_voters(f, ['voter-b.json', 'voter-a.json'])
+    write_risk(f, 'low')
+    proc = f.post('--dry-run', '--human-verdict', 'APPROVE')
+    req = request_of(f) if proc.returncode == 0 else {}
+    line = verdict_line(proc)
+    check(proc.returncode == 0 and req.get('event') == 'APPROVE' and req.get('body') == 'Looks fine.'
+          and line == 'verdict: APPROVE (no labeled findings; 2 distinct voters finished: voter-a.json, voter-b.json)',
+          f'APPROVE with two clean voters and a low rating is allowed ({proc.returncode} {line!r} '
+          f'{req.get("body")!r} {proc.stderr.strip()})')
+
+    f = clean('approve-comment-off')
+    write_named_voters(f, ['voter-a.json', 'voter-b.json'])
+    write_risk(f, 'low')
+    proc = f.post('--dry-run', '--human-verdict', 'COMMENT')
+    check(proc.returncode != 0 and 'leave it off' in proc.stderr and f.posts() == 0,
+          f'COMMENT with no labeled finding is still refused ({proc.returncode} {proc.stderr.strip()})')
+
+
 def main() -> None:
     only = sys.argv[1:]
     if only:
@@ -1923,6 +2088,8 @@ def main() -> None:
         test_severity_on_comments(root)
         test_file_level_and_reanchor(root)
         test_verdict(root)
+        test_risk_in_body(root)
+        test_approve_without_labeled_findings(root)
         test_self_authored(root)
         test_empty_review(root)
         test_stale_cited_code(root)

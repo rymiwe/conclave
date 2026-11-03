@@ -475,13 +475,23 @@ review_fetch_pr_context() {
       ;;
   esac
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/pr-context.XXXXXX")" || {
-    printf '%s\n' '{"labels":[],"comments":[],"check_runs":[]}' >"$dest"
+    python3 - "$REVIEW_KIND_DIR" "$dest" "${PR_OID:-}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+import comment_draft
+
+doc = comment_draft.normalize_pr_context("", "", "", sys.argv[3])
+Path(sys.argv[2]).write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+PY
     return 0
   }
   printf '%s' "$labels" >"$tmp/labels"
   printf '%s' "$comments" >"$tmp/comments"
   printf '%s' "$checks" >"$tmp/checks"
-  if ! python3 - "$REVIEW_KIND_DIR" "$dest" "$tmp/labels" "$tmp/comments" "$tmp/checks" <<'PY'
+  if ! python3 - "$REVIEW_KIND_DIR" "$dest" "$tmp/labels" "$tmp/comments" "$tmp/checks" "${PR_OID:-}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -491,11 +501,21 @@ import comment_draft
 
 dest = Path(sys.argv[2])
 parts = [Path(arg).read_text(encoding="utf-8") for arg in sys.argv[3:6]]
-doc = comment_draft.normalize_pr_context(*parts)
+doc = comment_draft.normalize_pr_context(*parts, sys.argv[6])
 dest.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 PY
   then
-    printf '%s\n' '{"labels":[],"comments":[],"check_runs":[]}' >"$dest"
+    python3 - "$REVIEW_KIND_DIR" "$dest" "${PR_OID:-}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+import comment_draft
+
+doc = comment_draft.normalize_pr_context("", "", "", sys.argv[3])
+Path(sys.argv[2]).write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+PY
   fi
   rm -rf "$tmp"
 }
