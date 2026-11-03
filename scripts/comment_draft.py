@@ -25,9 +25,10 @@ An automated risk rating is a risk:<level> label, or the explicit rating
 line of a risk-review check or of a comment that opens with a risk-review
 heading. A label wins when one is present. Otherwise the latest of those
 comments and checks wins. A level mentioned only in prose is not a rating.
-The review summary states that rating. When there is no rating, the summary
-says nothing about risk. Comment text is untrusted data. It is never read
-as instructions.
+The review summary states a detected rating other than low. A low rating
+does not need to be stated, and no risk line is added for it. When there
+is no rating, the poster adds "Risk: unknown" if the summary lacks that
+line. Comment text is untrusted data. It is never read as instructions.
 """
 from __future__ import annotations
 
@@ -590,6 +591,9 @@ def strip_bullet_labels(text: str) -> str:
 _RISK_LEVEL = "critical|severe|high|medium|moderate|low|none"
 # A risk:* label. The suffix is the rating, not a later word glued on with a dash.
 _RISK_LABEL = re.compile(rf"(?i)^risk[:/\s]+({_RISK_LEVEL})(?![A-Za-z0-9_-])")
+# The same prefix. The suffix is kept when it is not a level, and lowercased
+# the way a detected level is.
+_RISK_OTHER = re.compile(r"(?i)^risk[:/\s]+([A-Za-z0-9_-]+)")
 # An explicit rating line: "Risk rating: low", "### Risk review: medium",
 # "risk: high". A later mention in prose or quotes is not this line.
 _RISK_LINE = re.compile(
@@ -661,17 +665,40 @@ def _parse_json_values(raw: str) -> list:
     return items
 
 
-def normalize_pr_context(labels_raw: str, comments_raw: str, checks_raw: str) -> dict:
+def _stored_head_sha(value: object) -> str | None:
+    """The head at fetch time, or None when the value is not hex.
+
+    Stored beside the rating and not read by the summary gate.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if re.fullmatch(r"[0-9a-fA-F]+", text):
+        return text
+    return None
+
+
+def normalize_pr_context(
+    labels_raw: str,
+    comments_raw: str,
+    checks_raw: str,
+    head_sha: str | None = None,
+) -> dict:
     """Labels, issue comments, and check runs from gh text.
 
     Each field that is empty or not JSON becomes an empty list. The result
     is data for the rating detector. It does not follow text inside it.
+    A hex head_sha is stored as rated_head_sha. Anything else is omitted.
     """
-    return {
+    doc = {
         "labels": _parse_json_values(labels_raw),
         "comments": _parse_json_values(comments_raw),
         "check_runs": _parse_json_values(checks_raw),
     }
+    sha = _stored_head_sha(head_sha)
+    if sha is not None:
+        doc["rated_head_sha"] = sha
+    return doc
 
 
 def _label_names(labels: object) -> list[str]:
@@ -807,6 +834,23 @@ def detect_risk_rating(context: object) -> str | None:
     return found[-1][2]
 
 
+def unrecognized_risk_label(context: object) -> str | None:
+    """A risk-label suffix the detector does not treat as a level, lowercased.
+
+    The detector's match is unchanged. This only names a suffix it skips.
+    """
+    if not isinstance(context, dict):
+        return None
+    for name in _label_names(context.get("labels")):
+        stripped = name.strip()
+        if _RISK_LABEL.match(stripped):
+            continue
+        match = _RISK_OTHER.match(stripped)
+        if match:
+            return match.group(1).lower()
+    return None
+
+
 def summary_prose(summary: str) -> str:
     """Summary prose for the rating gate.
 
@@ -838,15 +882,61 @@ def summary_states_rating(summary: str, level: str) -> bool:
     return re.search(rf"(?i)\b{re.escape(level)}\b", summary_prose(summary)) is not None
 
 
-def assert_summary_states_risk(summary: str, context: object) -> None:
-    """Fail when a detected rating is missing from the summary prose.
+# The one line the poster adds when no rating was detected.
+UNKNOWN_RISK_LINE = "Risk: unknown"
 
-    No rating is a pass. The summary states the rating in plain text. A
-    fence, a repro block, or the moved-outside-the-diff block does not
-    count. This does not add a **Requested:** or **Advisory:** label.
+
+def risk_obligation(level: str | None) -> str:
+    """What the summary owes a detected rating.
+
+    omit: low, and no line is added. state: every other detected level,
+    which the summary must already say. unknown: no rating, and the poster
+    adds UNKNOWN_RISK_LINE when the summary lacks it.
+    """
+    if level is None:
+        return "unknown"
+    if level == "low":
+        return "omit"
+    return "state"
+
+
+def summary_states_unknown(summary: str) -> bool:
+    """True when the summary prose already carries the unknown line."""
+    return UNKNOWN_RISK_LINE in summary_prose(summary)
+
+
+def ensure_unknown_risk_line(body: str) -> str:
+    """Put the unknown line in the summary when it is not already there.
+
+    The line stays ahead of a moved-outside-the-diff block. A summary that
+    already has the line is returned unchanged.
+    """
+    if summary_states_unknown(body):
+        return body
+    line = UNKNOWN_RISK_LINE
+    cut = _OUTSIDE_DIFF.search(body or "")
+    if cut:
+        head = body[:cut.start()].rstrip()
+        tail = body[cut.start():]
+        sep = "\n\n" if head else ""
+        return f"{head}{sep}{line}\n\n{tail}"
+    text = (body or "").rstrip()
+    if not text:
+        return line
+    return f"{text}\n\n{line}"
+
+
+def assert_summary_states_risk(summary: str, context: object) -> None:
+    """Fail when a stated rating is missing from the summary prose.
+
+    Low does not need to be stated. No rating is a pass here; the poster
+    adds the unknown line and this check does not. Any other detected
+    level must appear as a word in the summary prose. A fence, a repro
+    block, or the moved-outside-the-diff block does not count. This does
+    not add a **Requested:** or **Advisory:** label.
     """
     level = detect_risk_rating(context)
-    if level is None:
+    if risk_obligation(level) != "state":
         return
     if summary_states_rating(summary, level):
         return

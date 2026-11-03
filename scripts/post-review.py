@@ -56,7 +56,11 @@ Steps, in order. Any failure stops before the POST.
    a real post needs --human-verdict. APPROVE is accepted there only when
    2 or more voters finished (blind/key.txt, else voters_finished). APPROVE
    is never chosen here. With no labeled finding the payload event is
-   kept, COMMENT by default, as before. When the PR's author is the
+   kept, COMMENT by default. --human-verdict APPROVE is accepted on that
+   path only when blind/key.txt names 2 or more distinct voters, the plan
+   has no finding, and the detected rating is exactly low or medium. Any
+   other rating is refused and the message names that value. Any other
+   --human-verdict is refused there. When the PR's author is the
    posting account (gh api user), GitHub rejects REQUEST_CHANGES and
    APPROVE, so the review posts as COMMENT, every label stays, and the
    first body line reads "Verdict: request changes (posted as a comment
@@ -65,11 +69,13 @@ Steps, in order. Any failure stops before the POST.
 5. Every body must pass scripts/check-comment-links.py, and the payload must
    pass scripts/check-comment-labels.py. That check flags a summary that opens
    with a label, a labeled reply, and a new inline comment that does not
-   start with a label. When the ballot's
-   pr-context.json has an automated risk rating, the summary prose must state
-   it. A level only inside a code fence, a repro block, or the
-   moved-outside-the-diff block does not count. The same gate runs in
-   scripts/check-comment-labels.py.
+   start with a label. A detected rating of low does not need to be stated,
+   and no risk line is added for it. Any other detected rating must appear
+   in the summary prose. When pr-context.json is missing, unreadable, or
+   has no rating, the body gains "Risk: unknown" if the summary lacks that
+   line, and that alone does not block the post. A level only inside a
+   code fence, a repro block, or the moved-outside-the-diff block does not
+   count. The same state gate runs in scripts/check-comment-labels.py.
    A comment with
    in_reply_to is a reply and is not sent as a new line comment. A
    repro/<finding-id>.<ext> file in that finding's ballot directory is
@@ -229,6 +235,58 @@ def load_judge():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def distinct_voter_names(ballot_dir: Path) -> tuple[list[str] | None, str]:
+    """Sorted distinct filenames from blind/key.txt, and why names failed.
+
+    A row is ``LETTER=path``. The name is the path's filename. Two rows with
+    the same filename count once. No file, an unreadable file, a row with no
+    filename, or no rows returns None and a reason. The payload integer
+    voters_finished is not a name.
+    """
+    path = ballot_dir / "blind" / "key.txt"
+    if not path.is_file():
+        return None, "voter names are not available (no blind/key.txt)"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return None, f"voter names are not available ({exc})"
+    names: list[str] = []
+    seen: set[str] = set()
+    rows = 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        rows += 1
+        if "=" not in line:
+            return None, "voter names are not available (a key.txt row has no name)"
+        _letter, src = line.split("=", 1)
+        name = Path(src.strip()).name
+        if not name:
+            return None, "voter names are not available (a key.txt row has no name)"
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+    if rows == 0:
+        return None, "voter names are not available (blind/key.txt has no rows)"
+    names.sort()
+    return names, ""
+
+
+def open_findings(plan: list[dict]) -> list[str]:
+    """Every plan row, as ``ballot:id place label``.
+
+    The plan has no resolved flag, so a finding in it is open. A row is one
+    payload finding: an inline comment, a file comment, a comment moved into
+    the review body, or a body_findings id. Replies are not rows. A row with
+    no label says ``no label``.
+    """
+    rows: list[str] = []
+    for row in plan:
+        label = row.get("label") or "no label"
+        rows.append(f"{row['ballot']}:{row['finding']} {row['post_as']} {label}")
+    return rows
 
 
 def voters_finished(ballot_dir: Path, payload: dict) -> tuple[int, str | None]:
@@ -757,6 +815,14 @@ def main() -> int:
 
     body_script_floor = sum(reserve_repro(path, ballot) for ballot, _fid, path in repro_findings)
 
+    context = risk_context(home)
+    risk_level = comment_draft.detect_risk_rating(context) if context is not None else None
+    # An empty summary with no inline comment stays empty, so the empty-review
+    # refusal still fires. The line is in the summary before moved comments
+    # are appended, so their length budget includes it.
+    if comment_draft.risk_obligation(risk_level) == "unknown" and (body.strip() or inline):
+        body = comment_draft.ensure_unknown_risk_line(body)
+
     # A line outside the diff joins the review body. Reserve each later
     # comment's prose, permalink, and the smallest truncated script, not the
     # script it already carries. Also reserve every body-finding script.
@@ -824,7 +890,6 @@ def main() -> int:
     labeled_comments = [c for c in comments if not (isinstance(c, dict) and id(c) in body_bound)]
     for item in label_check.problems({"body": body, "comments": labeled_comments}):
         errors.append(item)
-    context = risk_context(home)
     if context is not None:
         try:
             comment_draft.assert_summary_states_risk(summary_text, context)
@@ -858,12 +923,41 @@ def main() -> int:
     human = args.human_verdict
     event: str | None = None
     if not labeled:
-        # Zero labeled findings (summary only, replies only, or only findings
-        # in the review body): the behavior before this rule is kept. The
-        # payload event goes out, COMMENT by default.
         event = payload_event or "COMMENT"
         plan_verdict = f"verdict: {event} (no labeled findings; the payload event, COMMENT by default)"
-        if human:
+        if human == "APPROVE":
+            names, names_why = distinct_voter_names(council / default_ballot)
+            problems: list[str] = []
+            if names is None:
+                problems.append(names_why)
+            elif len(names) < APPROVE_MIN_VOTERS:
+                noun = "voter" if len(names) == 1 else "voters"
+                listed = ", ".join(names) if names else "none"
+                problems.append(
+                    f"{len(names)} distinct {noun} finished ({listed}); need {APPROVE_MIN_VOTERS}"
+                )
+            open_rows = open_findings(plan)
+            if open_rows:
+                problems.append("an open finding remains (" + "; ".join(open_rows) + ")")
+            if risk_level not in ("low", "medium"):
+                if risk_level is not None:
+                    rating_name = risk_level
+                elif context is None:
+                    rating_name = "missing"
+                else:
+                    rating_name = comment_draft.unrecognized_risk_label(context) or "unknown"
+                problems.append(f"the risk rating is {rating_name}")
+            if names is not None:
+                problems.append(f"voters: {', '.join(names)}")
+            if any(not item.startswith("voters:") for item in problems):
+                errors.append("--human-verdict APPROVE refused: " + "; ".join(problems))
+            elif names is not None:
+                event = "APPROVE"
+                plan_verdict = (
+                    f"verdict: APPROVE (no labeled findings; "
+                    f"{len(names)} distinct voters finished: {', '.join(names)})"
+                )
+        elif human:
             errors.append(f"--human-verdict {human}: there is no labeled finding to decide; leave it off")
     elif requested:
         event = "REQUEST_CHANGES"
@@ -904,6 +998,11 @@ def main() -> int:
         body = f"{verdict_line}\n\n{body}" if body else verdict_line
         if len(body) > comment_draft.GITHUB_COMMENT_LIMIT:
             errors.append(f"review body is {len(body)} characters with the verdict line; "
+                          f"GitHub's limit is {comment_draft.GITHUB_COMMENT_LIMIT}")
+    if comment_draft.risk_obligation(risk_level) == "unknown" and body.strip():
+        body = comment_draft.ensure_unknown_risk_line(body)
+        if len(body) > comment_draft.GITHUB_COMMENT_LIMIT:
+            errors.append(f"review body is {len(body)} characters with the unknown risk line; "
                           f"GitHub's limit is {comment_draft.GITHUB_COMMENT_LIMIT}")
     if not body.strip() and not inline and not resume:
         why = (f"all {len(file_comments)} finding(s) are file-level comments, which the reviews endpoint "
