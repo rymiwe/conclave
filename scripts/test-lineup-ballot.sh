@@ -139,6 +139,13 @@ apply() { # $1 kind, $2 claude sku
 }
 
 source_is() { [ "$(ballot_source_line)" = "$1" ]; }
+
+apply_stops() { # $1 kind; runs apply in a subshell, prints its exit code, stderr in $work/ask-stop.err
+  local rc=0
+  ( apply "$1" ) 2>"$work/ask-stop.err" >/dev/null || rc=$?
+  printf '%s' "$rc"
+}
+ASK_STOP_LINE="conclave: stopped: seat-usage asked (Fable reading unknown); no fixed default seated (not Fable, not Astra): ask Ryan"
 called() { [ -f "$SEAT_CALLED" ]; }
 not_called() { [ ! -f "$SEAT_CALLED" ]; }
 
@@ -213,10 +220,24 @@ check "missing review router says so" source_is "ballot: fallback (seat-usage mi
 check "missing review router warns" [ "$BALLOT_ROUTE_WARNING" = "warning: review route unavailable (seat-usage missing); using Fable and Astra" ]
 
 use_router "$work/ask.json" 0
-apply review
-check "ask review uses Fable and Astra" [ "$VOTERS" = "claude,codex" ]
-check "ask review says so" source_is "ballot: fallback (seat-usage asked; fixed default)"
-check "ask review warns" [ "$BALLOT_ROUTE_WARNING" = "warning: review route unavailable (seat-usage asked); using Fable and Astra" ]
+# Review defers the stop to preflight: nobody seated, the ask kept for later.
+LINEUP_ASK_RAW=""
+apply review 2>"$work/ask-stop.err"
+check "ask review seats nobody before preflight" [ -z "$VOTERS" ]
+check "ask review keeps the ask for after preflight" [ -n "$LINEUP_ASK_RAW" ]
+check "ask review names the ask" source_is "ballot: ask (seat-usage asked)"
+rc=0
+( lineup_ask_after_preflight ) 2>"$work/ask-stop.err" >/dev/null || rc=$?
+check "ask review stops with exit 3 after preflight" [ "$rc" -eq 3 ]
+check "ask review says ask Ryan and seats no Fable or Astra" grep -qx "$ASK_STOP_LINE" "$work/ask-stop.err"
+check "ask review prints no fallback warning" bash -c '! grep -q "using Fable and Astra" "$1"' _ "$work/ask-stop.err"
+LINEUP_ASK_RAW=""
+rc="$(CONCLAVE_PREFLIGHT=0 apply_stops review)"
+check "ask review with preflight off stops at once" [ "$rc" -eq 3 ]
+check "ask review with preflight off says ask Ryan" grep -qx "$ASK_STOP_LINE" "$work/ask-stop.err"
+rc="$(apply_stops design)"
+check "ask design stops with exit 3" [ "$rc" -eq 3 ]
+check "ask design says ask Ryan" grep -qx "$ASK_STOP_LINE" "$work/ask-stop.err"
 
 use_router "$work/all.json" 0
 KIND=review
@@ -248,9 +269,9 @@ check "failed router says so" source_is "ballot: fallback (seat-usage failed; fi
 check "failed router was called" called
 
 use_router "$work/ask.json" 0
-apply audit
-check "ask mode uses the fixed pair" [ "$VOTERS" = "claude,codex" ]
-check "ask mode says so" source_is "ballot: fallback (seat-usage asked; fixed default)"
+rc="$(apply_stops audit)"
+check "ask on audit stops with exit 3" [ "$rc" -eq 3 ]
+check "ask on audit says ask Ryan" grep -qx "$ASK_STOP_LINE" "$work/ask-stop.err"
 
 python3 - "$work/cursor.json" <<'PY'
 import json, sys
@@ -351,10 +372,11 @@ check "design routing sku is cursor-fable" grep -qx 'sku: cursor-fable' "$DIR/pr
 
 rm -rf "$DIR/preview"
 use_router "$work/ask.json" 0
-capture "$ID" --dry-run --repo "$work/target"
-check "failed reading dry-run exits 0" [ "$dry_ec" -eq 0 ]
-check "failed reading dry-run prints claude,codex" grep -qx '  voters: claude,codex' <<<"$out"
-check "failed reading dry-run is the ask fallback" grep -qx '  ballot: fallback (seat-usage asked; fixed default)' <<<"$out"
+capture "$ID" --dry-run --repo "$work/target" 2>"$work/ask-dry.err"
+check "failed reading dry-run stops with exit 3" [ "$dry_ec" -eq 3 ]
+check "failed reading dry-run seats no voters" bash -c '! grep -q "voters:" <<<"$1"' _ "$out"
+check "failed reading dry-run is not the fixed default" bash -c '! grep -q "fixed default)" <<<"$1"' _ "$out"
+check "failed reading dry-run says ask Ryan" grep -qx "$ASK_STOP_LINE" "$work/ask-dry.err"
 
 python3 - "$work/approved.json" <<'PY'
 import json, sys
@@ -677,11 +699,13 @@ rc="$(ambiguous_route "anthropic xai" "$work/excluded-ask.json" 0 "")"
 check "ask after exclusion stops an ambiguous review" [ "$rc" -eq 3 ]
 check "ask after exclusion error says why" \
   grep -qx "conclave: refused: seat-usage seated no lineup outside the vendors ambiguous PR trailers named (anthropic, xai): need 2 review seat(s) outside Anthropic, xAI; 1 eligible: ask Ryan; stopping the review" "$work/ambiguous.err"
-route_pr 'doc = {
+rc=0
+( route_pr 'doc = {
   "author": {"is_bot": False, "login": "rymiwe", "name": "Ryan Weiss"},
   "commits": [{"messageHeadline": "One", "messageBody": "Co-Authored-By: Grok <noreply@x.ai>\n"}],
-}' "$work/ask.json" 2>/dev/null
-check "ask without ambiguous trailers keeps the fixed default" source_is "ballot: fallback (seat-usage asked; fixed default)"
+}' "$work/ask.json"; lineup_ask_after_preflight ) 2>"$work/ask-pr.err" >/dev/null || rc=$?
+check "ask without ambiguous trailers stops with exit 3" [ "$rc" -eq 3 ]
+check "ask without ambiguous trailers says ask Ryan" grep -qx "$ASK_STOP_LINE" "$work/ask-pr.err"
 # End to end: a review run on a PR whose trailers are ambiguous, where
 # seat-usage asks (null lineup), exits 3 before any voter brief is written.
 write_pr_json 'doc = {
@@ -884,7 +908,8 @@ REVIEW_PR_FACT_NUM=""
 REVIEW_PR_FACT_SKIP=""
 export PATH="$old_path"
 
-# Stubbed design run: seat-usage asks, claude exits 1, codex and argon vote,
+# Stubbed design run: seat-usage seats Fable on cursor, Astra, and Argon
+# (an ask now stops the run, so it cannot be the route here), claude exits 1, codex and argon vote,
 # and a local Jev stub writes judgment.md. Then --judge on that ballot, whose
 # voters.txt still names the missing voter.
 JEV_PID=""
@@ -892,7 +917,7 @@ GATE_DIR=""
 trap 'if [ -n "${JEV_PID:-}" ]; then kill "$JEV_PID" 2>/dev/null || true; fi; rm -rf "$work" ${DIR:+"$DIR"} ${GATE_DIR:+"$GATE_DIR"}' EXIT
 
 mkdir -p "$work/gate/bin" "$work/gate/home/.codex"
-printf '%s\n' '[{"role":"lineup","mode":"ask","reason":"stub asked","lineup":null}]' >"$work/gate/ask.json"
+printf '%s\n' '[{"role":"lineup","mode":"default","reason":"stub","lineup":{"voters":[{"family":"fable","seat":"cursor","effort":"high"},{"family":"astra","seat":"chatgpt","effort":"high"},{"family":"argon","seat":"google","effort":"high"}]}}]' >"$work/gate/ask.json"
 : >"$work/gate/seat.log"
 printf '%s\n' '{"models": [{"slug": "gpt-test-astra", "visibility": "list", "priority": 1}]}' \
   >"$work/gate/home/.codex/models_cache.json"
@@ -1080,7 +1105,7 @@ check "stubbed run exits 0" [ "$gate_ec" -eq 0 ]
 check "stubbed claude CLI was not launched" [ ! -f "$work/gate/claude.ran" ]
 check "stubbed fable leg called cursor-agent" [ -f "$work/gate/cursor.ran" ]
 check "cursor-agent argv names the fable id" grep -qx claude-fable-9-9-thinking-xhigh "$work/gate/cursor.argv"
-check "seat-usage ask was the route" grep -q -- '--route lineup' "$work/gate/seat.log"
+check "seat-usage lineup was the route" grep -q -- '--route lineup' "$work/gate/seat.log"
 check "stubbed run writes judgment.md" [ -s "$GATE_DIR/judgment.md" ]
 check "errors.md names the missing voter" grep -q 'named voter missing: claude' "$GATE_DIR/errors.md"
 check "judgment header names the missing voter" grep -qx 'missing_voters: claude' "$GATE_DIR/judgment.md"

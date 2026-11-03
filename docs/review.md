@@ -26,7 +26,7 @@ copies and `PROMPT.md` under `preview/` only.
 | Phase | Who | What |
 |---|---|---|
 | 0 | `scripts/conclave.sh <id> --dry-run` | Lineup, target, diff shape. Writes only `tmp/council/<id>/preview/`. Local listings only: no voter prompt, no Jev call. |
-| 1 | `scripts/conclave.sh <id>` | One worktree per voter, read-only baseline. The default ballot is the lineup. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, excluding a named author or a caller-passed builder or --builder-vendor and nobody when none of those is set, and falls back to Fable and Astra when that route is missing, fails, or asks.<!-- ballot-rule:end --> Fable is on the reviewer brief. The other seated legs run their own methods, in parallel; Grok is on `cursor-agent` unless `CONCLAVE_GROK_NATIVE=1`. Opus native is a coverage leg on review kind; its agreement with Fable is one vote. Then model check, baseline compare, `scripts/blind.sh`, stop. |
+| 1 | `scripts/conclave.sh <id>` | One worktree per voter, read-only baseline. The default ballot is the lineup. <!-- ballot-rule:start -->Review seats two voters from seat-usage --route lineup --kind review, on two vendor families, excluding a named author or a caller-passed builder or --builder-vendor and nobody when none of those is set, and falls back to Fable and Astra when that route is missing or fails, and stops with an ask for Ryan when it asks.<!-- ballot-rule:end --> Fable is on the reviewer brief. The other seated legs run their own methods, in parallel; Grok is on `cursor-agent` unless `CONCLAVE_GROK_NATIVE=1`. Opus native is a coverage leg on review kind; its agreement with Fable is one vote. Then model check, baseline compare, `scripts/blind.sh`, stop. |
 | 2 | Chair | Read only `blind/leg-*.md`. Write `findings.json`. Do not read `blind/key.txt` yet. |
 | 3 | `scripts/conclave.sh <id> --findings` | One Jev `choice` per finding, or no call when there are no findings. Writes `judgment.md` (fixed header, then the convergence table) and `decide.md` beside it. `convergence.md` is the same table without the header. |
 | 4 | Chair | Fill `decide.md`: replace every `TODO(chair)`. The what-breaks line says what breaks and for whom, with no code identifiers. Then draft comments. When the pull request has an automated risk rating, the summary states it. Above low, the summary names what drives it and suggests concrete changes that would bring it to low. Save a throwaway repro script as `repro/<finding-id>.<ext>` in the ballot directory. `scripts/check-comment-links.py` checks citations. `scripts/check-comment-labels.py` checks labels on a post payload, and fails the draft when a detected rating is missing from the summary. The script writes no comment prose and posts nothing. |
@@ -68,8 +68,10 @@ no model trailer passes `--author human` and no `--builder-vendor`.
 An explicit `--voters` list replaces the route. `fable` and `astra` in that list
 mean the claude and codex legs. Argon runs when the route or the list names it.
 A capped pool is not seated. A pool ahead of pace still votes.
-When seat-usage is missing, fails, or returns mode ask, review uses Fable and Astra
+When seat-usage is missing or fails, review uses Fable and Astra
 and writes a warning. Other kinds use that same pair. The lineup says so.
+When seat-usage returns mode ask (for example every Opus pool capped), the run
+stops with exit 3 and seats nobody, on review and design alike: ask Ryan.
 Grok runs on `cursor-agent`; `CONCLAVE_GROK_NATIVE=1` runs the native CLI, with no fallback between the two. Opus native is a coverage
 leg on review kind; its agreement with Fable is one vote. `--claude-model opus`
 (or the brief `claude:` header) turns the Fable seat into Opus native and
@@ -940,7 +942,7 @@ The script never renders HTML. The script never runs a browser.
 
 ### Ballot and launches
 
-The default ballot is the lineup. Every seated leg uses methodology `brief` and has live web access. A capped pool is not seated. A pool ahead of pace still votes. When seat-usage is missing, fails, or returns mode ask, the fixed default is Fable and Astra, and the lineup says so. `--voters` replaces that list. Opus joins only when `--voters` names it, and that seat is also `brief`. Fable and Opus agreement is one vote, the same rule as review. The lineup says `brief` on every row. Under the table it says: "Every leg is on the same brief; independence comes from separate models, not separate methods."
+The default ballot is the lineup. Every seated leg uses methodology `brief` and has live web access. A capped pool is not seated. A pool ahead of pace still votes. When seat-usage is missing or fails, the fixed default is Fable and Astra, and the lineup says so. When it returns mode ask, the run stops with exit 3 and seats nobody. `--voters` replaces that list. Opus joins only when `--voters` names it, and that seat is also `brief`. Fable and Opus agreement is one vote, the same rule as review. The lineup says `brief` on every row. Under the table it says: "Every leg is on the same brief; independence comes from separate models, not separate methods."
 
 Fable reads the assembled brief on stdin. The working directory is the leg worktree. Tools are limited to read and web: allow Read, Grep, Glob, WebFetch, and WebSearch. Disallow Task, Bash, Edit, Write, and NotebookEdit. The launch also sets the available tool list to that allow list, and uses a headless permission mode so the process does not wait for a prompt. Model proof reuses the review Fable check. A Fable key is required. Opus and Haiku keys are allowed, because WebFetch uses a small model internally.
 

@@ -751,8 +751,11 @@ def test_conclave(tmp: Path) -> None:
         # (9) CONCLAVE_PREFLIGHT=0: no list, no exit 3; the old failure path, still no voter.
         (c.dir / 'needs-human.md').unlink()
         got = c.run('--repo', str(c.repo), '--base', 'main', '--head', 'no-such-head', CONCLAVE_PREFLIGHT='0')
-        check(got.returncode not in (0, 3) and not c.needs() and '# Needs from human' not in got.stdout
+        # The seat route still asks, so the run stops on the ask (exit 3), not on a list.
+        check(got.returncode != 0 and not c.needs() and '# Needs from human' not in got.stdout
               and not c.launched(), f'conclave.sh: CONCLAVE_PREFLIGHT=0 skips preflight ({got.returncode})')
+        check(got.returncode == 3 and 'no fixed default seated (not Fable, not Astra): ask Ryan' in got.stderr,
+              f'conclave.sh: CONCLAVE_PREFLIGHT=0 with a seat ask stops without the fixed default ({got.stderr[-400:]!r})')
 
         git(c.repo, 'reset', '-q', '--hard', 'HEAD~1')  # drop the declared failing check
         # A dry run shows the stop a real launch would hit: same list, same exit 3, nothing launched or fired.
@@ -779,10 +782,15 @@ def test_conclave(tmp: Path) -> None:
               f'dry run: clear preflight exits 0 ({got.returncode} {got.stdout[-200:]!r})')
 
         # CONCLAVE_PREFLIGHT=0 keeps the dry run a plain preview.
-        c.seat.write_text(lineup_json(mode='ask'))
         got = c.run('--dry-run', '--repo', str(c.repo), '--base', 'main', '--head', 'main', CONCLAVE_PREFLIGHT='0')
         check(got.returncode == 0 and 'preflight:' not in got.stdout + got.stderr and 'Needs from human' not in got.stdout,
               f'dry run: CONCLAVE_PREFLIGHT=0 skips the preview check too ({got.returncode})')
+        # A seat ask still stops the preview: no fixed default, exit 3.
+        c.seat.write_text(lineup_json(mode='ask'))
+        got = c.run('--dry-run', '--repo', str(c.repo), '--base', 'main', '--head', 'main', CONCLAVE_PREFLIGHT='0')
+        check(got.returncode == 3 and 'no fixed default seated (not Fable, not Astra): ask Ryan' in got.stderr
+              and 'Needs from human' not in got.stdout and not c.launched(),
+              f'dry run: a seat ask with CONCLAVE_PREFLIGHT=0 stops without the fixed default ({got.returncode} {got.stderr[-300:]!r})')
     finally:
         c.close()
 

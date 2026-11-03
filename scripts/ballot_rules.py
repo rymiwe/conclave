@@ -14,7 +14,7 @@ _OPUS = "Opus"
 SENTENCE = (
     "Review seats two voters from seat-usage --route lineup --kind review, "
     "on two vendor families, excluding a named author or a caller-passed builder or --builder-vendor and nobody when none of those is set, and falls back to Fable and Astra "
-    "when that route is missing, fails, or asks."
+    "when that route is missing or fails, and stops with an ask for Ryan when it asks."
 )
 START = "<!-- ballot-rule:start -->"
 END = "<!-- ballot-rule:end -->"
