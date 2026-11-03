@@ -2013,6 +2013,13 @@ def test_approve_without_labeled_findings(root: Path) -> None:
     check(proc.returncode != 0 and 'the risk rating is high' in proc.stderr and f.posts() == 0,
           f'APPROVE with a high rating is refused ({proc.returncode} {proc.stderr.strip()})')
 
+    f = clean('approve-unrecognized')
+    write_named_voters(f, ['voter-a.json', 'voter-b.json'])
+    write_risk(f, 'spicy')
+    proc = f.post('--dry-run', '--human-verdict', 'APPROVE')
+    check(proc.returncode != 0 and 'the risk rating is spicy' in proc.stderr and f.posts() == 0,
+          f'APPROVE with an unrecognized rating is refused ({proc.returncode} {proc.stderr.strip()})')
+
     f = clean('approve-one-name')
     write_risk(f, 'low')
     blind = f.council / 'demo-1' / 'blind'

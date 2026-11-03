@@ -591,6 +591,9 @@ def strip_bullet_labels(text: str) -> str:
 _RISK_LEVEL = "critical|severe|high|medium|moderate|low|none"
 # A risk:* label. The suffix is the rating, not a later word glued on with a dash.
 _RISK_LABEL = re.compile(rf"(?i)^risk[:/\s]+({_RISK_LEVEL})(?![A-Za-z0-9_-])")
+# The same prefix. The suffix is kept when it is not a level, and lowercased
+# the way a detected level is.
+_RISK_OTHER = re.compile(r"(?i)^risk[:/\s]+([A-Za-z0-9_-]+)")
 # An explicit rating line: "Risk rating: low", "### Risk review: medium",
 # "risk: high". A later mention in prose or quotes is not this line.
 _RISK_LINE = re.compile(
@@ -829,6 +832,23 @@ def detect_risk_rating(context: object) -> str | None:
         return None
     found.sort()
     return found[-1][2]
+
+
+def unrecognized_risk_label(context: object) -> str | None:
+    """A risk-label suffix the detector does not treat as a level, lowercased.
+
+    The detector's match is unchanged. This only names a suffix it skips.
+    """
+    if not isinstance(context, dict):
+        return None
+    for name in _label_names(context.get("labels")):
+        stripped = name.strip()
+        if _RISK_LABEL.match(stripped):
+            continue
+        match = _RISK_OTHER.match(stripped)
+        if match:
+            return match.group(1).lower()
+    return None
 
 
 def summary_prose(summary: str) -> str:

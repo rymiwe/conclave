@@ -58,8 +58,9 @@ Steps, in order. Any failure stops before the POST.
    is never chosen here. With no labeled finding the payload event is
    kept, COMMENT by default. --human-verdict APPROVE is accepted on that
    path only when blind/key.txt names 2 or more distinct voters, the plan
-   has no finding, and the detected rating exists and is not high. Any
-   other --human-verdict is refused there. When the PR's author is the
+   has no finding, and the detected rating is exactly low or medium. Any
+   other rating is refused and the message names that value. Any other
+   --human-verdict is refused there. When the PR's author is the
    posting account (gh api user), GitHub rejects REQUEST_CHANGES and
    APPROVE, so the review posts as COMMENT, every label stays, and the
    first body line reads "Verdict: request changes (posted as a comment
@@ -938,10 +939,14 @@ def main() -> int:
             open_rows = open_findings(plan)
             if open_rows:
                 problems.append("an open finding remains (" + "; ".join(open_rows) + ")")
-            if risk_level is None:
-                problems.append("the risk rating is missing")
-            elif risk_level == "high":
-                problems.append("the risk rating is high")
+            if risk_level not in ("low", "medium"):
+                if risk_level is not None:
+                    rating_name = risk_level
+                elif context is None:
+                    rating_name = "missing"
+                else:
+                    rating_name = comment_draft.unrecognized_risk_label(context) or "unknown"
+                problems.append(f"the risk rating is {rating_name}")
             if names is not None:
                 problems.append(f"voters: {', '.join(names)}")
             if any(not item.startswith("voters:") for item in problems):
