@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -494,6 +495,10 @@ def test_stage_hook(tmp: Path) -> None:
           and str(payload.get('ts', '')).endswith('Z') and 'T' in payload.get('ts', ''),
           f'hook: payload has event, ts (UTC ISO), dir, and the event fields ({payload})')
     check(calls[0]['stdin'] == '' and not calls[0]['stdin_tty'], 'hook: stdin is /dev/null')
+    stamp = r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d'
+    prog = (dest / 'progress.md').read_text(encoding='utf-8').splitlines()
+    check(len(prog) == 1 and re.fullmatch(stamp + r' ballot_done ok', prog[0]) is not None,
+          f'hook: ballot_done ok appends one offset progress line ({prog!r})')
 
     # repros_done is reserved and accepted. Unknown names are logged and ignored.
     check('repros_done' in stage_hook.EVENTS, 'hook: repros_done is in the known events')
@@ -503,13 +508,21 @@ def test_stage_hook(tmp: Path) -> None:
     got = emit('repros_done', '{}')
     check(got.returncode == 0 and len(hook_calls(log)) == 2 and hook_calls(log)[1]['event'] == 'repros_done',
           'hook: repros_done is accepted and runs the hook')
+    progress_before = (dest / 'progress.md').read_text(encoding='utf-8')
     got = emit('not_an_event', '{}')
     check(got.returncode == 0 and len(hook_calls(log)) == 2 and 'not_an_event ignored: unknown event' in got.stderr
           and 'not_an_event ignored' in (dest / 'stage-hook.log').read_text(),
           'hook: an unknown event is logged and ignored, never raised')
+    check((dest / 'progress.md').read_text(encoding='utf-8') == progress_before,
+          'hook: an unknown event adds no progress line')
     saved = {k: os.environ.pop(k) for k in ('CONCLAVE_STAGE_HOOK', 'COUNCIL_STAGE_HOOK') if k in os.environ}
     try:
+        before_lines = (dest / 'progress.md').read_text(encoding='utf-8').splitlines()
         check(stage_hook.emit('ballot_done', {}, dest) is False, 'hook: unset hook runs nothing')
+        reached = (dest / 'progress.md').read_text(encoding='utf-8').splitlines()
+        check(reached[:-1] == before_lines
+              and re.fullmatch(stamp + r' ballot_done reached', reached[-1]) is not None,
+              f'hook: unset hook still appends ballot_done reached ({reached[-1:]!r})')
         os.environ['COUNCIL_STAGE_HOOK'] = env['CONCLAVE_STAGE_HOOK']
         os.environ['HOOK_LOG'] = str(log)
         check(stage_hook.emit('holistic_done', {'outcome': 'ok'}, dest) is True
@@ -547,6 +560,21 @@ def test_stage_hook(tmp: Path) -> None:
         text = (out / 'stage-hook.log').read_text() if (out / 'stage-hook.log').is_file() else ''
         check(got.returncode == preflight.BLOCKED and 'preflight_failed failed' in text,
               f'hook: a failing hook ({label}) leaves preflight exit 3 and writes stage-hook.log ({got.returncode} {text!r})')
+
+    got = emit('ballot_done', json.dumps({'outcome': 'not started'}))
+    spaced = (dest / 'progress.md').read_text(encoding='utf-8').splitlines()
+    check(got.returncode == 0 and re.fullmatch(stamp + r' ballot_done not-started', spaced[-1]) is not None,
+          f'hook: outcome not started is written not-started ({spaced[-1:]!r} {got.stderr!r})')
+    got = subprocess.run([sys.executable, str(SCRIPTS / 'stage_hook.py'), 'progress', 'run', 'started',
+                          '--dir', str(dest)], text=True, capture_output=True, timeout=30)
+    started = (dest / 'progress.md').read_text(encoding='utf-8').splitlines()
+    check(got.returncode == 0 and re.fullmatch(stamp + r' run started', started[-1]) is not None,
+          f'hook: progress run started appends run started ({got.returncode} {started[-1:]!r} {got.stderr!r})')
+    before_bytes = (dest / 'progress.md').read_bytes()
+    got = subprocess.run([sys.executable, str(SCRIPTS / 'stage_hook.py'), 'progress', 'ballot_done', 'ok',
+                          '--dir', str(dest)], text=True, capture_output=True, timeout=30)
+    check(got.returncode == 2 and (dest / 'progress.md').read_bytes() == before_bytes,
+          f'hook: progress ballot_done ok exits 2 and appends nothing ({got.returncode} {got.stderr!r})')
 
 
 def test_seats_and_targets(tmp: Path) -> None:
@@ -762,7 +790,11 @@ def test_conclave(tmp: Path) -> None:
         real = c.run('--repo', str(c.repo), '--base', 'main', '--head', 'main')
         c.hook_log.unlink(missing_ok=True)
         (c.dir / 'needs-human.md').unlink(missing_ok=True)
+        progress_path = c.dir / 'progress.md'
+        progress_before = progress_path.read_bytes() if progress_path.is_file() else None
         got = c.run('--dry-run', '--repo', str(c.repo), '--base', 'main', '--head', 'main')
+        progress_after = progress_path.read_bytes() if progress_path.is_file() else None
+        check(progress_before == progress_after, 'dry run: progress.md is unchanged')
         preview = c.dir / 'preview/needs-human.md'
         check(real.returncode == 3 and got.returncode == 3,
               f'dry run: a capped route exits 3 in a dry run as in a real launch ({real.returncode} {got.returncode})')
