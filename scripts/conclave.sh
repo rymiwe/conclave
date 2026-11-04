@@ -428,8 +428,11 @@ Options:
                          With --dry-run, prints a note and the dry run stays in
                          the foreground; nothing starts. Ballots only: not with
                          --ask, --findings, --verdicts, or --judge. The detached
-                         run gets no exported TYPESAFE_API_KEY or JEV_API_KEY;
-                         the judge reads its key through op (CONCLAVE_JEV_OP_REF).
+                         run gets no exported TYPESAFE_API_KEY or JEV_API_KEY.
+                         When either key is set, --detach reads it back through
+                         CONCLAVE_JEV_OP_REF and refuses if that reference is
+                         unset or the read fails. Run without --detach then.
+                         The key is not written to a file.
   --max                  Allow max/xhigh where the table permits (design+high)
   --voters LIST          Default ballot is seat-usage --route lineup.
                          Families map to claude, codex, grok, and muse.

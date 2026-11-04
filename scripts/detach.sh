@@ -16,6 +16,24 @@ detach_refuse_mode() {
   fi
 }
 
+detach_refuse_lost_judge_key() {
+  # The child never sees the env key. Refuse when op cannot replace it.
+  if [ -z "${TYPESAFE_API_KEY:-}" ] && [ -z "${JEV_API_KEY:-}" ]; then
+    return 0
+  fi
+  local ref key
+  ref="$(conclave_env JEV_OP_REF)"
+  if [ -z "$ref" ]; then
+    die "conclave: --detach would drop the judge key from the tmux server, and CONCLAVE_JEV_OP_REF is unset, so the detached run cannot read it. Run without --detach."
+  fi
+  key="$(load_jev_api_key || true)"
+  if [ -z "$key" ]; then
+    unset key
+    die "conclave: --detach would drop the judge key from the tmux server, and reading CONCLAVE_JEV_OP_REF failed, so the detached run cannot read it. Run without --detach."
+  fi
+  unset key
+}
+
 detach_session_name() {
   # tmux rejects '.' and ':', so an id that contains either is encoded.
   # '_' is doubled first so encoded ids stay distinct (a.b.c and a_db.c).
@@ -93,6 +111,7 @@ detach_main() {
     printf 'detach: --dry-run stays in the foreground; a real launch starts tmux session %s\n' "$session" >&2
     return 0
   fi
+  detach_refuse_lost_judge_key
   log="$DIR/run.log"
   progress="$DIR/progress.md"
   log_at="$(detach_size "$log")"
