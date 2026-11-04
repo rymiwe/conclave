@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -eu
+unset TYPESAFE_API_KEY JEV_API_KEY CONCLAVE_JEV_OP_REF
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 CONCLAVE="$ROOT/scripts/conclave.sh"
