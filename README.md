@@ -166,12 +166,15 @@ Set `CONCLAVE_ROOT` to this clone. Start in the target repo, or pass `--repo DIR
 mkdir -p "$CONCLAVE_ROOT/tmp/council/smoke"
 # write $CONCLAVE_ROOT/tmp/council/smoke/brief.md with a kind header
 "$CONCLAVE_ROOT/scripts/conclave.sh" smoke --dry-run
+"$CONCLAVE_ROOT/scripts/conclave.sh" --detach smoke
 "$CONCLAVE_ROOT/scripts/conclave.sh" smoke
 ```
 
 Before every invocation, including `--dry-run`, `scripts/conclave.sh` fetches this clone and compares HEAD to its upstream (`scripts/freshness-check.sh`). Up to date: it prints the short sha and date. Behind, by default: it warns with the count and pulls nothing. With `CONCLAVE_AUTO_UPDATE=1`, behind with a clean tree (untracked files under `tmp/` don't count unless the pull would overwrite one): it runs `git pull --ff-only` and prints `old..new`; behind with a dirty tree, or diverged: it stops, nonzero, and pulls nothing. Fetch fails: it warns and continues, or stops when `CONCLAVE_REQUIRE_FRESH=1`. `CONCLAVE_SKIP_UPDATE_CHECK=1` bypasses the check. Test: `scripts/test-freshness.sh`.
 
 `--dry-run` writes `preview/` and leaves the ballot untouched. Copy `tmp/council/examples/design-high-brief.md` for a first design run and pass `--difficulty low`. If `judgment.md` is missing after design or mixed, re-auth and run `--judge`. After review, run `--findings` once `findings.json` exists. Neither command launches voters. Review target flags are in `docs/review.md`. The full scratch layout is `tmp/council/README.md`.
+
+`scripts/conclave.sh --detach <id>` starts that ballot on a private tmux server and returns once the session is alive and a new line is in `tmp/council/<id>/progress.md`. It prints the session, the ballot directory, and `tmux -L <session> attach -t <session>`. The run's output is appended to `run.log`. Exit 1 is a refusal or a session that ended, with the last lines this launch wrote. Exit 3 leaves the session running when it wrote no progress line within `CONCLAVE_DETACH_WAIT` seconds (default 60). It needs `tmux`. `conclave.sh` never falls back to `nohup` or `setsid`. A dry run stays in the foreground. The detached run gets no exported Jev key. Test: `scripts/test-detach.sh`.
 
 ```mermaid
 flowchart LR
