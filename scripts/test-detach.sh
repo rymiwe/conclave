@@ -63,7 +63,7 @@ cleanup() {
       TMUX_TMPDIR="$work/tmuxdir" "$real_tmux" -L "$session" kill-server >/dev/null 2>&1 || true
     done <"$work/real-sessions"
   fi
-  rm -rf "$work" "$DIR" "$DOT_DIR" "${REAL_DIR:-}"
+  rm -rf "$work" "$DIR" "$DOT_DIR" "${REAL_DIR:-}" "${JUDGE_DIR:-}" "${JUDGE_REAL_DIR:-}"
 }
 trap cleanup EXIT
 
@@ -208,6 +208,42 @@ case "${FAKE_MODE:-progress}" in
 esac
 EOF
 
+cat >"$work/bin/judge-probe" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+dir="$FAKE_ROOT/tmp/council/$1"
+mkdir -p "$dir" "$FAKE_LOG"
+export CONCLAVE_SOURCE_ONLY=1
+# shellcheck disable=SC1091
+. "$FAKE_ROOT/scripts/conclave.sh"
+key="$(load_jev_api_key || true)"
+if [ -n "$key" ]; then
+  printf '%s' "$key" | sha256sum | awk '{print $1}' >"$FAKE_LOG/judge.sha"
+  printf '%s\n' yes >"$FAKE_LOG/judge.present"
+else
+  printf '%s\n' missing >"$FAKE_LOG/judge.sha"
+  printf '%s\n' no >"$FAKE_LOG/judge.present"
+fi
+unset key
+env >"$FAKE_LOG/judge.env"
+python3 "$FAKE_ROOT/scripts/stage_hook.py" progress run started --dir "$dir"
+exec sleep 30
+EOF
+
+cat >"$work/bin/op-ok" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "read" ] && [ -n "${2:-}" ]; then
+  printf '%s' 'sentinel-jev-detach'
+  exit 0
+fi
+exit 1
+EOF
+
+cat >"$work/bin/op-fail" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+
 cat >"$work/bin/cursor-agent" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = models ]; then
@@ -237,7 +273,8 @@ cat >"$work/bin/claude" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-chmod +x "$work/bin/tmux" "$work/bin/fake-conclave" "$work/bin/cursor-agent" \
+chmod +x "$work/bin/tmux" "$work/bin/fake-conclave" "$work/bin/judge-probe" \
+  "$work/bin/op-ok" "$work/bin/op-fail" "$work/bin/cursor-agent" \
   "$work/bin/grok" "$work/bin/codex" "$work/bin/seat-usage" "$work/bin/claude"
 
 passed=0
@@ -268,57 +305,45 @@ launch() {
   if [ -n "${TMUX_TMPDIR:-}" ]; then
     extra+=(TMUX_TMPDIR="$TMUX_TMPDIR")
   fi
+  if [ -n "${JUDGE_REF+x}" ]; then
+    extra+=(CONCLAVE_JEV_OP_REF="$JUDGE_REF")
+  fi
+  if [ -n "${JUDGE_OP+x}" ]; then
+    extra+=(CONCLAVE_JEV_OP="$JUDGE_OP")
+  fi
+  if [ -n "${JUDGE_TYPESAFE+x}" ]; then
+    extra+=(TYPESAFE_API_KEY="$JUDGE_TYPESAFE")
+  fi
+  if [ -n "${JUDGE_JEV+x}" ]; then
+    extra+=(JEV_API_KEY="$JUDGE_JEV")
+  fi
+  if [ -n "${DETACH_CHILD+x}" ]; then
+    extra+=(STUB_CHILD="$DETACH_CHILD")
+  fi
   set +e
   (
     cd "$work/start" || exit 1
-    if [ "${#extra[@]}" -gt 0 ]; then
-      env \
-        CONCLAVE_SKIP_UPDATE_CHECK=1 \
-        CONCLAVE_GITHUB_HTTPS=0 \
-        CONCLAVE_ARGON=0 \
-        CONCLAVE_JEV_OP=/bin/false \
-        CONCLAVE_MUSE_CATALOG="$work/muse-catalog.json" \
-        CONCLAVE_CODEX_BIN="$work/bin/codex" \
-        CONCLAVE_CURSOR_AGENT="$work/bin/cursor-agent" \
-        CONCLAVE_SEAT_USAGE="$work/bin/seat-usage" \
-        CONCLAVE_DETACH_WAIT="${CONCLAVE_DETACH_WAIT:-5}" \
-        HOME="$work/home" \
-        PATH="${LAUNCH_PATH:-$work/bin:$PATH}" \
-        SEAT_USAGE_RUNS="$work/runs.jsonl" \
-        TYPESAFE_API_KEY=sentinel-typesafe \
-        JEV_API_KEY=sentinel-jev \
-        STUB_LOG="$work/stub" \
-        STUB_CHILD="$work/bin/fake-conclave" \
-        STUB_REAL_CONCLAVE="$CONCLAVE" \
-        FAKE_LOG="$work/log" \
-        FAKE_ROOT="$ROOT" \
-        FAKE_MODE="${FAKE_MODE:-progress}" \
-        "${extra[@]}" \
-        bash "$CONCLAVE" "$@"
-    else
-      env \
-        CONCLAVE_SKIP_UPDATE_CHECK=1 \
-        CONCLAVE_GITHUB_HTTPS=0 \
-        CONCLAVE_ARGON=0 \
-        CONCLAVE_JEV_OP=/bin/false \
-        CONCLAVE_MUSE_CATALOG="$work/muse-catalog.json" \
-        CONCLAVE_CODEX_BIN="$work/bin/codex" \
-        CONCLAVE_CURSOR_AGENT="$work/bin/cursor-agent" \
-        CONCLAVE_SEAT_USAGE="$work/bin/seat-usage" \
-        CONCLAVE_DETACH_WAIT="${CONCLAVE_DETACH_WAIT:-5}" \
-        HOME="$work/home" \
-        PATH="${LAUNCH_PATH:-$work/bin:$PATH}" \
-        SEAT_USAGE_RUNS="$work/runs.jsonl" \
-        TYPESAFE_API_KEY=sentinel-typesafe \
-        JEV_API_KEY=sentinel-jev \
-        STUB_LOG="$work/stub" \
-        STUB_CHILD="$work/bin/fake-conclave" \
-        STUB_REAL_CONCLAVE="$CONCLAVE" \
-        FAKE_LOG="$work/log" \
-        FAKE_ROOT="$ROOT" \
-        FAKE_MODE="${FAKE_MODE:-progress}" \
-        bash "$CONCLAVE" "$@"
-    fi
+    env \
+      CONCLAVE_SKIP_UPDATE_CHECK=1 \
+      CONCLAVE_GITHUB_HTTPS=0 \
+      CONCLAVE_ARGON=0 \
+      CONCLAVE_JEV_OP=/bin/false \
+      CONCLAVE_MUSE_CATALOG="$work/muse-catalog.json" \
+      CONCLAVE_CODEX_BIN="$work/bin/codex" \
+      CONCLAVE_CURSOR_AGENT="$work/bin/cursor-agent" \
+      CONCLAVE_SEAT_USAGE="$work/bin/seat-usage" \
+      CONCLAVE_DETACH_WAIT="${CONCLAVE_DETACH_WAIT:-5}" \
+      HOME="$work/home" \
+      PATH="${LAUNCH_PATH:-$work/bin:$PATH}" \
+      SEAT_USAGE_RUNS="$work/runs.jsonl" \
+      STUB_LOG="$work/stub" \
+      STUB_CHILD="$work/bin/fake-conclave" \
+      STUB_REAL_CONCLAVE="$CONCLAVE" \
+      FAKE_LOG="$work/log" \
+      FAKE_ROOT="$ROOT" \
+      FAKE_MODE="${FAKE_MODE:-progress}" \
+      "${extra[@]}" \
+      bash "$CONCLAVE" "$@"
   ) >"$work/out" 2>"$work/err"
   rc=$?
   set -e
@@ -499,6 +524,70 @@ check "dotted id does not pass a dotted -s" calls_lack "-s dot."
 check "dotted id does not pass a dotted -L" calls_lack "-L dot."
 kill_stub_sessions
 
+file_lacks() {
+  if [ ! -f "$1" ]; then
+    return 0
+  fi
+  ! grep -F -q -- "$2" "$1"
+}
+
+judge_sentinel='sentinel-jev-detach'
+judge_sha="$(printf '%s' "$judge_sentinel" | sha256sum | awk '{print $1}')"
+JUDGE_ID="judge-$$"
+JUDGE_DIR="$ROOT/tmp/council/$JUDGE_ID"
+mkdir -p "$JUDGE_DIR"
+printf 'kind: design\n\n# Brief\n' >"$JUDGE_DIR/brief.md"
+
+before_ns="$(new_session_count)"
+JUDGE_TYPESAFE='sentinel-env-only' JUDGE_JEV='sentinel-env-only' \
+  launch --detach "$JUDGE_ID" --dry-run
+check "dry-run with an env key still stays in the foreground" err_has "stays in the foreground"
+check "dry-run with an env key does not mention the op ref" err_lacks "CONCLAVE_JEV_OP_REF"
+check "dry-run with an env key does not start a session" test "$(new_session_count)" = "$before_ns"
+unset JUDGE_TYPESAFE JUDGE_JEV
+
+before_ns="$(new_session_count)"
+JUDGE_TYPESAFE='sentinel-env-only' JUDGE_JEV='sentinel-env-only' \
+  launch --detach "$JUDGE_ID"
+check "env key without an op ref is refused" test "$rc" -ne 0
+check "env key without an op ref names CONCLAVE_JEV_OP_REF" err_has "CONCLAVE_JEV_OP_REF is unset"
+check "env key without an op ref says to run without --detach" err_has "Run without --detach"
+check "env key without an op ref does not print the key" err_lacks "sentinel-env-only"
+check "env key without an op ref does not start a session" test "$(new_session_count)" = "$before_ns"
+unset JUDGE_TYPESAFE JUDGE_JEV
+kill_stub_sessions
+
+before_ns="$(new_session_count)"
+JUDGE_REF='op://conclave/test/judge' JUDGE_OP="$work/bin/op-fail" \
+  JUDGE_TYPESAFE='sentinel-env-only' JUDGE_JEV='sentinel-env-only' \
+  launch --detach "$JUDGE_ID"
+check "env key with a failing op is refused" test "$rc" -ne 0
+check "env key with a failing op names CONCLAVE_JEV_OP_REF" err_has "reading CONCLAVE_JEV_OP_REF failed"
+check "env key with a failing op says to run without --detach" err_has "Run without --detach"
+check "env key with a failing op does not print the key" err_lacks "sentinel-env-only"
+check "env key with a failing op does not start a session" test "$(new_session_count)" = "$before_ns"
+unset JUDGE_REF JUDGE_OP JUDGE_TYPESAFE JUDGE_JEV
+kill_stub_sessions
+
+rm -f "$work/log/judge.sha" "$work/log/judge.present" "$work/log/judge.env" "$JUDGE_DIR/run.log"
+DETACH_CHILD="$work/bin/judge-probe" \
+  JUDGE_REF='op://conclave/test/judge' JUDGE_OP="$work/bin/op-ok" \
+  JUDGE_TYPESAFE='sentinel-env-only' JUDGE_JEV='sentinel-env-only' \
+  launch --detach "$JUDGE_ID"
+check "op sentinel reaches the judge path" test "$rc" -eq 0
+check "judge path records a hash" test "$(cat "$work/log/judge.sha")" = "$judge_sha"
+check "judge path records that a key was present" test "$(cat "$work/log/judge.present")" = "yes"
+check "judge hash is not the sentinel" test "$(cat "$work/log/judge.sha")" != "$judge_sentinel"
+check "run.log exists" test -f "$JUDGE_DIR/run.log"
+check "run.log does not contain the op sentinel" file_lacks "$JUDGE_DIR/run.log" "$judge_sentinel"
+check "launcher stdout has no op sentinel" file_lacks "$work/out" "$judge_sentinel"
+check "launcher stderr has no op sentinel" file_lacks "$work/err" "$judge_sentinel"
+check "judge env exists" test -f "$work/log/judge.env"
+check "judge env does not contain the op sentinel" file_lacks "$work/log/judge.env" "$judge_sentinel"
+check "judge env has no judge key names" bash -c 'test -f "$1" && ! grep -E -q "^(TYPESAFE_API_KEY|JEV_API_KEY)=" "$1"' bash "$work/log/judge.env"
+unset DETACH_CHILD JUDGE_REF JUDGE_OP JUDGE_TYPESAFE JUDGE_JEV
+kill_stub_sessions
+
 if [ -n "$real_tmux" ]; then
   REAL_ID="real-detach-$$"
   REAL_SESSION="conclave-$REAL_ID"
@@ -529,6 +618,29 @@ if [ -n "$real_tmux" ]; then
   check "real tmux (c) says no progress line" err_has "wrote no progress line"
   check "real tmux (c) session stays up" session_alive "$REAL_SESSION"
   TMUX_TMPDIR="$work/tmuxdir" "$real_tmux" -L "$REAL_SESSION" kill-server >/dev/null 2>&1 || true
+
+  JUDGE_REAL_ID="judge-real-$$"
+  JUDGE_REAL_SESSION="conclave-$JUDGE_REAL_ID"
+  JUDGE_REAL_DIR="$ROOT/tmp/council/$JUDGE_REAL_ID"
+  mkdir -p "$JUDGE_REAL_DIR"
+  printf 'kind: design\n\n# Brief\n' >"$JUDGE_REAL_DIR/brief.md"
+  printf '%s\n' "$JUDGE_REAL_SESSION" >>"$work/real-sessions"
+  rm -f "$work/log/judge.sha" "$work/log/judge.present" "$work/log/judge.env" "$JUDGE_REAL_DIR/run.log"
+  DETACH_CHILD="$work/bin/judge-probe" \
+    JUDGE_REF='op://conclave/test/judge' JUDGE_OP="$work/bin/op-ok" \
+    JUDGE_TYPESAFE='sentinel-env-only' JUDGE_JEV='sentinel-env-only' \
+    launch --detach "$JUDGE_REAL_ID"
+  check "real tmux op sentinel reaches the judge path" test "$rc" -eq 0
+  check "real tmux judge path records a hash" test "$(cat "$work/log/judge.sha")" = "$judge_sha"
+  check "real tmux run.log exists" test -f "$JUDGE_REAL_DIR/run.log"
+  check "real tmux run.log does not contain the op sentinel" file_lacks "$JUDGE_REAL_DIR/run.log" "$judge_sentinel"
+  check "real tmux launcher stdout has no op sentinel" file_lacks "$work/out" "$judge_sentinel"
+  check "real tmux launcher stderr has no op sentinel" file_lacks "$work/err" "$judge_sentinel"
+  judge_env="$(TMUX_TMPDIR="$work/tmuxdir" "$real_tmux" -L "$JUDGE_REAL_SESSION" show-environment -g || true)"
+  check "real tmux server env has no op sentinel" bash -c '! printf "%s\n" "$1" | grep -F -q -- "$2"' bash "$judge_env" "$judge_sentinel"
+  check "real tmux server env has no judge keys" bash -c '! printf "%s\n" "$1" | grep -E -q "^(TYPESAFE_API_KEY|JEV_API_KEY)="' bash "$judge_env"
+  TMUX_TMPDIR="$work/tmuxdir" "$real_tmux" -L "$JUDGE_REAL_SESSION" kill-server >/dev/null 2>&1 || true
+  unset DETACH_CHILD JUDGE_REF JUDGE_OP JUDGE_TYPESAFE JUDGE_JEV
   unset STUB_REAL_TMUX TMUX_TMPDIR
 else
   printf 'skip real tmux\n'
