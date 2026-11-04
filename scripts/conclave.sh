@@ -3284,8 +3284,6 @@ run_jev_judge() {
 }
 
 stage_hook_emit() {
-  # $1 event, $2 payload JSON object. Appends the progress line and runs the
-  # hook when one is set. A failing hook never fails the run. See docs/preflight.md.
   python3 "$ROOT/scripts/stage_hook.py" emit "$1" --dir "$DIR" --json "$2" || true
 }
 
@@ -3446,7 +3444,6 @@ council_record_outcome() {
       status="failed"
     fi
   fi
-  # before leaves status empty, so the run line is "started".
   [ -z "${DIR:-}" ] || python3 "$ROOT/scripts/stage_hook.py" progress run "${status:-started}" --dir "$DIR" || true
   local started muse_decision="" final_decision=""
   local -a muse_args=()
@@ -3895,8 +3892,6 @@ if [ "$VERDICTS_MODE" -eq 1 ] && [ "$JUDGE_MODE" -eq 1 ]; then
   die "--verdicts cannot be combined with --judge"
 fi
 
-# The brief and DIR are already checked. Hand off before the key capture,
-# routing, worktrees, packet temp, and council_begin_run.
 [ "$DETACH" -eq 0 ] || detach_main
 
 # Capture before any voter and before --findings / --judge. Voters never see the key.

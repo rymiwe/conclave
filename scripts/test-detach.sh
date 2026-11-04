@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# --detach starts a private tmux session and returns once a new progress line exists.
-# No model and no network: tmux is a stub, and the child is a fake conclave.sh.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
@@ -83,7 +81,6 @@ printf '%s\n' '{"models":[{"modelId":"muse-wonder-full-1.0","releaseDate":"2026-
 
 cat >"$work/bin/tmux" <<'EOF'
 #!/usr/bin/env bash
-# Records each invocation. new-session runs the rewritten argv in the background.
 set -eu
 mkdir -p "$STUB_LOG"
 printf '%q ' "$@" >>"$STUB_LOG/calls"
@@ -371,7 +368,6 @@ kill_stub_sessions() {
   sleep 0.2
 }
 
-# Session names: plain ids keep conclave-<id>; '.' and ':' are encoded.
 (
   die() { printf '%s\n' "$*" >&2; exit 1; }
   # shellcheck disable=SC1091
@@ -382,10 +378,12 @@ kill_stub_sessions() {
   [ "$(detach_session_name 'a:b')" = 'conclave+a_cb' ]
   [ "$(detach_session_name 'a.b_c')" = 'conclave+a_db__c' ]
   [ "$(detach_session_name 'a.b')" != "$(detach_session_name 'a_b')" ]
+  [ "$(detach_session_name 'a.b.c')" = 'conclave+a_db_dc' ]
+  [ "$(detach_session_name 'a_db.c')" = 'conclave+a__db_dc' ]
+  [ "$(detach_session_name 'a.b.c')" != "$(detach_session_name 'a_db.c')" ]
 )
 check "session names encode dot and colon" true
 
-# Refused modes and scrubbed key names stay in step with conclave.sh.
 mode_names="$(grep -oE '[A-Z][A-Z0-9_]*_MODE=1' "$CONCLAVE" | sed 's/=1$//' | sort -u)"
 modes_ok=0
 for mode_name in $mode_names; do
@@ -407,12 +405,16 @@ launch --detach --dry-run
 check "--detach without an id is refused" test "$rc" -eq 1
 check "--detach without an id names the form" err_has "takes a ballot id"
 
-for mode_args in "--ask hi" "--findings" "--verdicts" "--judge"; do
-  # shellcheck disable=SC2086
-  launch --detach "$ID" $mode_args
-  check "detach refuses $mode_args" test "$rc" -eq 1
-  check "detach refusal lists foreground modes ($mode_args)" err_has "stay in the foreground"
-done
+refuse_detach() {
+  launch --detach "$ID" "$@"
+  local shown="$*"
+  check "detach refuses $shown" test "$rc" -eq 1
+  check "detach refusal lists foreground modes ($shown)" err_has "stay in the foreground"
+}
+refuse_detach --ask hi
+refuse_detach --findings
+refuse_detach --verdicts
+refuse_detach --judge
 check "mode refusals do not start a session" test "$(new_session_count)" -eq 0
 
 CONCLAVE_DETACH_WAIT=1.5 launch --detach "$ID"
@@ -438,7 +440,6 @@ check "dry-run writes no progress.md" test ! -e "$DIR/progress.md"
 check "dry-run writes no run.log" test ! -e "$DIR/run.log"
 check "dry-run continues" out_has "Dry-run preview:" 
 
-# (a) alive and a new progress line.
 FAKE_MODE=progress launch --detach "$ID"
 want="$(printf 'session: %s\ndir: %s\nattach: tmux -L %s attach -t %s\n' "$SESSION" "$DIR" "$SESSION" "$SESSION")"
 check "(a) exits 0" test "$rc" -eq 0
@@ -460,7 +461,6 @@ check "(a) new-session names the private server and the real script" \
   grep -F -q -- "-L $SESSION -f /dev/null new-session -d -s $SESSION -c $(cd "$work/start" && pwd -P) --" "$work/stub/calls"
 check "(a) new-session passes the real conclave.sh" grep -F -q -- "$CONCLAVE" "$work/stub/calls"
 
-# A second launch must not start another session.
 before_ns="$(new_session_count)"
 FAKE_MODE=progress launch --detach "$ID"
 check "second launch is refused" test "$rc" -eq 1
@@ -471,7 +471,6 @@ check "first session is still alive" session_alive "$SESSION"
 
 kill_stub_sessions
 
-# (b) the child dies inside the wait. The tail is only this launch.
 printf 'OLD-LAUNCH-LINE\n' >"$DIR/run.log"
 FAKE_MODE=die launch --detach "$ID"
 check "(b) exits 1" test "$rc" -eq 1
@@ -480,7 +479,6 @@ check "(b) stderr omits the seeded log line" err_lacks "OLD-LAUNCH-LINE"
 check "(b) stderr says the session ended" err_has "ended"
 check "(b) session is gone" not_alive "$SESSION"
 
-# (c) alive, but no new progress line. The old line does not count.
 printf '2020-01-01T00:00:00+00:00 run started\n' >"$DIR/progress.md"
 FAKE_MODE=silent CONCLAVE_DETACH_WAIT=1 launch --detach "$ID"
 check "(c) exits 3" test "$rc" -eq 3
@@ -491,7 +489,6 @@ check "(c) session is still alive" session_alive "$SESSION"
 check "(c) old progress line was not extended" test "$(cat "$DIR/progress.md")" = "2020-01-01T00:00:00+00:00 run started"
 kill_stub_sessions
 
-# A dotted id is encoded before it reaches tmux, and the child still sees the id.
 FAKE_MODE=progress launch --detach "$DOT_ID"
 dot_want="$(printf 'session: %s\ndir: %s\nattach: tmux -L %s attach -t %s\n' "$DOT_SESSION" "$DOT_DIR" "$DOT_SESSION" "$DOT_SESSION")"
 check "dotted id exits 0" test "$rc" -eq 0

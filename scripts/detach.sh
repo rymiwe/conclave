@@ -1,10 +1,5 @@
-# Sourced by conclave.sh. Not executable.
-# --detach runs this ballot on its own tmux server and returns once that
-# session is alive and a new progress line exists. Never nohup or setsid.
-# README.md "Running it"; docs/preflight.md "Progress".
-
-# Pane process. Its stdin stays the pty. Do not exec the payload with stdin
-# /dev/null: on tmux 3.5a that closes the pane. Paths stay in the arguments.
+# Its stdin stays the pty. Do not exec the payload with stdin
+# /dev/null: on tmux 3.5a that closes the pane.
 DETACH_BOOT=$(cat <<'EOF'
 log=$1; shift
 printf 'conclave: output goes to %s (tail -f it). Ctrl-C here stops the run.\n' "$log"
@@ -15,7 +10,6 @@ EOF
 )
 
 detach_refuse_mode() {
-  # Ballot modes only. Ask, findings, verdicts, and judge stay in the foreground.
   if [ "${ASK_MODE:-0}" -eq 1 ] || [ "${FINDINGS_MODE:-0}" -eq 1 ] \
     || [ "${VERDICTS_MODE:-0}" -eq 1 ] || [ "${JUDGE_MODE:-0}" -eq 1 ]; then
     die "conclave: --detach runs a ballot; --ask, --findings, --verdicts, and --judge stay in the foreground"
@@ -23,9 +17,8 @@ detach_refuse_mode() {
 }
 
 detach_session_name() {
-  # $1 id. Session and socket share this name. tmux rejects '.' and ':', so an
-  # id that contains either is encoded. '_' is encoded first, so a.b and a_b
-  # cannot land on the same name. rel.note is conclave+rel_dnote.
+  # tmux rejects '.' and ':', so an id that contains either is encoded.
+  # '_' is doubled first so encoded ids stay distinct (a.b.c and a_db.c).
   local id="$1"
   case "$id" in
     *.*|*:*)
@@ -41,12 +34,10 @@ detach_session_name() {
 }
 
 detach_alive() {
-  # $1 session. 0 when that private server has exactly this session.
   tmux -L "$1" has-session -t "=$1" 2>/dev/null
 }
 
 detach_size() {
-  # $1 file. Byte size, or 0 when missing. $(( )) trims wc's padding.
   if [ -f "$1" ]; then
     echo $(( $(wc -c <"$1") ))
   else
@@ -55,7 +46,6 @@ detach_size() {
 }
 
 detach_line_after() {
-  # $1 file, $2 byte offset. The first line past the offset, or nothing.
   local file="$1" off="$2" size
   size="$(detach_size "$file")"
   if [ "$size" -lt "$off" ]; then
@@ -68,7 +58,6 @@ detach_line_after() {
 }
 
 detach_tail() {
-  # $1 file, $2 byte offset. The last 20 lines this launch added, or a note.
   local file="$1" off="$2" lines size
   size="$(detach_size "$file")"
   if [ "$size" -lt "$off" ]; then
@@ -87,8 +76,6 @@ detach_tail() {
 }
 
 detach_main() {
-  # Uses ID, DIR, DRY_RUN, INVOKE_CWD, ROOT, BASH, DETACH_ARGS.
-  # Returns only on --dry-run. Otherwise exits 0, 1, or 3.
   local wait session hint log progress log_at progress_at ticks line began elapsed
   detach_refuse_mode
   command -v tmux >/dev/null 2>&1 \
@@ -118,7 +105,7 @@ detach_main() {
     die "detach: tmux could not start session $session (above); nothing was launched"
   fi
   # Read the line, then liveness, so success means both held together.
-  # The tick count bounds the wait. A wait of 0 still does this one check.
+  # A wait of 0 still does this one check.
   ticks=$((wait * 5))
   began=$SECONDS
   while :; do

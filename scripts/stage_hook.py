@@ -15,11 +15,6 @@ line to stderr and to stage-hook.log in the run dir. The hook command itself
 is not logged, but it must never hold a secret: chairs inherit it and a
 chair's model can read its environment. A hook that needs a credential
 fetches it itself at run time. Payloads carry paths and counts only.
-
-Every known event with a dir also appends one line to progress.md in that dir,
-hook or not: "<local time with offset> <stage> <status>". The run stage
-(started, completed, failed) comes from conclave.sh through the progress
-subcommand. _progress is the only writer. See docs/preflight.md.
 """
 from __future__ import annotations
 
@@ -53,12 +48,10 @@ def now() -> str:
 
 
 def progress_now() -> str:
-    """Local time, to the second, with a numeric offset. Payload ts stays now()."""
     return datetime.now().astimezone().isoformat(timespec='seconds')
 
 
 def _status(payload: dict | None) -> str:
-    """The payload's outcome class with whitespace as '-', else 'reached'."""
     outcome = (payload or {}).get('outcome')
     if outcome in (None, ''):
         return 'reached'
@@ -67,10 +60,7 @@ def _status(payload: dict | None) -> str:
 
 
 def _progress(dir: str | Path, stage: str, status: str) -> None:
-    """Append one progress line. The only writer. Never raises and never mkdirs.
-
-    One O_APPEND write keeps a line intact when stack-run threads append together.
-    """
+    """One O_APPEND write keeps a line intact when stack-run threads append together."""
     try:
         data = f'{progress_now()} {stage} {status}\n'.encode('utf-8')
         fd = os.open(Path(dir) / PROGRESS_NAME, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
