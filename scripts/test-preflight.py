@@ -755,6 +755,14 @@ def test_conclave(tmp: Path) -> None:
         check([e['event'] for e in events] == ['preflight_failed'] and payload.get('ballot') == c.id
               and payload.get('blocking') == 1 and payload.get('needs_file') == str(c.dir / 'needs-human.md'),
               f'conclave.sh: preflight_failed fires once with ballot, blocking, needs_file ({events})')
+        stamp = re.compile(r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d (\S+) (\S+)$')
+        rows = []
+        for line in (c.dir / 'progress.md').read_text(encoding='utf-8').splitlines():
+            match = stamp.fullmatch(line)
+            check(match is not None, f'conclave.sh: progress line has an offset timestamp ({line!r})')
+            rows.append((match.group(1), match.group(2)))
+        check(rows == [('run', 'started'), ('preflight_failed', 'reached'), ('run', 'failed')],
+              f'conclave.sh: progress.md is run started, preflight_failed, run failed ({rows!r})')
 
         # (1) A PR gh says does not exist.
         c.hook_log.unlink()
@@ -831,13 +839,21 @@ def test_post_plan_ready(tmp: Path) -> None:
             (c.dir / 'findings.json').write_text(json.dumps({'findings': findings}))
             canned = c.work / f'canned-{label}.json'
             canned.write_text(json.dumps({'model': 'test', 'answers': {'f1': {'choice': choice, 'confidence': 0.99}}}))
+            prog = c.dir / 'progress.md'
+            before = prog.read_text(encoding='utf-8') if prog.is_file() else ''
             got = c.run('--findings', '--canned', str(canned))
+            after = prog.read_text(encoding='utf-8') if prog.is_file() else ''
+            added = after[len(before):] if after.startswith(before) else after
             events = [e for e in hook_calls(c.hook_log) if e['event'] == 'post_plan_ready']
             judged = (c.dir / 'judgment.md').read_text() if (c.dir / 'judgment.md').is_file() else ''
             if not fires:
                 check(got.returncode == 0 and judged and not events,
                       f'post_plan_ready: does not fire on a {label} gate ({got.returncode} {got.stderr[-300:]!r})')
+                check(added == '', f'post_plan_ready: a {label} gate adds no progress line ({added!r})')
                 continue
+            check(any(re.fullmatch(
+                r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d post_plan_ready reached', ln) for ln in added.splitlines()),
+                  f'post_plan_ready: progress line is post_plan_ready reached ({added!r})')
             payload = json.loads(events[0]['payload']) if events else {}
             check(got.returncode == 0 and 'decision: comments to post (1 post' in judged and len(events) == 1,
                   f'post_plan_ready: fires once when the gate binds comments to post ({got.returncode} {got.stderr[-300:]!r})')
@@ -850,6 +866,13 @@ def test_post_plan_ready(tmp: Path) -> None:
         got = c.run('--findings', '--canned', str(c.work / 'canned-post.json'), CONCLAVE_STAGE_HOOK=str(c.bin / 'nope'))
         check(got.returncode == 0 and 'post_plan_ready failed: not found' in got.stderr,
               'post_plan_ready: a missing hook leaves the findings gate at exit 0')
+        before = (c.dir / 'progress.md').read_text(encoding='utf-8') if (c.dir / 'progress.md').is_file() else ''
+        got = c.run('--findings', '--canned', str(c.work / 'canned-post.json'), CONCLAVE_STAGE_HOOK='')
+        after = (c.dir / 'progress.md').read_text(encoding='utf-8') if (c.dir / 'progress.md').is_file() else ''
+        added = after[len(before):] if after.startswith(before) else after
+        check(got.returncode == 0 and 'post_plan_ready failed' not in got.stderr
+              and any(ln.endswith(' post_plan_ready reached') for ln in added.splitlines()),
+              f'post_plan_ready: an unset hook appends the progress line and spawns no hook ({added!r} {got.stderr[-200:]!r})')
     finally:
         c.close()
 

@@ -30,6 +30,8 @@ cd "$ROOT"
 . "$ROOT/scripts/audit-kind.sh"
 # shellcheck disable=SC1091
 . "$ROOT/scripts/ask-mode.sh"
+# shellcheck disable=SC1091
+. "$ROOT/scripts/detach.sh"
 
 DEFAULT_VOTERS="claude,codex"
 # No --voters: the lineup seats the ballot. Kind review uses --kind review. See apply_kind_voters.
@@ -43,6 +45,7 @@ BALLOT_EXCLUDED_WHY=""
 OPUS_LEG_SKIPPED=0
 ID=""
 DRY_RUN=0
+DETACH=0
 FORCE_MAX=0
 FLAG_KIND=""
 FLAG_DIFFICULTY=""
@@ -398,6 +401,7 @@ reset_plain_preview_dir() {
 usage() {
   cat <<'EOF'
 Usage: scripts/conclave.sh <id> [options]
+       scripts/conclave.sh --detach <id> [options]
        scripts/conclave.sh <id> --ask TEXT | --ask-file FILE | --template NAME [--input FILE]...
        scripts/conclave.sh help
        scripts/conclave.sh --record-review --run-id ID --review-file PATH [--task-id ID] [--kind KIND]
@@ -408,6 +412,24 @@ Requires tmp/council/<id>/brief.md already written, except in ask mode.
 
 Options:
   --dry-run              Preview routing/packet under tmp/council/<id>/preview/ (no voters; ballot untouched)
+  --detach               Goes first: scripts/conclave.sh --detach <id> [options].
+                         Runs that command in a tmux session on its own server
+                         (tmux -L <session>). The session is conclave-<id> when
+                         the id has no '.' or ':'. Otherwise it is conclave+
+                         with '_' encoded as '__', '.' as '_d', and ':' as '_c'
+                         (rel.note is conclave+rel_dnote). Output is appended to
+                         tmp/council/<id>/run.log. Waits CONCLAVE_DETACH_WAIT
+                         seconds (default 60) for a live session and the run's
+                         first new progress.md line. Exit 0 started; 1 refused,
+                         or the run ended (last 20 log lines shown); 3 no
+                         progress line yet (session left running). Refused while
+                         that session is already running. Needs tmux on PATH.
+                         conclave.sh never falls back to nohup or setsid.
+                         With --dry-run, prints a note and the dry run stays in
+                         the foreground; nothing starts. Ballots only: not with
+                         --ask, --findings, --verdicts, or --judge. The detached
+                         run gets no exported TYPESAFE_API_KEY or JEV_API_KEY;
+                         the judge reads its key through op (CONCLAVE_JEV_OP_REF).
   --max                  Allow max/xhigh where the table permits (design+high)
   --voters LIST          Default ballot is seat-usage --route lineup.
                          Families map to claude, codex, grok, and muse.
@@ -563,6 +585,8 @@ Writes under tmp/council/<id>/:
   judgment.md               # only when Jev returns a Decision
   options.md                # design and mixed, only on no automatic decision
   errors.md
+  progress.md               # every real ballot: <time with offset> <stage> <status>; append-only
+  run.log                   # --detach: the detached run's stdout and stderr; append-only
 
 Does not judge via an LLM chair. The Decision judge is Jev (TypeSafe System One).
 If Jev has no key or fails, there is no judgment.md. Re-auth, then re-judge
@@ -700,6 +724,7 @@ judge_load_voters() {
 clear_ballot_artifacts() {
   # Fresh ballot only (real vote): never reuse prior voters/opinions/judgment for this id.
   # Dry-run must not call this — peeking at routing must not destroy evidence.
+  # progress.md and run.log are append-only and stay across ballots.
   rm -f \
     "$DIR"/voter-*.md "$DIR"/voter-*.err "$DIR"/voter-*.ok \
     "$DIR"/voter-*.raw.md "$DIR"/voter-*.prompt.md "$DIR"/voter-*.model.txt \
@@ -3258,15 +3283,9 @@ run_jev_judge() {
   [ -s "$DIR/judgment.md" ]
 }
 
-stage_hook_on() {
-  # CONCLAVE_STAGE_HOOK wins when set, even empty; else COUNCIL_STAGE_HOOK.
-  [ -n "${CONCLAVE_STAGE_HOOK-${COUNCIL_STAGE_HOOK-}}" ]
-}
-
 stage_hook_emit() {
-  # $1 event, $2 payload JSON object. Nothing runs when no hook is set.
-  # A failing hook never fails the run. See docs/preflight.md.
-  stage_hook_on || return 0
+  # $1 event, $2 payload JSON object. Appends the progress line and runs the
+  # hook when one is set. A failing hook never fails the run. See docs/preflight.md.
   python3 "$ROOT/scripts/stage_hook.py" emit "$1" --dir "$DIR" --json "$2" || true
 }
 
@@ -3276,7 +3295,6 @@ stage_post_plan_ready() {
   # one finding gated to post, and the chair drafts one comment for each.
   # master has no post plan file yet. A change that adds one should keep this
   # call, or move it to where the post plan is written. docs/preflight.md.
-  stage_hook_on || return 0
   local line drafted payload
   line="$(sed -n 's/^decision: //p' "$DIR/judgment.md" 2>/dev/null | head -n 1)"
   [[ "$line" =~ ^comments\ to\ post\ \(([0-9]+)\ post ]] || return 0
@@ -3428,6 +3446,8 @@ council_record_outcome() {
       status="failed"
     fi
   fi
+  # before leaves status empty, so the run line is "started".
+  [ -z "${DIR:-}" ] || python3 "$ROOT/scripts/stage_hook.py" progress run "${status:-started}" --dir "$DIR" || true
   local started muse_decision="" final_decision=""
   local -a muse_args=()
   started="$(council_started_voters "${VOTERS:-}")"
@@ -3537,6 +3557,18 @@ if [ "$(conclave_env SOURCE_ONLY 0)" = "1" ] && [ "${BASH_SOURCE[0]}" != "$0" ];
   return 0 2>/dev/null || exit 0
 fi
 
+DETACH_ARGS=()
+if [ "${1:-}" = "--detach" ]; then
+  shift
+  case "${1:-}" in
+    ''|-*|help)
+      die "--detach goes first and takes a ballot id: scripts/conclave.sh --detach <id> [options]"
+      ;;
+  esac
+  DETACH=1
+  DETACH_ARGS=("$@")
+fi
+
 if [ "${1:-}" = "--record-review" ]; then
   shift
   rec_run_id=""
@@ -3610,6 +3642,9 @@ while [ "$#" -gt 0 ]; do
     --dry-run)
       DRY_RUN=1
       shift
+      ;;
+    --detach)
+      die "--detach goes first: scripts/conclave.sh --detach <id> [options]"
       ;;
     --max)
       FORCE_MAX=1
@@ -3832,6 +3867,7 @@ esac
 voter_sandbox_check
 
 if [ "$ASK_MODE" -eq 1 ]; then
+  [ "$DETACH" -eq 0 ] || detach_refuse_mode
   ask_main
   exit 0
 fi
@@ -3858,6 +3894,10 @@ fi
 if [ "$VERDICTS_MODE" -eq 1 ] && [ "$JUDGE_MODE" -eq 1 ]; then
   die "--verdicts cannot be combined with --judge"
 fi
+
+# The brief and DIR are already checked. Hand off before the key capture,
+# routing, worktrees, packet temp, and council_begin_run.
+[ "$DETACH" -eq 0 ] || detach_main
 
 # Capture before any voter and before --findings / --judge. Voters never see the key.
 COUNCIL_SAVED_TYPESAFE="${TYPESAFE_API_KEY:-}"
