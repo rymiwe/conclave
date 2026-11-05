@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -eu
-unset TYPESAFE_API_KEY JEV_API_KEY CONCLAVE_JEV_OP_REF
+if [ "${TEST_DETACH_LEGACY_REF:-}" != 1 ]; then
+  exec env TEST_DETACH_LEGACY_REF=1 COUNCIL_JEV_OP_REF='op://x/y/z' bash "$0" "$@"
+fi
+unset TEST_DETACH_LEGACY_REF
+unset TYPESAFE_API_KEY JEV_API_KEY COUNCIL_SAVED_TYPESAFE COUNCIL_SAVED_JEV
+for _jev_suffix in JEV_OP_REF JEV_OP; do
+  unset "CONCLAVE_${_jev_suffix}" "COUNCIL_${_jev_suffix}"
+done
+unset _jev_suffix
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
 CONCLAVE="$ROOT/scripts/conclave.sh"
