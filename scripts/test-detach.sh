@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 set -eu
+# A login shell can still export the deprecated op ref. Re-exec once with
+# that name set so the clear below is what the "is unset" case sees.
+if [ "${TEST_DETACH_LEGACY_REF:-}" != 1 ]; then
+  exec env TEST_DETACH_LEGACY_REF=1 COUNCIL_JEV_OP_REF='op://x/y/z' bash "$0" "$@"
+fi
+unset TEST_DETACH_LEGACY_REF
 unset TYPESAFE_API_KEY JEV_API_KEY CONCLAVE_JEV_OP_REF
 
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
