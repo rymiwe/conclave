@@ -15,6 +15,8 @@ tmp/council/<id>/
   jev-raw.json / judgment.md # header, then the decision body; absent when Jev has no key
   options.md                 # design and mixed no automatic decision: same header, no option rows
   errors.md
+  progress.md                # every real ballot: one line per stage; append-only, never cleared
+  run.log                    # --detach: the detached run's output; append-only
 
   lineup.md                  # kind: review
   preview/lineup.md          # review dry-run only

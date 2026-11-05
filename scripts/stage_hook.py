@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # Usage: scripts/stage_hook.py emit EVENT [--dir DIR] [--json PAYLOAD]
+#        scripts/stage_hook.py progress run {started,completed,failed} --dir DIR
 """Run the operator's stage hook on a stage event. Never breaks the run.
 
 CONCLAVE_STAGE_HOOK (COUNCIL_STAGE_HOOK is the alias) is a command line,
-split with shlex, never run through a shell. Unset or empty: nothing runs.
+split with shlex, never run through a shell. Unset or empty: no hook runs.
 The hook gets the event name and one JSON payload as its last two arguments,
 and the same two values in CONCLAVE_STAGE_EVENT and CONCLAVE_STAGE_PAYLOAD.
 stdin is /dev/null. Its output is discarded. It has
@@ -14,7 +15,6 @@ line to stderr and to stage-hook.log in the run dir. The hook command itself
 is not logged, but it must never hold a secret: chairs inherit it and a
 chair's model can read its environment. A hook that needs a credential
 fetches it itself at run time. Payloads carry paths and counts only.
-See docs/preflight.md.
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import signal
 import subprocess
@@ -38,10 +39,40 @@ EVENTS = ('preflight_failed', 'holistic_done', 'ballot_started', 'ballot_done',
           'repros_done', 'post_plan_ready', 'stalled')
 DEFAULT_TIMEOUT = 30.0
 LOG_NAME = 'stage-hook.log'
+PROGRESS_NAME = 'progress.md'
+RUN_STATUSES = ('started', 'completed', 'failed')
 
 
 def now() -> str:
     return datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def progress_now() -> str:
+    return datetime.now().astimezone().isoformat(timespec='seconds')
+
+
+def _status(payload: dict | None) -> str:
+    outcome = (payload or {}).get('outcome')
+    if outcome in (None, ''):
+        return 'reached'
+    text = re.sub(r'\s+', '-', str(outcome).strip())
+    return text or 'reached'
+
+
+def _progress(dir: str | Path, stage: str, status: str) -> None:
+    """One O_APPEND write keeps a line intact when stack-run threads append together."""
+    try:
+        data = f'{progress_now()} {stage} {status}\n'.encode('utf-8')
+        fd = os.open(Path(dir) / PROGRESS_NAME, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+    except Exception:
+        try:
+            print(f'progress: could not append to {dir}/{PROGRESS_NAME}', file=sys.stderr)
+        except Exception:
+            pass
 
 
 def hook_timeout() -> float:
@@ -93,6 +124,8 @@ def _run(argv: list[str], env: dict[str, str], timeout: float) -> str:
 def emit(event: str, payload: dict | None = None, dir: str | Path | None = None) -> bool:
     """Run the hook for one event. True when it ran and exited 0. Never raises."""
     try:
+        if dir is not None and event in EVENTS:
+            _progress(dir, event, _status(payload))
         command = setting('STAGE_HOOK', '')
         if not command or not command.strip():
             return False
@@ -129,7 +162,14 @@ def main(argv: list[str]) -> int:
     one.add_argument('event')
     one.add_argument('--dir')
     one.add_argument('--json', default='{}')
+    prog = sub.add_parser('progress')
+    prog.add_argument('stage', choices=('run',))
+    prog.add_argument('status', choices=RUN_STATUSES)
+    prog.add_argument('--dir', required=True)
     args = parser.parse_args(argv)
+    if args.cmd == 'progress':
+        _progress(args.dir, args.stage, args.status)
+        return 0
     try:
         payload = json.loads(args.json)
     except ValueError:

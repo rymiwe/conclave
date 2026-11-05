@@ -112,7 +112,7 @@ stack-run runs the seat and repo checks once. It then sets `CONCLAVE_PREFLIGHT_D
 
 ## Stage hook
 
-`CONCLAVE_STAGE_HOOK` (`COUNCIL_STAGE_HOOK` is the alias) is a command line. It is split like a shell would split words (`shlex`), and never run through a shell. Unset or empty, nothing runs and nothing is spawned.
+`CONCLAVE_STAGE_HOOK` (`COUNCIL_STAGE_HOOK` is the alias) is a command line. It is split like a shell would split words (`shlex`), and never run through a shell. Unset or empty, no hook runs. Each known event still appends its line to `progress.md` (see Progress).
 
 On each event the hook runs as:
 
@@ -128,7 +128,7 @@ A hook that fails never breaks the run. That covers a missing or non-executable 
 
 Never put a secret in `CONCLAVE_STAGE_HOOK`: no token, key, or password on the command line. The variable stays in the run's environment, chairs and phase 1 `conclave.sh` processes inherit it, and a chair's model can read its own environment (`env`, `/proc/self/environ`). It cannot be stripped from chairs, because `post_plan_ready` fires from the chair's `conclave.sh --findings` call. Not being logged does not keep it secret. When the hook needs a credential, the hook fetches it itself at run time, for example from a secret manager (`op read`, a cloud secret store).
 
-Shell callers use `python3 scripts/stage_hook.py emit <event> --dir <run dir> --json '<payload>'`. `conclave.sh` checks the variable first and starts no process when it is unset. Python callers use `stage_hook.emit(event, payload, dir)`.
+Shell callers use `python3 scripts/stage_hook.py emit <event> --dir <run dir> --json '<payload>'`. `conclave.sh` calls it for every event, hook or not, so the progress line is always written. Python callers use `stage_hook.emit(event, payload, dir)`.
 
 ### Payload
 
@@ -149,3 +149,13 @@ Every payload has `event`, `ts` (UTC, ISO 8601, ending in `Z`), and `dir` (the r
 `post_plan_ready`: master has no post plan file yet. The call sits in `run_findings_mode` in `scripts/conclave.sh` (`stage_post_plan_ready`). A change that adds a post plan should keep that call, or move it to where the post plan is written.
 
 `stalled` fires on chair timeout only. There is no no-progress watcher, and voter legs have no timeout of their own, so nothing fires for a slow voter.
+
+### Progress
+
+Each known event appends one line to `progress.md` in the run directory:
+
+```text
+<local ISO-8601 with a numeric offset> <stage> <status>
+```
+
+The timestamp is local time to the second, with a numeric offset (`2026-11-04T09:12:03-08:00`). Payload `ts` stays UTC with a trailing `Z`. The stage is `run` or the event name. The status is the payload `outcome` with whitespace turned into `-`, or `reached` when the payload has no outcome. `conclave.sh` writes the `run` statuses `started`, `completed`, and `failed`. One append writes the whole line. An unset hook still appends the line and does not spawn the hook. An unknown event adds no line. A dry run writes no `run` line. The file is kept across ballots. A failed write does not fail the run. `--detach` waits for the first new line.
