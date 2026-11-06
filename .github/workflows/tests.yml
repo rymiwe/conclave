@@ -1,0 +1,137 @@
+name: tests
+
+"on":
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install toolchain
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ca-certificates curl jq perl python3 tmux
+          version=8.30.1
+          archive="gitleaks_${version}_linux_x64.tar.gz"
+          # linux_x64 line of gitleaks_8.30.1_checksums.txt from the v8.30.1 release.
+          expected=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+          tmp="$(mktemp -d)"
+          curl -fsSL -o "$tmp/$archive" "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${archive}"
+          echo "${expected}  ${archive}" | (cd "$tmp" && sha256sum -c -)
+          tar -xzf "$tmp/$archive" -C "$tmp" gitleaks
+          sudo install -m 0755 "$tmp/gitleaks" /usr/local/bin/gitleaks
+          rm -rf "$tmp"
+          gitleaks version | grep -qx '8.30.1'
+          python3 -c 'import sys; assert sys.version_info >= (3, 9), sys.version'
+          bash -c '[[ ${BASH_VERSINFO[0]} -gt 4 || ( ${BASH_VERSINFO[0]} -eq 4 && ${BASH_VERSINFO[1]} -ge 4 ) ]]'
+          command -v jq >/dev/null
+          command -v git >/dev/null
+          command -v tmux >/dev/null
+          command -v perl >/dev/null
+          echo "python $(python3 --version)"
+          echo "bash ${BASH_VERSION}"
+          echo "jq $(jq --version)"
+          echo "git $(git --version)"
+          echo "tmux $(tmux -V)"
+          echo "perl $(perl -V:version)"
+
+      - name: Run the suite
+        run: |
+          set -uo pipefail
+          skip_file=tests/ci-skip
+          declare -A skip_reason=()
+          if [[ -f "$skip_file" ]]; then
+            echo "=== ci-skip ==="
+            cat "$skip_file"
+            echo "=== end ci-skip ==="
+            line_no=0
+            while IFS= read -r line || [[ -n "$line" ]]; do
+              line_no=$((line_no + 1))
+              line="${line%$'\r'}"
+              [[ -z "$line" || "$line" == \#* ]] && continue
+              path="${line%%$'\t'*}"
+              reason="${line#*$'\t'}"
+              if [[ "$path" == "$line" || -z "$reason" ]]; then
+                echo "ci-skip:${line_no}: expected path, a tab, and a reason" >&2
+                exit 1
+              fi
+              if [[ -n "${skip_reason[$path]+x}" ]]; then
+                echo "ci-skip:${line_no}: duplicate path ${path}" >&2
+                exit 1
+              fi
+              skip_reason["$path"]="$reason"
+            done < "$skip_file"
+          fi
+
+          shopt -s nullglob
+          tests=(scripts/test-*.py scripts/test-*.sh)
+          if [[ ${#tests[@]} -eq 0 ]]; then
+            echo "no scripts/test-*.py or scripts/test-*.sh files" >&2
+            exit 1
+          fi
+          IFS=$'\n'
+          tests=($(printf '%s\n' "${tests[@]}" | LC_ALL=C sort))
+          unset IFS
+
+          for path in "${!skip_reason[@]}"; do
+            found=0
+            for test_path in "${tests[@]}"; do
+              if [[ "$test_path" == "$path" ]]; then
+                found=1
+                break
+              fi
+            done
+            if [[ "$found" -eq 0 ]]; then
+              echo "ci-skip names a file that is not in the suite: ${path}" >&2
+              exit 1
+            fi
+          done
+
+          passed=0
+          failed=0
+          skipped=0
+          fail_names=()
+          for test_path in "${tests[@]}"; do
+            if [[ -n "${skip_reason[$test_path]+x}" ]]; then
+              echo "SKIP ${test_path}	${skip_reason[$test_path]}"
+              skipped=$((skipped + 1))
+              continue
+            fi
+            if [[ "$test_path" == *.py ]]; then
+              cmd=(python3 "$test_path")
+            else
+              cmd=(bash "$test_path")
+            fi
+            echo "RUN ${cmd[*]}"
+            set +e
+            "${cmd[@]}"
+            rc=$?
+            set -e
+            if [[ "$rc" -eq 0 ]]; then
+              echo "PASS ${test_path}"
+              passed=$((passed + 1))
+            else
+              echo "FAIL ${test_path} exit ${rc}"
+              failed=$((failed + 1))
+              fail_names+=("$test_path")
+            fi
+          done
+
+          echo "SUMMARY passed=${passed} failed=${failed} skipped=${skipped} total=${#tests[@]}"
+          if [[ "$failed" -ne 0 ]]; then
+            printf 'FAILED %s\n' "${fail_names[@]}"
+            exit 1
+          fi
