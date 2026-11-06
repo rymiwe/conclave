@@ -3,6 +3,7 @@
 # change the caller's shell options.
 set -euo pipefail
 ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+ROOT_HOLD="$ROOT"
 fail=0
 ok() { echo "ok $1"; }
 bad() { echo "FAIL $1"; fail=1; }
@@ -94,6 +95,21 @@ if out=$(emit_reviewer_prefs 2>"$T/err"); then
 else
   ok "in-repo prefs path refused"
 fi
+
+
+# Direct exec (not sourced): ROOT unset, in-repo prefs path → exit 2
+unset ROOT || true
+export CONCLAVE_REVIEWER_PREFS="$ROOT_HOLD/scripts/reviewer-output-template.md"
+set +e
+"$ROOT_HOLD/scripts/reviewer-prefs.sh" >"$T/direct.out" 2>"$T/direct.err"
+drc=$?
+set -e
+if [ "$drc" -eq 2 ]; then
+  ok "direct exec ROOT unset refuses in-repo prefs (exit 2)"
+else
+  bad "direct exec want exit 2 got $drc out=$(cat "$T/direct.out") err=$(cat "$T/direct.err")"
+fi
+export ROOT="$ROOT_HOLD"
 
 if [ "$fail" -ne 0 ]; then
   echo "test-reviewer-prefs FAILED"
