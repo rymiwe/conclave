@@ -945,7 +945,7 @@ def test_changes(gate) -> None:
     check("motivating_feedback:" in state and "existing_rules:" in state, "verdict state fields")
 
 
-def _bash_instructions(mode: str) -> str:
+def _bash_instructions(mode: str, home: str) -> str:
     repo = Path(__file__).resolve().parent.parent
     script = textwrap.dedent(
         """\
@@ -959,20 +959,42 @@ def _bash_instructions(mode: str) -> str:
         fi
         """
     )
+    env = os.environ.copy()
+    env["HOME"] = home
     proc = subprocess.run(
         ["bash", "-c", script, "bash", str(repo / "scripts" / "council.sh"), mode],
         check=True,
         capture_output=True,
         text=True,
+        env=env,
     )
     return proc.stdout
 
 
+def _pstack_skill_home(tmp: Path) -> tuple[Path, Path]:
+    home = tmp / "home"
+    pstack = home / ".cursor/plugins/cache/cursor-public/pstack/fakehash"
+    for name in (
+        "principle-boundary-discipline",
+        "principle-test-behavior-not-implementation",
+        "principle-minimize-reader-load",
+        "in-your-own-words",
+    ):
+        skill = pstack / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("\n", encoding="utf-8")
+    return home, pstack
+
+
 def test_review_instructions_match_master() -> None:
-    got = _bash_instructions("")
-    fixture = (ROOT / "fixtures" / "review-instructions.txt").read_text(encoding="utf-8")
-    check(got == fixture, "review instructions match the 94f9443 fixture")
-    audit = _bash_instructions("audit")
+    with tempfile.TemporaryDirectory() as tmp:
+        home, pstack = _pstack_skill_home(Path(tmp))
+        home_s = str(home)
+        got = _bash_instructions("", home_s)
+        fixture = (ROOT / "fixtures" / "review-instructions.txt").read_text(encoding="utf-8")
+        expected = fixture.replace("@PSTACK_ROOT@", pstack.as_posix())
+        check(got == expected, "review instructions match the 94f9443 fixture")
+        audit = _bash_instructions("audit", home_s)
     for banned in (
         'Finish with a short "Checked and found clean"',
         'End with a "Checked and found clean"',
@@ -1070,11 +1092,24 @@ def test_review_instructions_match_master() -> None:
     )
 
 
+def test_review_instructions_without_pstack() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp) / "home"
+        home.mkdir()
+        got = _bash_instructions("", str(home))
+    check(
+        "pstack skills not found on this machine." in got,
+        "missing pstack says skills were not found",
+    )
+    check(".cursor/plugins" not in got, "missing pstack names no plugin path")
+
+
 def main() -> None:
     gate = load("audit_gate", "audit_gate.py")
     judge = load("jev_judge", "jev-judge.py")
     test_brief_header()
     test_review_instructions_match_master()
+    test_review_instructions_without_pstack()
     test_quotes(gate)
     test_nontext_charset(gate)
     test_gate(judge)
