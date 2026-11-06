@@ -56,31 +56,6 @@ jobs:
       - name: Run the suite
         run: |
           set -uo pipefail
-          skip_file=tests/ci-skip
-          declare -A skip_reason=()
-          if [[ -f "$skip_file" ]]; then
-            echo "=== ci-skip ==="
-            cat "$skip_file"
-            echo "=== end ci-skip ==="
-            line_no=0
-            while IFS= read -r line || [[ -n "$line" ]]; do
-              line_no=$((line_no + 1))
-              line="${line%$'\r'}"
-              [[ -z "$line" || "$line" == \#* ]] && continue
-              path="${line%%$'\t'*}"
-              reason="${line#*$'\t'}"
-              if [[ "$path" == "$line" || -z "$reason" ]]; then
-                echo "ci-skip:${line_no}: expected path, a tab, and a reason" >&2
-                exit 1
-              fi
-              if [[ -n "${skip_reason[$path]+x}" ]]; then
-                echo "ci-skip:${line_no}: duplicate path ${path}" >&2
-                exit 1
-              fi
-              skip_reason["$path"]="$reason"
-            done < "$skip_file"
-          fi
-
           shopt -s nullglob
           tests=(scripts/test-*.py scripts/test-*.sh)
           if [[ ${#tests[@]} -eq 0 ]]; then
@@ -91,30 +66,10 @@ jobs:
           tests=($(printf '%s\n' "${tests[@]}" | LC_ALL=C sort))
           unset IFS
 
-          for path in "${!skip_reason[@]}"; do
-            found=0
-            for test_path in "${tests[@]}"; do
-              if [[ "$test_path" == "$path" ]]; then
-                found=1
-                break
-              fi
-            done
-            if [[ "$found" -eq 0 ]]; then
-              echo "ci-skip names a file that is not in the suite: ${path}" >&2
-              exit 1
-            fi
-          done
-
           passed=0
           failed=0
-          skipped=0
           fail_names=()
           for test_path in "${tests[@]}"; do
-            if [[ -n "${skip_reason[$test_path]+x}" ]]; then
-              echo "SKIP ${test_path}	${skip_reason[$test_path]}"
-              skipped=$((skipped + 1))
-              continue
-            fi
             if [[ "$test_path" == *.py ]]; then
               cmd=(python3 "$test_path")
             else
@@ -135,7 +90,7 @@ jobs:
             fi
           done
 
-          echo "SUMMARY passed=${passed} failed=${failed} skipped=${skipped} total=${#tests[@]}"
+          echo "SUMMARY passed=${passed} failed=${failed} total=${#tests[@]}"
           if [[ "$failed" -ne 0 ]]; then
             printf 'FAILED %s\n' "${fail_names[@]}"
             exit 1
