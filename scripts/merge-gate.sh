@@ -271,6 +271,10 @@ review() {
     echo "  When it is \`one_way: yes\`, follow it with one line per offending step: \`one_way_at: <file>:<line> <what it does>\`, using the new-file line number from the diff hunk."
     echo
     echo "## Reviewer persona"; cat "$ROOT/scripts/reviewer-persona.md"
+    echo "## Reviewer output template"; cat "$ROOT/scripts/reviewer-output-template.md"
+    # shellcheck source=scripts/reviewer-prefs.sh
+    . "$ROOT/scripts/reviewer-prefs.sh"
+    emit_reviewer_prefs
     echo; echo "## PR description"; printf '%s\n' "$desc"
     echo; echo "## Diff ($base...$head)"; echo '```diff'; printf '%s\n' "$diff"; echo '```'
   } > "$P/PROMPT.md"
