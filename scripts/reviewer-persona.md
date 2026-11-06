@@ -98,10 +98,8 @@ author's attention.
 ## Output
 
 Write findings to the review file using the schema in
-`scripts/reviewer-output-template.md` (Severity `bug` / `suggestion` / `nit`,
-File:line, Description, Suggestion; Verdict; Checked and found clean — including
-the exact inputs you tried by hand; Could this be simpler?). `review-lint`
-enforces these when `CONCLAVE_REVIEW_LINT` is set.
+`scripts/reviewer-output-template.md`. `review-lint` enforces that schema when
+`CONCLAVE_REVIEW_LINT` is set.
 
 Reasons that stay here: a citation to a line that does not exist makes a real
 finding look invented; the clean list is how the reader tells your silence

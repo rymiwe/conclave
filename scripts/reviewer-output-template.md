@@ -14,7 +14,8 @@ Write findings most severe first. Each finding is a `###` heading with:
 - **Severity**: `bug` (wrong behaviour), `suggestion` (real improvement, not a
   defect), or `nit` (cosmetic). Exactly one.
 - **File:line** — `path/to/file.ext:N` at the review sha. The line must exist
-  in `git show <sha>:<file>`.
+  in `git show <sha>:<file>`; read the file and confirm the line holds what
+  you claim.
 - **Description** — the concrete failure: input or state, then wrong result.
 - **Suggestion** — the fix, executed if it is executable.
 
