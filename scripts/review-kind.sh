@@ -3068,6 +3068,10 @@ Next step (chair, not this script):
   legs uses the blinded letters only. No vendor names and no agreement counts.
   {"findings": []} is a clean review.
   Then: scripts/conclave.sh $ID --findings
+  Then, when CONCLAVE_REVIEW_LINT is set, run it on the review artifact before
+  drafting comments (skip if unset; public clone must not require a fleet path):
+    "\$CONCLAVE_REVIEW_LINT" <review.md> --repo <repo> --sha <head-sha>
+  The schema is scripts/reviewer-output-template.md.
   Then draft comments. When you verify a finding by running a throwaway script,
   save that script as repro/<finding-id>.<ext> in the ballot directory
   (for example repro/f1.rb). The drafter attaches it to that finding's comment.

@@ -143,6 +143,8 @@ has "pass: labels checked" "$gh_log" "gh pr view $PR --json labels"
 p="$(cat "$FAKE_STDIN")"
 has "prompt asks for the one_way line" "$p" 'exactly `one_way: yes` or `one_way: no`'
 has "prompt asks for one_way_at file:line" "$p" 'one_way_at: <file>:<line>'
+has "prompt says Answer format overrides template" "$p" 'Answer format above overrides'
+
 has "prompt carries the diff" "$p" '+b'
 has "verdict json written" "$(cat "$T/pass/out/gate-verdict.json")" '"one_way": "no"'
 has "pass: router asked with the builder vendor" "$su_log" "seat-usage --route review --cached --json --builder-vendor xai"

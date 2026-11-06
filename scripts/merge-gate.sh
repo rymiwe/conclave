@@ -262,6 +262,9 @@ review() {
     echo "You are the single merge-gate reviewer for this pull request. You have no tools; the PR description and the diff (with 40 lines of context) are below. Follow the reviewer persona, except you cannot run code or write files: reason precisely, cite file:line from the diff hunks, and answer inline."
     echo
     echo "Answer format:"
+    echo "The Answer format above overrides the review.md structure and VERDICT line in"
+    echo "## Reviewer output template for this gate run (line 1 is approve/request-changes;"
+    echo "the last line is one_way; do not emit VERDICT: or Could this be simpler?)."
     echo "- First line: exactly \`approve\` or \`request-changes\`."
     echo "- Then \`Findings:\` most severe first, each with Severity (bug/suggestion/nit), File:line, Description (concrete failing input/state and wrong result), Suggestion. Only \`bug\` findings justify request-changes. Zero findings is fine."
     echo "- Then \`Checked and found clean:\` list."
@@ -271,6 +274,10 @@ review() {
     echo "  When it is \`one_way: yes\`, follow it with one line per offending step: \`one_way_at: <file>:<line> <what it does>\`, using the new-file line number from the diff hunk."
     echo
     echo "## Reviewer persona"; cat "$ROOT/scripts/reviewer-persona.md"
+    echo "## Reviewer output template"; cat "$ROOT/scripts/reviewer-output-template.md"
+    # shellcheck source=scripts/reviewer-prefs.sh
+    . "$ROOT/scripts/reviewer-prefs.sh"
+    emit_reviewer_prefs
     echo; echo "## PR description"; printf '%s\n' "$desc"
     echo; echo "## Diff ($base...$head)"; echo '```diff'; printf '%s\n' "$diff"; echo '```'
   } > "$P/PROMPT.md"

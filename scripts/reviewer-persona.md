@@ -97,20 +97,14 @@ author's attention.
 
 ## Output
 
-Write findings to the review file, most severe first, each with:
+Write findings to the review file using the schema in
+`scripts/reviewer-output-template.md`. `review-lint` enforces that schema when
+`CONCLAVE_REVIEW_LINT` is set.
 
-- **Severity**: `bug` (wrong behaviour), `suggestion` (real improvement, not a
-  defect), or `nit` (cosmetic).
-- **File:line** — cite it precisely, and verify the line holds what you claim.
-  Read the file and confirm the number; a citation to a line that does not exist
-  makes a real finding look invented.
-- **Description** — the concrete failure: input or state, then wrong result.
-- **Suggestion** — the fix, executed if it is executable.
-
-End the file with a **"Checked and found clean"** list naming the areas you
-examined that produced no finding, and for anything you tested by hand, the exact
-inputs you tried. This is not decoration: it is how the reader tells your silence
-about an area from your judgment about it, and it exposes your own coverage gaps.
+Reasons that stay here: a citation to a line that does not exist makes a real
+finding look invented; the clean list is how the reader tells your silence
+about an area from your judgment about it; "could this be simpler?" catches
+complexity you would otherwise leave unexamined.
 
 Do **not** modify the code under review. In your final response, state the review
 file's full path and summarize the verdict.
