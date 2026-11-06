@@ -10,10 +10,13 @@
 emit_reviewer_prefs() {
   printf '%s\n' "## Reviewer preferences"
   if [ -n "${CONCLAVE_REVIEWER_PREFS:-}" ] && [ -f "${CONCLAVE_REVIEWER_PREFS}" ]; then
-    # Refuse to read a path inside this repo when ROOT is known.
-    if [ -n "${ROOT:-}" ]; then
-      case "$(cd "$(dirname -- "$CONCLAVE_REVIEWER_PREFS")" && pwd -P)/$(basename -- "$CONCLAVE_REVIEWER_PREFS")" in
-        "$(cd "$ROOT" && pwd -P)"/*)
+    local root="${ROOT:-}"
+    if [ -z "$root" ] && [ -n "${BASH_SOURCE[0]:-}" ]; then
+      root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+    fi
+    if [ -n "$root" ]; then
+      case "$(CDPATH= cd -- "$(dirname -- "$CONCLAVE_REVIEWER_PREFS")" && pwd -P)/$(basename -- "$CONCLAVE_REVIEWER_PREFS")" in
+        "$(CDPATH= cd -- "$root" && pwd -P)"/*)
           printf '%s\n' "error: CONCLAVE_REVIEWER_PREFS must be outside the conclave repository" >&2
           return 2
           ;;

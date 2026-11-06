@@ -3070,7 +3070,7 @@ Next step (chair, not this script):
   Then: scripts/conclave.sh $ID --findings
   Then, when CONCLAVE_REVIEW_LINT is set, run it on the review artifact before
   drafting comments (skip if unset; public clone must not require a fleet path):
-    "$CONCLAVE_REVIEW_LINT" <review.md> --repo <repo> --sha <head-sha>
+    "\$CONCLAVE_REVIEW_LINT" <review.md> --repo <repo> --sha <head-sha>
   The schema is scripts/reviewer-output-template.md.
   Then draft comments. When you verify a finding by running a throwaway script,
   save that script as repro/<finding-id>.<ext> in the ballot directory
