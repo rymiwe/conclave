@@ -1321,9 +1321,18 @@ class Runner:
             doc, warnings = validate_reconcile(raw, inputs, prs, oid)
             write_json(output, doc)
             (self.dest / 'reconcile.md').write_text(render_reconcile(doc), encoding='utf-8')
+            skipped_attention: set[int] = set()
+            plan = self.record.get('attention')
+            if isinstance(plan, dict) and plan.get('mode') == 'attention':
+                for decision in plan.get('decisions') or []:
+                    if isinstance(decision, dict) and decision.get('action') == 'skipped':
+                        skipped_attention.add(decision.get('pr'))
             for pr in prs:
                 ballot = self.ballot(pr['number'])
                 rows = {r['id']: r for r in doc['findings'] if r['ballot'] == ballot.name}
+                if pr['number'] in skipped_attention:
+                    warnings.append(f'{ballot.name}: skipped by attention')
+                    continue
                 if not (ballot / 'decide.md').exists():
                     warnings.append(f'{ballot.name}: missing decide.md; fold skipped')
                     continue
@@ -1553,6 +1562,17 @@ class Runner:
         else:
             self.record['whole_stack'] = 'skipped'
             stop = ''
+            # Rows were rebuilt as pending. Put the stored attention list back before
+            # reconcile reads outcomes, or a skipped PR looks like a missing ballot.
+            if self.args.per_pr == 'attention':
+                plan = stored_attention(self.previous, [pr['number'] for pr in prs])
+                if plan is not None:
+                    self.record['attention'] = plan
+                    by_pr = {decision['pr']: decision for decision in plan['decisions']}
+                    for row in self.record['prs']:
+                        decision = by_pr.get(row['pr'])
+                        if decision and decision['action'] == 'skipped':
+                            row['outcome'] = 'skipped: ' + decision['why']
         if stop:
             self.record['reconcile'] = stop
         elif self.max_capped:
