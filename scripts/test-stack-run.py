@@ -2426,6 +2426,37 @@ def test_attention(tmp: Path, mod) -> None:
           f'a resumed attention run with capped seats does not exit 3 and reconcile lists the skips '
           f'({second.returncode} {text!r} {second.stdout.strip()!r} {second.stderr.strip()})')
 
+    # --reconcile-only rebuilds every row as pending and does not apply the stored list.
+    only = Fixture(tmp, 'attention-reconcile-only')
+    only.reconcile_repo()
+    only.env['ATTENTION_JSON'] = json.dumps([
+        attention_item(2, 'billing', 'contract crosses PRs', 'yes'),
+        attention_item(1, 'copy', 'wording only', 'no'),
+    ])
+    first = only.invoke('--per-pr', 'attention', '--no-reconcile')
+    check(first.returncode == 0 and per_pr_launched(only) == ['p-2'],
+          f'reconcile-only setup stores an attention list ({per_pr_launched(only)} {first.stderr.strip()})')
+    stale = only.root / 'tmp/council' / 'p-1'
+    stale.mkdir(parents=True)
+    (stale / 'findings.json').write_text(json.dumps({'findings': [
+        {'id': 'stale-skip', 'claim': 'left from an earlier run', 'file': 'a.rb', 'line': 1},
+    ]}))
+    only.log.write_text('')
+    second = only.invoke('--reconcile-only', '--per-pr', 'attention')
+    path = only.root / 'tmp/council/stack/reconcile-input.md'
+    text = path.read_text() if path.is_file() else ''
+    warnings = '\n'.join(only.record().get('reconcile_warnings') or [])
+    check(second.returncode == 0
+          and 'skipped: attention: copy: wording only (deeper no)' in text
+          and 'skipped: not named by attention.json' in text
+          and 'missing findings.json' not in text
+          and 'stale-skip' not in text
+          and 'p-1: skipped by attention' in warnings
+          and 'p-3: skipped by attention' in warnings
+          and 'missing decide.md' not in warnings,
+          f'--reconcile-only keeps stored attention skips out of reconcile '
+          f'({second.returncode} {text!r} warnings {warnings!r} {second.stderr.strip()!r})')
+
     skipped = Fixture(tmp, 'attention-none')
     skipped.reconcile_repo()
     got = skipped.invoke('--per-pr', 'none')
