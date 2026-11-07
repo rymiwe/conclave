@@ -277,11 +277,15 @@ def resolve_attention(numbers: list[int], raw: str | None, findings: list[dict],
     return {'mode': 'attention', 'source': 'attention.json', 'note': '', 'decisions': decisions}
 
 
-def stored_attention(previous: object, numbers: list[int]) -> dict | None:
+def stored_selection(previous: object, numbers: list[int]) -> dict | None:
+    """Stored per-PR selection when its mode is not all and it lists these PRs."""
     if not isinstance(previous, dict):
         return None
     stored = previous.get('attention')
-    if not isinstance(stored, dict) or stored.get('mode') != 'attention':
+    if not isinstance(stored, dict):
+        return None
+    mode = stored.get('mode')
+    if not isinstance(mode, str) or not mode or mode == 'all':
         return None
     decisions = stored.get('decisions')
     if not isinstance(decisions, list) or not decisions:
@@ -298,10 +302,11 @@ def stored_attention(previous: object, numbers: list[int]) -> dict | None:
     note = stored.get('note') or ''
     if not isinstance(note, str):
         note = ''
-    reuse = 'Reused the attention list stored in this run.'
-    if reuse not in note:
-        note = (note + ' ' + reuse).strip()
-    return {'mode': 'attention', 'source': 'stored', 'note': note, 'decisions': decisions}
+    if mode == 'attention':
+        reuse = 'Reused the attention list stored in this run.'
+        if reuse not in note:
+            note = (note + ' ' + reuse).strip()
+    return {'mode': mode, 'source': 'stored', 'note': note, 'decisions': decisions}
 
 
 def outcome_class(outcome: object) -> str:
@@ -1321,17 +1326,19 @@ class Runner:
             doc, warnings = validate_reconcile(raw, inputs, prs, oid)
             write_json(output, doc)
             (self.dest / 'reconcile.md').write_text(render_reconcile(doc), encoding='utf-8')
-            skipped_attention: set[int] = set()
+            skipped_mode = ''
+            skipped_prs: set[int] = set()
             plan = self.record.get('attention')
-            if isinstance(plan, dict) and plan.get('mode') == 'attention':
+            if isinstance(plan, dict) and isinstance(plan.get('mode'), str) and plan.get('mode') not in ('', 'all'):
+                skipped_mode = plan['mode']
                 for decision in plan.get('decisions') or []:
                     if isinstance(decision, dict) and decision.get('action') == 'skipped':
-                        skipped_attention.add(decision.get('pr'))
+                        skipped_prs.add(decision.get('pr'))
             for pr in prs:
                 ballot = self.ballot(pr['number'])
                 rows = {r['id']: r for r in doc['findings'] if r['ballot'] == ballot.name}
-                if pr['number'] in skipped_attention:
-                    warnings.append(f'{ballot.name}: skipped by attention')
+                if pr['number'] in skipped_prs:
+                    warnings.append(f'{ballot.name}: skipped by {skipped_mode}')
                     continue
                 if not (ballot / 'decide.md').exists():
                     warnings.append(f'{ballot.name}: missing decide.md; fold skipped')
@@ -1396,14 +1403,14 @@ class Runner:
         # Seats only matter when a scheduled ballot starts voters: the per-wave gate's rule
         # (new or needs legs). A resume of finished, chair-only or blocked ballots spends no
         # seat, so a capped route must not stop its reuse, chair steps or reconcile.
-        # A stored attention list drops the PRs it skipped. They have no ballot to launch,
-        # and a capped route must not block reconcile before that list is applied.
+        # A stored selection whose mode is not all drops the PRs it skipped. They have no
+        # ballot to launch, and a capped route must not block reconcile before that list is applied.
         # With no stack (the walk failed) the ballots are unknown, so seats are still checked.
+        plan = stored_selection(self.previous, [pr['number'] for pr in prs]) if prs else None
         if self.args.per_pr == 'none' or not prs:
             scheduled = []
-        elif self.args.per_pr == 'attention':
-            plan = stored_attention(self.previous, [pr['number'] for pr in prs])
-            skipped = {d['pr'] for d in plan['decisions'] if d.get('action') == 'skipped'} if plan else set()
+        elif plan is not None and plan.get('mode') == self.args.per_pr:
+            skipped = {d['pr'] for d in plan['decisions'] if d.get('action') == 'skipped'}
             scheduled = [self.ballot(pr['number']) for pr in prs if pr['number'] not in skipped]
         else:
             scheduled = [self.ballot(pr['number']) for pr in prs]
@@ -1424,34 +1431,39 @@ class Runner:
             return self.args.attention_prefs
         return os.environ.get('CONCLAVE_ATTENTION_PREFS') or None
 
-    def apply_per_pr_selection(self, prs: list[dict]) -> None:
-        numbers = [pr['number'] for pr in prs]
-        mode = self.args.per_pr
-        if mode == 'all':
-            plan = {'mode': 'all', 'source': 'flag', 'note': '',
-                    'decisions': [{'pr': number, 'action': 'picked', 'why': '--per-pr=all'} for number in numbers]}
-        elif mode == 'none':
-            plan = {'mode': 'none', 'source': 'flag', 'note': '',
-                    'decisions': [{'pr': number, 'action': 'skipped', 'why': '--per-pr=none'} for number in numbers]}
-        else:
-            plan = stored_attention(self.previous, numbers)
-            if plan is None:
-                ballot = ROOT / 'tmp/council' / self.whole_ballot_name()
-                path = ballot / 'attention.json'
-                findings, findings_note = load_findings(ballot)
-                files_by_pr = {pr['number']: [p for p in pr.get('files') or [] if isinstance(p, str)] for pr in prs}
-                if findings_note:
-                    plan = all_picked(numbers, 'fallback', findings_note)
-                else:
-                    plan = resolve_attention(
-                        numbers, read(path) if path.is_file() else None, findings, load_anchors(ballot),
-                        files_by_pr, self.attention_patterns)
+    def assign_selection(self, plan: dict) -> None:
+        """Record the selection and mark each skipped PR before reconcile or launch."""
         self.record['attention'] = plan
         by_pr = {decision['pr']: decision for decision in plan['decisions']}
         for row in self.record['prs']:
             decision = by_pr.get(row['pr'])
             if decision and decision['action'] == 'skipped':
                 row['outcome'] = 'skipped: ' + decision['why']
+
+    def apply_per_pr_selection(self, prs: list[dict]) -> None:
+        numbers = [pr['number'] for pr in prs]
+        mode = self.args.per_pr
+        plan = stored_selection(self.previous, numbers)
+        if plan is None or plan.get('mode') != mode:
+            plan = None
+        if plan is None and mode == 'all':
+            plan = {'mode': 'all', 'source': 'flag', 'note': '',
+                    'decisions': [{'pr': number, 'action': 'picked', 'why': '--per-pr=all'} for number in numbers]}
+        elif plan is None and mode == 'none':
+            plan = {'mode': 'none', 'source': 'flag', 'note': '',
+                    'decisions': [{'pr': number, 'action': 'skipped', 'why': '--per-pr=none'} for number in numbers]}
+        elif plan is None:
+            ballot = ROOT / 'tmp/council' / self.whole_ballot_name()
+            path = ballot / 'attention.json'
+            findings, findings_note = load_findings(ballot)
+            files_by_pr = {pr['number']: [p for p in pr.get('files') or [] if isinstance(p, str)] for pr in prs}
+            if findings_note:
+                plan = all_picked(numbers, 'fallback', findings_note)
+            else:
+                plan = resolve_attention(
+                    numbers, read(path) if path.is_file() else None, findings, load_anchors(ballot),
+                    files_by_pr, self.attention_patterns)
+        self.assign_selection(plan)
         self.save()
         print('\n'.join(attention_lines(plan)), flush=True)
 
@@ -1562,17 +1574,11 @@ class Runner:
         else:
             self.record['whole_stack'] = 'skipped'
             stop = ''
-            # Rows were rebuilt as pending. Put the stored attention list back before
-            # reconcile reads outcomes, or a skipped PR looks like a missing ballot.
-            if self.args.per_pr == 'attention':
-                plan = stored_attention(self.previous, [pr['number'] for pr in prs])
-                if plan is not None:
-                    self.record['attention'] = plan
-                    by_pr = {decision['pr']: decision for decision in plan['decisions']}
-                    for row in self.record['prs']:
-                        decision = by_pr.get(row['pr'])
-                        if decision and decision['action'] == 'skipped':
-                            row['outcome'] = 'skipped: ' + decision['why']
+            # Rows were rebuilt as pending. Put a stored selection back before reconcile
+            # reads outcomes, whenever its mode is not all. A skipped PR is not a missing ballot.
+            plan = stored_selection(self.previous, [pr['number'] for pr in prs])
+            if plan is not None:
+                self.assign_selection(plan)
         if stop:
             self.record['reconcile'] = stop
         elif self.max_capped:
