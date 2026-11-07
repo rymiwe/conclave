@@ -1353,7 +1353,12 @@ def test_whole_stack(tmp: Path, mod) -> None:
 SEAT_SEQ = '''\
 #!/usr/bin/env python3
 import json, os, pathlib, sys
-if '--route' not in sys.argv:
+route = ''
+if '--route' in sys.argv:
+    at = sys.argv.index('--route')
+    if at + 1 < len(sys.argv):
+        route = sys.argv[at + 1]
+if not route or route == 'chair':
     sys.exit(0)
 with open(os.environ['CALL_LOG'], 'a') as f: f.write(json.dumps(['seat', sys.argv[1:]])+'\\n')
 seq = pathlib.Path(os.environ['SEAT_SEQ'])
@@ -2534,7 +2539,6 @@ def chair_payload(model, base, reason, pool_state, pace, reading_age) -> str:
 
 
 def test_chair_route(tmp: Path) -> None:
-    """The launched chair id is one seat-usage chair answer, recorded on the run."""
     misses = []
 
     def expect(cond: bool, label: str) -> None:
@@ -2577,8 +2581,8 @@ def test_chair_route(tmp: Path) -> None:
         expect(rec.get('pool_state') == pool_state, f'{name} run.json pool_state ({rec.get("pool_state")!r})')
         expect(rec.get('pace') == pace, f'{name} run.json pace ({rec.get("pace")!r})')
         expect(rec.get('reading_age') == reading_age, f'{name} run.json reading_age ({rec.get("reading_age")!r})')
-        expect(f'Chair model: {model}' in report and f'base: {base}' in report and f'reason: {reason}' in report
-               and f'pool_state: {pool_state}' in report and f'pace: {pace}' in report
+        expect(f'Chair model: {model};' in report and f'base: {base};' in report and f'reason: {reason};' in report
+               and f'pool_state: {pool_state};' in report and f'pace: {pace};' in report
                and f'reading_age: {reading_age}' in report,
                f'{name} run.md records the chair route ({report!r})')
         expect(bool(chairs) and all(len(c) > 2 and c[2] == model for c in chairs),
@@ -2605,7 +2609,6 @@ def test_chair_route(tmp: Path) -> None:
     case('missing', CHAIR_FAST, '', missing=True, seat_ran=False, model=CHAIR_FAST,
          reason='seat-usage did not run: No such file or directory')
     case('bad-json', CHAIR_FAST, 'not-json', model=CHAIR_FAST, reason='seat-usage printed bad JSON')
-    # A non-zero exit keeps the base. Stdout may name another model. Stderr is not read.
     case('nonzero', CHAIR_FAST,
          chair_payload(CHAIR_PLAIN, CHAIR_FAST, 'refused', 'capped', 'ahead', 1),
          exit_code='2', stderr='switch to grok-9-high', model=CHAIR_FAST,

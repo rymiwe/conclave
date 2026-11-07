@@ -718,6 +718,32 @@ def cell(value: object) -> str:
     return str(value).replace('|', '\\|').replace('\r', ' ').replace('\n', '<br>')
 
 
+def parse_chair_route(raw: str) -> dict | None:
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    model = doc.get('model')
+    if not isinstance(model, str) or not model.strip():
+        return None
+
+    def scalar(name: str):
+        value = doc.get(name)
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return None
+
+    return {
+        'model': model,
+        'reason': scalar('reason'),
+        'pool_state': scalar('pool_state'),
+        'pace': scalar('pace'),
+        'reading_age': scalar('reading_age'),
+    }
+
+
 def render_reconcile(doc: dict) -> str:
     rows = doc['findings']
     counts = ', '.join(f"{v}: {sum(r['verdict'] == v for r in rows)}" for v in ('present', 'fixed', 'changed', 'unknown'))
@@ -804,6 +830,41 @@ class Runner:
     def check_model(self) -> None:
         if not self.model or self.model.lower() == 'auto' or 'composer' in self.model.lower():
             raise RuntimeError('chair model must be explicit, non-auto, and contain no composer')
+
+    def chair_route(self, base: str) -> dict:
+        recorded = {
+            'chair_model': base,
+            'chair_base': base,
+            'reason': '',
+            'pool_state': None,
+            'pace': None,
+            'reading_age': None,
+        }
+        seat_cli = os.path.expanduser(setting('SEAT_USAGE', '~/.local/bin/seat-usage'))
+        try:
+            proc = self.process(
+                [seat_cli, '--route', 'chair', '--chair-base', base],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                errors='replace', timeout=SEAT_TIMEOUT)
+        except OSError as exc:
+            recorded['reason'] = f'seat-usage did not run: {exc.strerror or exc}'
+            return recorded
+        except subprocess.TimeoutExpired:
+            recorded['reason'] = f'seat-usage timed out after {SEAT_TIMEOUT}s'
+            return recorded
+        if proc.returncode:
+            recorded['reason'] = f'seat-usage exited {proc.returncode}'
+            return recorded
+        parsed = parse_chair_route(proc.stdout or '')
+        if parsed is None:
+            recorded['reason'] = 'seat-usage printed bad JSON'
+            return recorded
+        recorded['chair_model'] = parsed['model']
+        recorded['reason'] = parsed['reason']
+        recorded['pool_state'] = parsed['pool_state']
+        recorded['pace'] = parsed['pace']
+        recorded['reading_age'] = parsed['reading_age']
+        return recorded
 
     def ballot(self, number: int) -> Path:
         return ROOT / 'tmp/council' / f'{self.prefix}-{number}'
@@ -914,6 +975,13 @@ class Runner:
             posted = f"; POSTED?: {', '.join(hits)}" if hits else ''
             lines.append(f"\nWhole stack{(' ' + ballot) if ballot else ''}: {status}{posted}")
             lines.append(f"\nWave cap: {self.record.get('wave_cap', self.cap)}")
+            if 'chair_model' in self.record:
+                lines.append(f"Chair model: {self.record['chair_model']}; "
+                             f"base: {self.record['chair_base']}; "
+                             f"reason: {self.record['reason']}; "
+                             f"pool_state: {self.record['pool_state']}; "
+                             f"pace: {self.record['pace']}; "
+                             f"reading_age: {self.record['reading_age']}")
             if self.record.get('attention'):
                 lines.append('')
                 lines.extend(attention_lines(self.record['attention']))
@@ -1542,6 +1610,10 @@ class Runner:
                                 'stack-run', str(ROOT / 'scripts/resolve-models.sh')])
             self.model = resolved.strip()
         self.check_model()
+        choice = self.chair_route(self.model)
+        self.model = choice['chair_model']
+        self.check_model()
+        self.record.update(choice)
         self.logs.mkdir(exist_ok=True)
         self.save()
         if not self.args.reconcile_only:
