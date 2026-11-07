@@ -2489,7 +2489,6 @@ def test_attention(tmp: Path, mod) -> None:
           f'--reconcile-only keeps a stored none selection out of reconcile '
           f'({second.returncode} {text!r} warnings {warnings!r} {second.stderr.strip()!r})')
 
-    # --per-pr all on reconcile-only does not reopen a stored none selection.
     mismatch = Fixture(tmp, 'none-reconcile-per-pr-all')
     mismatch.reconcile_repo()
     first = mismatch.invoke('--per-pr', 'none', '--no-reconcile')
