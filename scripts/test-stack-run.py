@@ -2457,6 +2457,34 @@ def test_attention(tmp: Path, mod) -> None:
           f'--reconcile-only keeps stored attention skips out of reconcile '
           f'({second.returncode} {text!r} warnings {warnings!r} {second.stderr.strip()!r})')
 
+    # The same gap for --per-pr=none: reconcile-only rebuilds every row as pending.
+    none_only = Fixture(tmp, 'none-reconcile-only')
+    none_only.reconcile_repo()
+    first = none_only.invoke('--per-pr', 'none', '--no-reconcile')
+    check(first.returncode == 0 and per_pr_launched(none_only) == []
+          and none_only.record()['attention']['mode'] == 'none',
+          f'none reconcile-only setup stores a none selection ({per_pr_launched(none_only)} {first.stderr.strip()})')
+    stale = none_only.root / 'tmp/council' / 'p-1'
+    stale.mkdir(parents=True)
+    (stale / 'findings.json').write_text(json.dumps({'findings': [
+        {'id': 'stale-none', 'claim': 'left from an earlier run', 'file': 'a.rb', 'line': 1},
+    ]}))
+    none_only.log.write_text('')
+    second = none_only.invoke('--reconcile-only', '--per-pr', 'none')
+    path = none_only.root / 'tmp/council/stack/reconcile-input.md'
+    text = path.read_text() if path.is_file() else ''
+    warnings = '\n'.join(none_only.record().get('reconcile_warnings') or [])
+    check(second.returncode == 0
+          and text.count('skipped: --per-pr=none') == 3
+          and 'missing findings.json' not in text
+          and 'stale-none' not in text
+          and 'p-1: skipped by none' in warnings
+          and 'p-2: skipped by none' in warnings
+          and 'p-3: skipped by none' in warnings
+          and 'missing decide.md' not in warnings,
+          f'--reconcile-only keeps a stored none selection out of reconcile '
+          f'({second.returncode} {text!r} warnings {warnings!r} {second.stderr.strip()!r})')
+
     skipped = Fixture(tmp, 'attention-none')
     skipped.reconcile_repo()
     got = skipped.invoke('--per-pr', 'none')
