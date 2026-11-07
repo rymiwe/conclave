@@ -2399,6 +2399,33 @@ def test_attention(tmp: Path, mod) -> None:
           and 'Reused the attention list stored in this run.' in rec['attention']['note'],
           f'resume reuses the stored attention list ({outcomes} {per_pr_launched(resume)} {rec.get("attention")} {second.stderr.strip()})')
 
+    # Whole-stack and the picked PR are done. Skipped PRs have no ballot folders, so a
+    # seat check that still counts them as new exits 3 before the stored list is read.
+    capped = Fixture(tmp, 'attention-resume-capped')
+    capped.reconcile_repo()
+    capped.env['ATTENTION_JSON'] = json.dumps([
+        attention_item(2, 'billing', 'contract crosses PRs', 'yes'),
+        attention_item(1, 'copy', 'wording only', 'no'),
+    ])
+    first = capped.invoke('--per-pr', 'attention', '--no-reconcile')
+    absent = [n for n in (1, 3) if not (capped.root / 'tmp/council' / f'p-{n}').exists()]
+    check(first.returncode == 0 and per_pr_launched(capped) == ['p-2'] and absent == [1, 3],
+          f'resume-capped setup finishes the picked PR and leaves the skipped PRs without ballot folders '
+          f'({per_pr_launched(capped)} absent {absent} {first.stderr.strip()})')
+    seat_route(capped, SEAT_ASK)
+    capped.env.pop('CONCLAVE_PREFLIGHT', None)
+    capped.log.write_text('')
+    second = capped.invoke('--per-pr', 'attention')
+    path = capped.root / 'tmp/council/stack/reconcile-input.md'
+    text = path.read_text() if path.is_file() else ''
+    check(second.returncode == 0
+          and 'skipped: attention: copy: wording only (deeper no)' in text
+          and 'skipped: not named by attention.json' in text
+          and 'missing findings.json' not in text
+          and 'seats capped' not in second.stdout,
+          f'a resumed attention run with capped seats does not exit 3 and reconcile lists the skips '
+          f'({second.returncode} {text!r} {second.stdout.strip()!r} {second.stderr.strip()})')
+
     skipped = Fixture(tmp, 'attention-none')
     skipped.reconcile_repo()
     got = skipped.invoke('--per-pr', 'none')
