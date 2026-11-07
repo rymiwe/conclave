@@ -298,9 +298,10 @@ def stored_attention(previous: object, numbers: list[int]) -> dict | None:
     note = stored.get('note') or ''
     if not isinstance(note, str):
         note = ''
-    return {'mode': 'attention', 'source': 'stored',
-            'note': (note + ' Reused the attention list stored in this run.').strip(),
-            'decisions': decisions}
+    reuse = 'Reused the attention list stored in this run.'
+    if reuse not in note:
+        note = (note + ' ' + reuse).strip()
+    return {'mode': 'attention', 'source': 'stored', 'note': note, 'decisions': decisions}
 
 
 def outcome_class(outcome: object) -> str:
