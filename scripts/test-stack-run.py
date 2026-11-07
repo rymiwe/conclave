@@ -2577,11 +2577,11 @@ def test_chair_route(tmp: Path) -> None:
         expect(got.returncode == 0, f'{name} run exits 0 ({got.returncode} {got.stderr.strip()})')
         expect(rec.get('chair_model') == model, f'{name} run.json chair_model is {model} ({rec.get("chair_model")!r})')
         expect(rec.get('chair_base') == base, f'{name} run.json chair_base is {base} ({rec.get("chair_base")!r})')
-        expect(rec.get('reason') == reason, f'{name} run.json reason is {reason!r} ({rec.get("reason")!r})')
+        expect(rec.get('chair_reason') == reason, f'{name} run.json chair_reason is {reason!r} ({rec.get("chair_reason")!r})')
         expect(rec.get('pool_state') == pool_state, f'{name} run.json pool_state ({rec.get("pool_state")!r})')
         expect(rec.get('pace') == pace, f'{name} run.json pace ({rec.get("pace")!r})')
         expect(rec.get('reading_age') == reading_age, f'{name} run.json reading_age ({rec.get("reading_age")!r})')
-        expect(f'Chair model: {model};' in report and f'base: {base};' in report and f'reason: {reason};' in report
+        expect(f'Chair model: {model};' in report and f'base: {base};' in report and f'chair_reason: {reason};' in report
                and f'pool_state: {pool_state};' in report and f'pace: {pace};' in report
                and f'reading_age: {reading_age}' in report,
                f'{name} run.md records the chair route ({report!r})')
@@ -2593,7 +2593,7 @@ def test_chair_route(tmp: Path) -> None:
         else:
             expect(chair_seats == [], f'{name} missing seat-usage is not launched ({chair_seats})')
         if stderr:
-            expect(stderr not in str(rec.get('reason')), f'{name} reason ignores stderr ({rec.get("reason")!r})')
+            expect(stderr not in str(rec.get('chair_reason')), f'{name} reason ignores stderr ({rec.get("chair_reason")!r})')
 
     case('ahead', CHAIR_FAST,
          chair_payload(CHAIR_PLAIN, CHAIR_FAST, 'cursor models ahead of pace', 'ahead', 'ahead', 30),
