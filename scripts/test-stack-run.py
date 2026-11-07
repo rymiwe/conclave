@@ -2453,7 +2453,9 @@ def test_attention(tmp: Path, mod) -> None:
           and 'stale-skip' not in text
           and 'p-1: skipped by attention' in warnings
           and 'p-3: skipped by attention' in warnings
-          and 'missing decide.md' not in warnings,
+          and 'missing decide.md' not in warnings
+          and 'ignored for reconcile-only' not in second.stdout
+          and 'ignored for reconcile-only' not in second.stderr,
           f'--reconcile-only keeps stored attention skips out of reconcile '
           f'({second.returncode} {text!r} warnings {warnings!r} {second.stderr.strip()!r})')
 
@@ -2481,9 +2483,59 @@ def test_attention(tmp: Path, mod) -> None:
           and 'p-1: skipped by none' in warnings
           and 'p-2: skipped by none' in warnings
           and 'p-3: skipped by none' in warnings
-          and 'missing decide.md' not in warnings,
+          and 'missing decide.md' not in warnings
+          and 'ignored for reconcile-only' not in second.stdout
+          and 'ignored for reconcile-only' not in second.stderr,
           f'--reconcile-only keeps a stored none selection out of reconcile '
           f'({second.returncode} {text!r} warnings {warnings!r} {second.stderr.strip()!r})')
+
+    mismatch = Fixture(tmp, 'none-reconcile-per-pr-all')
+    mismatch.reconcile_repo()
+    first = mismatch.invoke('--per-pr', 'none', '--no-reconcile')
+    check(first.returncode == 0 and per_pr_launched(mismatch) == []
+          and mismatch.record()['attention']['mode'] == 'none',
+          f'none-then-all setup stores a none selection ({per_pr_launched(mismatch)} {first.stderr.strip()})')
+    mismatch.env['RECONCILE_RAW'] = json.dumps({
+        'top_pr': 3,
+        'top_oid': mismatch.env['TOP_OID'],
+        'findings': [
+            {'ballot': f'p-{n}', 'id': 'f1', 'verdict': 'present', 'pr': None,
+             'evidence': 'read diff', 'repro_run': False, 'recommend': 'hold', 'why': 'still there'}
+            for n in (1, 2, 3)
+        ],
+    })
+    planted = {}
+    for n in (1, 2, 3):
+        ballot = mismatch.root / 'tmp/council' / f'p-{n}'
+        ballot.mkdir(parents=True, exist_ok=True)
+        (ballot / 'findings.json').write_text(json.dumps({'findings': [
+            {'id': 'f1', 'claim': f'left from an earlier run {n}', 'file': 'a.rb', 'line': 1},
+        ]}))
+        (ballot / 'decide.md').write_text(
+            'f1 — **what breaks, for whom**: hold\n'
+            '**later PRs that change this file**: none\n'
+            '**recommend**: hold\n')
+        planted[n] = (ballot / 'decide.md').read_bytes()
+    mismatch.log.write_text('')
+    second = mismatch.invoke('--reconcile-only', '--per-pr', 'all')
+    path = mismatch.root / 'tmp/council/stack/reconcile-input.md'
+    text = path.read_text() if path.is_file() else ''
+    warnings = '\n'.join(mismatch.record().get('reconcile_warnings') or [])
+    folded = {n: (mismatch.root / 'tmp/council' / f'p-{n}' / 'decide.md').read_bytes() for n in (1, 2, 3)}
+    check(second.returncode == 0
+          and per_pr_launched(mismatch) == []
+          and text.count('skipped: --per-pr=none') == 3
+          and 'missing findings.json' not in text
+          and all(f'left from an earlier run {n}' not in text for n in (1, 2, 3))
+          and all(f'p-{n}: skipped by none' in warnings for n in (1, 2, 3))
+          and 'missing decide.md' not in warnings
+          and folded == planted,
+          f'--reconcile-only --per-pr all keeps a stored none selection out of reconcile and the fold '
+          f'({second.returncode} {text!r} warnings {warnings!r} folded {folded == planted} {second.stderr.strip()!r})')
+    notice = 'stored selection none kept; --per-pr all ignored for reconcile-only'
+    seen = f'{second.stdout}\n{second.stderr}'.count(notice)
+    check(seen == 1,
+          f'reconcile-only says when --per-pr differs from the stored mode ({seen} {second.stdout!r} {second.stderr!r})')
 
     skipped = Fixture(tmp, 'attention-none')
     skipped.reconcile_repo()
