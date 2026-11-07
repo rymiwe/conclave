@@ -2453,7 +2453,9 @@ def test_attention(tmp: Path, mod) -> None:
           and 'stale-skip' not in text
           and 'p-1: skipped by attention' in warnings
           and 'p-3: skipped by attention' in warnings
-          and 'missing decide.md' not in warnings,
+          and 'missing decide.md' not in warnings
+          and 'ignored for reconcile-only' not in second.stdout
+          and 'ignored for reconcile-only' not in second.stderr,
           f'--reconcile-only keeps stored attention skips out of reconcile '
           f'({second.returncode} {text!r} warnings {warnings!r} {second.stderr.strip()!r})')
 
@@ -2481,7 +2483,9 @@ def test_attention(tmp: Path, mod) -> None:
           and 'p-1: skipped by none' in warnings
           and 'p-2: skipped by none' in warnings
           and 'p-3: skipped by none' in warnings
-          and 'missing decide.md' not in warnings,
+          and 'missing decide.md' not in warnings
+          and 'ignored for reconcile-only' not in second.stdout
+          and 'ignored for reconcile-only' not in second.stderr,
           f'--reconcile-only keeps a stored none selection out of reconcile '
           f'({second.returncode} {text!r} warnings {warnings!r} {second.stderr.strip()!r})')
 
@@ -2529,6 +2533,10 @@ def test_attention(tmp: Path, mod) -> None:
           and folded == planted,
           f'--reconcile-only --per-pr all keeps a stored none selection out of reconcile and the fold '
           f'({second.returncode} {text!r} warnings {warnings!r} folded {folded == planted} {second.stderr.strip()!r})')
+    notice = 'stored selection none kept; --per-pr all ignored for reconcile-only'
+    seen = f'{second.stdout}\n{second.stderr}'.count(notice)
+    check(seen == 1,
+          f'reconcile-only says when --per-pr differs from the stored mode ({seen} {second.stdout!r} {second.stderr!r})')
 
     skipped = Fixture(tmp, 'attention-none')
     skipped.reconcile_repo()
