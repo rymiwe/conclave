@@ -1579,6 +1579,9 @@ class Runner:
             plan = stored_selection(self.previous, [pr['number'] for pr in prs])
             if plan is not None:
                 self.assign_selection(plan)
+                if plan['mode'] != self.args.per_pr:
+                    print(f"stored selection {plan['mode']} kept; "
+                          f"--per-pr {self.args.per_pr} ignored for reconcile-only", file=sys.stderr)
         if stop:
             self.record['reconcile'] = stop
         elif self.max_capped:
