@@ -714,7 +714,7 @@ scripts/stack-run.py --repo ~/code/app --pr 101 \
 | `--wave-cap 1\|2\|3` | Most per-PR ballots in flight at once. Default: `CONCLAVE_WAVE_CAP` (`COUNCIL_WAVE_CAP` is the alias), else 2. A bad value is an error. Each fetch checks the oid gh already returned with `git cat-file`. Parallel ballots do not read `FETCH_HEAD`. |
 | `--jobs 1\|2` | Deprecated alias for `--wave-cap`. `--wave-cap` wins over it, and it wins over the environment. |
 | `--wave-wait S` | When a ballot's seat pre-check fails, check again every 60 seconds for up to S seconds. Default 0: stop at once. |
-| `--chair-model ID` | Default: the resolver's builder id (newest Grok Fast at high). `auto` and composer ids are refused. |
+| `--chair-model ID` | Base chair id. Default: the resolver's builder id (newest Grok Fast at high). Before the first chair, `seat-usage --route chair --chair-base` may replace it with the id that answer names. A missing command, a non-zero exit, a timeout, or unreadable JSON keeps this base. `auto` and composer ids are refused. |
 | `--chair-timeout S` | Seconds per chair process. Default 3600. A timeout kills the chair and fails that step. |
 | `--dry-run` | Print the plan: the in-flight cap, the launch order, and each ballot's steps. No chair, no voters, and no pre-check. |
 | `--reconcile-only` | Run only the pass. No ballot runs, the whole-stack ballot included. |
