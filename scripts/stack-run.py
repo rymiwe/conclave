@@ -1387,8 +1387,17 @@ class Runner:
         # Seats only matter when a scheduled ballot starts voters: the per-wave gate's rule
         # (new or needs legs). A resume of finished, chair-only or blocked ballots spends no
         # seat, so a capped route must not stop its reuse, chair steps or reconcile.
+        # A stored attention list drops the PRs it skipped. They have no ballot to launch,
+        # and a capped route must not block reconcile before that list is applied.
         # With no stack (the walk failed) the ballots are unknown, so seats are still checked.
-        scheduled = [] if self.args.per_pr == 'none' else [self.ballot(pr['number']) for pr in prs]
+        if self.args.per_pr == 'none' or not prs:
+            scheduled = []
+        elif self.args.per_pr == 'attention':
+            plan = stored_attention(self.previous, [pr['number'] for pr in prs])
+            skipped = {d['pr'] for d in plan['decisions'] if d.get('action') == 'skipped'} if plan else set()
+            scheduled = [self.ballot(pr['number']) for pr in prs if pr['number'] not in skipped]
+        else:
+            scheduled = [self.ballot(pr['number']) for pr in prs]
         if prs and not self.args.no_whole_stack:
             scheduled.append(ROOT / 'tmp/council' / self.whole_ballot_name())
         if not prs or any(state(b) in ('new', 'needs legs') for b in scheduled):
