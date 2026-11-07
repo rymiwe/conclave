@@ -720,6 +720,8 @@ scripts/stack-run.py --repo ~/code/app --pr 101 \
 | `--reconcile-only` | Run only the pass. No ballot runs, the whole-stack ballot included. |
 | `--no-reconcile` | Skip the pass. The whole-stack ballot still runs first. |
 | `--no-whole-stack` | Skip the whole-stack ballot. Per-PR ballots run with no stack-level findings in their briefs. |
+| `--per-pr all\|attention\|none` | Which PRs get a per-PR ballot after the whole-stack ballot. `all` (the default) ballots every PR. `attention` ballots the PRs named by that ballot's `attention.json`, plus any PR the floor or the prefs file forces. `none` ballots none. `attention` with `--no-whole-stack` is an error. The same `--wave-cap` bounds the PRs that run. |
+| `--attention-prefs FILE` | Path patterns, one per line, for PRs that `attention` always ballots. A `#` line is a comment. The file must sit outside this repository. Overrides `CONCLAVE_ATTENTION_PREFS`. |
 | `--detach` | Re-exec this command under `setsid` and `nohup`. Write the pid and log path into the stack directory, wait until the first ballot step starts, print them, and exit. A shorter flag is rejected. |
 
 ### In-flight window and the seat pre-check
@@ -790,6 +792,14 @@ The brief asks for problems that span PRs: a contract one PR sets and a later PR
 Its findings become context for the per-PR ballots: each per-PR brief lists them as already reported (see "Chair round A"). The whole-stack brief gets no such list.
 
 `--no-whole-stack` turns this ballot off, and the per-PR ballots run as before, with no stack-level findings. `--reconcile-only` skips it too. `--no-reconcile` does not.
+
+`--per-pr` chooses the per-PR ballots. `all` is the default and reviews every PR. `none` reviews none of them; the whole-stack ballot still runs unless `--no-whole-stack` is also set. `attention` reads `attention.json` from the whole-stack ballot directory after that ballot finishes. The chair writes it in round B. It is a JSON list. Each object has `pr`, `area`, `reason`, and `deeper` (`yes` or `no`). `deeper: yes` asks for that PR's existing per-PR ballot. A PR left off the list, or listed with `deeper: no`, is skipped.
+
+The runner checks the file before it skips anyone. A missing file, a file that is not that list, or a `pr` that is not in the stack runs every per-PR ballot and says so in `run.md`. It does not skip them.
+
+Two rules can add a PR the list left out. A whole-stack finding whose `severity` is `blocking` or `major` always selects the PR it names (`pr` on the finding, otherwise `anchors.json`, otherwise a stack PR whose files include the finding's `file`). A blocking or major finding that names no stack PR runs every per-PR ballot and says so. A prefs file of path globs does the same when one of that PR's files matches. `CONCLAVE_ATTENTION_PREFS` or `--attention-prefs` points at the file. The file has to live outside this repository. `scripts/attention-prefs.example` is an empty example and is not read. A missing prefs file adds no paths.
+
+`run.json` stores the list. A later run of the same stack reuses it instead of reading `attention.json` again. `run.md` lists every PR as picked or skipped and the reason. Reconciliation lists a skipped PR as `skipped: <reason>`. A skipped PR is not a missing ballot.
 
 If the whole-stack ballot fails, no per-PR ballot starts. Each per-PR row reads `failed: not started; whole-stack ballot failed (<outcome>); rerun to resume, or pass --no-whole-stack to review per PR without it`. The reconciliation is skipped with a message, and the runner exits 1. Rerun the same command to resume. A finished whole-stack ballot is not redone.
 
