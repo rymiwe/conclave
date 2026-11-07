@@ -835,7 +835,7 @@ class Runner:
         recorded = {
             'chair_model': base,
             'chair_base': base,
-            'reason': '',
+            'chair_reason': '',
             'pool_state': None,
             'pace': None,
             'reading_age': None,
@@ -847,20 +847,20 @@ class Runner:
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                 errors='replace', timeout=SEAT_TIMEOUT)
         except OSError as exc:
-            recorded['reason'] = f'seat-usage did not run: {exc.strerror or exc}'
+            recorded['chair_reason'] = f'seat-usage did not run: {exc.strerror or exc}'
             return recorded
         except subprocess.TimeoutExpired:
-            recorded['reason'] = f'seat-usage timed out after {SEAT_TIMEOUT}s'
+            recorded['chair_reason'] = f'seat-usage timed out after {SEAT_TIMEOUT}s'
             return recorded
         if proc.returncode:
-            recorded['reason'] = f'seat-usage exited {proc.returncode}'
+            recorded['chair_reason'] = f'seat-usage exited {proc.returncode}'
             return recorded
         parsed = parse_chair_route(proc.stdout or '')
         if parsed is None:
-            recorded['reason'] = 'seat-usage printed bad JSON'
+            recorded['chair_reason'] = 'seat-usage printed bad JSON'
             return recorded
         recorded['chair_model'] = parsed['model']
-        recorded['reason'] = parsed['reason']
+        recorded['chair_reason'] = parsed['reason']
         recorded['pool_state'] = parsed['pool_state']
         recorded['pace'] = parsed['pace']
         recorded['reading_age'] = parsed['reading_age']
@@ -978,7 +978,7 @@ class Runner:
             if 'chair_model' in self.record:
                 lines.append(f"Chair model: {self.record['chair_model']}; "
                              f"base: {self.record['chair_base']}; "
-                             f"reason: {self.record['reason']}; "
+                             f"chair_reason: {self.record['chair_reason']}; "
                              f"pool_state: {self.record['pool_state']}; "
                              f"pace: {self.record['pace']}; "
                              f"reading_age: {self.record['reading_age']}")
