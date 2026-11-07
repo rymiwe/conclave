@@ -2499,12 +2499,132 @@ def test_attention(tmp: Path, mod) -> None:
           f'--per-pr=none report lists each skip ({report})')
 
 
+CHAIR_FAST = 'grok-4.7-high-fast'
+CHAIR_PLAIN = 'grok-4.7-high'
+CHAIR_SEAT = '''\
+#!/usr/bin/env python3
+import json, os, sys
+argv = sys.argv[1:]
+with open(os.environ['CALL_LOG'], 'a') as handle:
+    handle.write(json.dumps(['seat', argv]) + '\\n')
+route = ''
+if '--route' in argv:
+    at = argv.index('--route')
+    if at + 1 < len(argv):
+        route = argv[at + 1]
+if route != 'chair':
+    sys.exit(0)
+err = os.environ.get('CHAIR_ROUTE_STDERR', '')
+if err:
+    print(err, file=sys.stderr)
+raw = os.environ.get('CHAIR_ROUTE_STDOUT', '')
+if raw:
+    sys.stdout.write(raw)
+    if not raw.endswith('\\n'):
+        sys.stdout.write('\\n')
+sys.exit(int(os.environ.get('CHAIR_ROUTE_EXIT', '0')))
+'''
+
+
+def chair_payload(model, base, reason, pool_state, pace, reading_age) -> str:
+    return json.dumps({
+        'model': model, 'base': base, 'reason': reason, 'pool_state': pool_state,
+        'pace': pace, 'reading_age': reading_age, 'model_list_source': 'fixture',
+    })
+
+
+def test_chair_route(tmp: Path) -> None:
+    """The launched chair id is one seat-usage chair answer, recorded on the run."""
+    misses = []
+
+    def expect(cond: bool, label: str) -> None:
+        if cond:
+            print(f'ok {label}')
+            return
+        misses.append(label)
+        print(f'FAIL {label}')
+
+    def case(name, base, stdout, *, exit_code='0', missing=False, stderr='',
+             model=None, reason='', pool_state=None, pace=None, reading_age=None,
+             seat_ran=True):
+        f = Fixture(tmp, f'chair-{name}')
+        f.env['CONCLAVE_PREFLIGHT'] = '0'
+        if missing:
+            gone = str(tmp / f'no-such-seat-usage-{name}')
+            f.env['CONCLAVE_SEAT_USAGE'] = gone
+            f.env['COUNCIL_SEAT_USAGE'] = gone
+        else:
+            write_exe(f.bin / 'seat-usage', CHAIR_SEAT)
+            f.env['CONCLAVE_SEAT_USAGE'] = str(f.bin / 'seat-usage')
+            f.env['COUNCIL_SEAT_USAGE'] = str(f.bin / 'seat-usage')
+            f.env['CHAIR_ROUTE_STDOUT'] = stdout
+            f.env['CHAIR_ROUTE_EXIT'] = exit_code
+            if stderr:
+                f.env['CHAIR_ROUTE_STDERR'] = stderr
+        got = f.invoke(*PER_PR, '--prs', '1', '--chair-model', base)
+        run_json = f.root / 'tmp/council/stack/run.json'
+        run_md = f.root / 'tmp/council/stack/run.md'
+        rec = json.loads(run_json.read_text()) if run_json.is_file() else {}
+        report = run_md.read_text() if run_md.is_file() else ''
+        chairs = [c[1] for c in f.calls() if c[0] == 'cursor']
+        chair_seats = [c[1] for c in f.calls() if c[0] == 'seat'
+                       and '--route' in c[1] and c[1][c[1].index('--route') + 1] == 'chair']
+        launched = chairs[0][2] if chairs and len(chairs[0]) > 2 else None
+        expect(got.returncode == 0, f'{name} run exits 0 ({got.returncode} {got.stderr.strip()})')
+        expect(rec.get('chair_model') == model, f'{name} run.json chair_model is {model} ({rec.get("chair_model")!r})')
+        expect(rec.get('chair_base') == base, f'{name} run.json chair_base is {base} ({rec.get("chair_base")!r})')
+        expect(rec.get('reason') == reason, f'{name} run.json reason is {reason!r} ({rec.get("reason")!r})')
+        expect(rec.get('pool_state') == pool_state, f'{name} run.json pool_state ({rec.get("pool_state")!r})')
+        expect(rec.get('pace') == pace, f'{name} run.json pace ({rec.get("pace")!r})')
+        expect(rec.get('reading_age') == reading_age, f'{name} run.json reading_age ({rec.get("reading_age")!r})')
+        expect(f'Chair model: {model}' in report and f'base: {base}' in report and f'reason: {reason}' in report
+               and f'pool_state: {pool_state}' in report and f'pace: {pace}' in report
+               and f'reading_age: {reading_age}' in report,
+               f'{name} run.md records the chair route ({report!r})')
+        expect(bool(chairs) and all(len(c) > 2 and c[2] == model for c in chairs),
+               f'{name} cursor-agent --model is {model} ({launched!r})')
+        if seat_ran:
+            expect(chair_seats == [['--route', 'chair', '--chair-base', base]],
+                   f'{name} seat-usage asked once for the base ({chair_seats})')
+        else:
+            expect(chair_seats == [], f'{name} missing seat-usage is not launched ({chair_seats})')
+        if stderr:
+            expect(stderr not in str(rec.get('reason')), f'{name} reason ignores stderr ({rec.get("reason")!r})')
+
+    case('ahead', CHAIR_FAST,
+         chair_payload(CHAIR_PLAIN, CHAIR_FAST, 'cursor models ahead of pace', 'ahead', 'ahead', 30),
+         model=CHAIR_PLAIN, reason='cursor models ahead of pace',
+         pool_state='ahead', pace='ahead', reading_age=30)
+    case('on-demand', CHAIR_FAST,
+         chair_payload(CHAIR_PLAIN, CHAIR_FAST, 'on-demand spend above 0', 'on_demand', 'under', 10),
+         model=CHAIR_PLAIN, reason='on-demand spend above 0',
+         pool_state='on_demand', pace='under', reading_age=10)
+    case('under', CHAIR_FAST,
+         chair_payload(CHAIR_FAST, CHAIR_FAST, 'under pace', 'ok', 'under', 5),
+         model=CHAIR_FAST, reason='under pace', pool_state='ok', pace='under', reading_age=5)
+    case('missing', CHAIR_FAST, '', missing=True, seat_ran=False, model=CHAIR_FAST,
+         reason='seat-usage did not run: No such file or directory')
+    case('bad-json', CHAIR_FAST, 'not-json', model=CHAIR_FAST, reason='seat-usage printed bad JSON')
+    # A non-zero exit keeps the base. Stdout may name another model. Stderr is not read.
+    case('nonzero', CHAIR_FAST,
+         chair_payload(CHAIR_PLAIN, CHAIR_FAST, 'refused', 'capped', 'ahead', 1),
+         exit_code='2', stderr='switch to grok-9-high', model=CHAIR_FAST,
+         reason='seat-usage exited 2')
+    case('explicit-plain', CHAIR_PLAIN,
+         chair_payload(CHAIR_PLAIN, CHAIR_PLAIN, 'base has no fast suffix', 'ok', 'under', 4),
+         model=CHAIR_PLAIN, reason='base has no fast suffix',
+         pool_state='ok', pace='under', reading_age=4)
+    if misses:
+        raise SystemExit(f'FAIL chair route ({len(misses)} failed)')
+
+
 def main() -> None:
     (ROOT / 'tmp').mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='stack-tests-', dir=ROOT / 'tmp') as raw:
         tmp = Path(raw)
         mod = load('stack-run')
         test_runner(tmp, mod)
+        test_chair_route(tmp)
         test_reconcile(tmp, mod)
         test_fetch_race(tmp, mod)
         for test in (test_blocked_resume, test_linear_stack, test_sticky_resume, test_seat_age,
