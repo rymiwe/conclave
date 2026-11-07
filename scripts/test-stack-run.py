@@ -78,7 +78,8 @@ if args[:2] == ['repo', 'view']:
 elif args[:2] == ['pr', 'view']:
     n = int(args[2]); data = row(n)
     if args[-1] == 'files,changedFiles':
-        data = {'files': [{'path': 'a.rb'}], 'changedFiles': 1}
+        paths = [p for p in os.environ.get(f'FILES_{n}', 'a.rb').split(',') if p]
+        data = {'files': [{'path': p} for p in paths], 'changedFiles': len(paths)}
 elif args[:2] == ['pr', 'list']:
     flag = '--base' if '--base' in args else '--head'
     branch = args[args.index(flag)+1]
@@ -213,8 +214,15 @@ else:
     if ballot.name.endswith(os.environ.get('POST_PR','never')):
         print(json.dumps({'type':'tool_call','tool_call':{'shellToolCall':{'args':{'command':'gh pr comment 2 --body bad'}}}}))
     if 'Round B.' in prompt:
+        if ballot.name.endswith('-stack') and 'ATTENTION_JSON' in os.environ:
+            raw = os.environ['ATTENTION_JSON']
+            if raw != 'missing':
+                (ballot/'attention.json').write_text(raw)
         if 'phase 4 only' not in prompt:
-            (ballot/'findings.json').write_text(json.dumps({'findings':[]}))
+            if ballot.name.endswith('-stack') and os.environ.get('STACK_FINDINGS'):
+                (ballot/'findings.json').write_text(os.environ['STACK_FINDINGS'])
+            else:
+                (ballot/'findings.json').write_text(json.dumps({'findings':[]}))
             subprocess.run([os.environ['COUNCIL_SCRIPT'], ballot.name, '--findings'], check=True)
         path = ballot/'decide.md'
         path.write_text(path.read_text().replace('TODO(chair)','hold'))
@@ -253,7 +261,7 @@ class Fixture:
                         COUNCIL_SEAT_USAGE=str(self.bin / 'seat-usage'),
                         COUNCIL_SEAT_JSON=str(self.seat), TMPDIR=str(self.temp))
         for name in ('CHAIR', 'WAVE_CAP', 'WAVE_PRECHECK', 'WAVE_POLL', 'PREFLIGHT', 'PREFLIGHT_DONE',
-                     'STAGE_HOOK', 'STAGE_HOOK_TIMEOUT'):
+                     'STAGE_HOOK', 'STAGE_HOOK_TIMEOUT', 'ATTENTION_PREFS'):
             self.env.pop(f'CONCLAVE_{name}', None)
             self.env.pop(f'COUNCIL_{name}', None)
 
@@ -2252,6 +2260,161 @@ def test_local_config_stays_in_worktree(tmp: Path, mod) -> None:
           'a final-component symlink is replaced by the copy, inside the worktree')
 
 
+def per_pr_launched(f: Fixture) -> list[str]:
+    """Ballot ids that got a real per-PR conclave.sh run, in call order."""
+    names = []
+    for call in f.calls():
+        if call[0] != 'council':
+            continue
+        args = call[1]
+        if args[0] in ('p-1', 'p-2', 'p-3') and '--dry-run' not in args and '--findings' not in args:
+            names.append(args[0])
+    return names
+
+
+def attention_item(pr: int, area: str, reason: str, deeper: str) -> dict:
+    return {'pr': pr, 'area': area, 'reason': reason, 'deeper': deeper}
+
+
+def test_attention(tmp: Path, mod) -> None:
+    """--per-pr selects which PRs get the existing per-PR ballot."""
+    conflict = Fixture(tmp, 'attention-conflict')
+    got = conflict.invoke('--per-pr', 'attention', '--no-whole-stack')
+    check(got.returncode != 0 and 'needs the whole-stack ballot' in got.stderr
+          and 'unrecognized' not in got.stderr,
+          f'--per-pr=attention with --no-whole-stack is a parser error ({got.returncode} {got.stderr.strip()})')
+
+    default = Fixture(tmp, 'attention-default')
+    default.reconcile_repo()
+    got = default.invoke('--no-reconcile')
+    check(got.returncode == 0 and per_pr_launched(default) == ['p-1', 'p-2', 'p-3'],
+          f'default --per-pr ballots every PR ({got.returncode} {per_pr_launched(default)} {got.stderr.strip()})')
+
+    explicit = Fixture(tmp, 'attention-all')
+    explicit.reconcile_repo()
+    got = explicit.invoke('--per-pr', 'all', '--no-reconcile')
+    check(got.returncode == 0 and per_pr_launched(explicit) == ['p-1', 'p-2', 'p-3'],
+          f'--per-pr=all ballots every PR ({got.returncode} {per_pr_launched(explicit)} {got.stderr.strip()})')
+    report = (explicit.root / 'tmp/council/stack/run.md').read_text()
+    check('Attention (all, source flag)' in report and '#1 picked: --per-pr=all' in report
+          and '#2 picked: --per-pr=all' in report and '#3 picked: --per-pr=all' in report,
+          f'--per-pr=all report lists every PR as picked ({report})')
+
+    picked = Fixture(tmp, 'attention-picked')
+    picked.reconcile_repo()
+    picked.env['ATTENTION_JSON'] = json.dumps([
+        attention_item(2, 'billing', 'contract crosses PRs', 'yes'),
+        attention_item(1, 'copy', 'wording only', 'no'),
+    ])
+    got = picked.invoke('--per-pr', 'attention', '--no-reconcile', '--wave-cap', '1')
+    rec = picked.record()
+    outcomes = [r['outcome'] for r in rec['prs']]
+    check(got.returncode == 0 and per_pr_launched(picked) == ['p-2'] and rec['wave_cap'] == 1
+          and outcomes[0].startswith('skipped:') and outcomes[1] == 'ok' and outcomes[2].startswith('skipped:'),
+          f'--per-pr=attention ballots only the named PR under --wave-cap ({outcomes} {per_pr_launched(picked)} {got.stderr.strip()})')
+    report = (picked.root / 'tmp/council/stack/run.md').read_text()
+    check('#2 picked: attention: billing: contract crosses PRs' in report
+          and '#1 skipped: attention: copy: wording only (deeper no)' in report
+          and '#3 skipped: not named by attention.json' in report,
+          f'attention report says why each PR was picked or skipped ({report})')
+
+    floor = Fixture(tmp, 'attention-floor')
+    floor.reconcile_repo()
+    floor.env['ATTENTION_JSON'] = json.dumps([
+        attention_item(3, 'pay', 'model says shallow', 'no'),
+    ])
+    floor.env['STACK_FINDINGS'] = json.dumps({'findings': [
+        {'id': 'f1', 'severity': 'Major', 'pr': 3, 'file': 'a.rb', 'claim': 'breaks the charge'},
+    ]})
+    got = floor.invoke('--per-pr', 'attention', '--no-reconcile')
+    outcomes = [r['outcome'] for r in floor.record()['prs']]
+    check(got.returncode == 0 and per_pr_launched(floor) == ['p-3']
+          and outcomes[0].startswith('skipped:') and outcomes[1].startswith('skipped:') and outcomes[2] == 'ok',
+          f'floor picks a major finding the model marked deeper no ({outcomes} {per_pr_launched(floor)} {got.stderr.strip()})')
+    report = (floor.root / 'tmp/council/stack/run.md').read_text()
+    check('#3 picked: floor: finding f1 severity major' in report,
+          f'floor report names the finding ({report})')
+
+    prefs = Fixture(tmp, 'attention-prefs')
+    prefs.reconcile_repo()
+    prefs.env['FILES_1'] = 'readme.md'
+    prefs.env['FILES_2'] = 'lib/pay.rb'
+    prefs.env['FILES_3'] = 'docs/guide.md'
+    prefs.env['ATTENTION_JSON'] = '[]'
+    prefs_file = prefs.base / 'attention-prefs'
+    prefs_file.write_text('# generic pattern\nlib/*.rb\n')
+    prefs.env['CONCLAVE_ATTENTION_PREFS'] = str(prefs_file)
+    got = prefs.invoke('--per-pr', 'attention', '--no-reconcile')
+    check(got.returncode == 0 and per_pr_launched(prefs) == ['p-2'],
+          f'prefs path pattern forces the PR that changes the matching file ({per_pr_launched(prefs)} {got.stderr.strip()})')
+    report = (prefs.root / 'tmp/council/stack/run.md').read_text()
+    check('#2 picked: prefs: lib/*.rb matches lib/pay.rb' in report
+          and '#1 skipped:' in report and '#3 skipped:' in report,
+          f'prefs report names the pattern and the path ({report})')
+
+    inside = Fixture(tmp, 'attention-prefs-inside')
+    inside.reconcile_repo()
+    inside.env['ATTENTION_JSON'] = '[]'
+    inside.env['CONCLAVE_ATTENTION_PREFS'] = str(inside.root / 'scripts/stack-run.py')
+    got = inside.invoke('--per-pr', 'attention', '--no-reconcile')
+    check(got.returncode != 0 and 'outside the conclave repository' in got.stderr and not per_pr_launched(inside),
+          f'an in-repo attention prefs path is refused before any per-PR ballot ({got.returncode} {got.stderr.strip()} {per_pr_launched(inside)})')
+
+    for label, raw, sentence in (
+            ('missing', 'missing', 'attention.json missing; running all'),
+            ('garbage', '{', 'attention.json unparseable; running all'),
+            ('outsider', json.dumps([attention_item(99, 'other', 'not in stack', 'yes')]),
+             'attention.json names PR #99, which is not in the stack; running all'),
+    ):
+        bad = Fixture(tmp, f'attention-bad-{label}')
+        bad.reconcile_repo()
+        bad.env['ATTENTION_JSON'] = raw
+        got = bad.invoke('--per-pr', 'attention', '--no-reconcile')
+        outcomes = [r['outcome'] for r in bad.record()['prs']]
+        report = (bad.root / 'tmp/council/stack/run.md').read_text()
+        check(got.returncode == 0 and per_pr_launched(bad) == ['p-1', 'p-2', 'p-3']
+              and outcomes == ['ok', 'ok', 'ok'] and sentence in report
+              and 'source fallback' in report,
+              f'bad attention.json ({label}) runs all and says so ({outcomes} {per_pr_launched(bad)} {report})')
+
+    resume = Fixture(tmp, 'attention-resume')
+    resume.reconcile_repo()
+    resume.env['ATTENTION_JSON'] = json.dumps([
+        attention_item(2, 'billing', 'contract crosses PRs', 'yes'),
+    ])
+    first = resume.invoke('--per-pr', 'attention', '--no-reconcile')
+    check(first.returncode == 0 and per_pr_launched(resume) == ['p-2'],
+          f'resume setup ballots the stored pick ({per_pr_launched(resume)} {first.stderr.strip()})')
+    stored = resume.record()['attention']
+    ballot = resume.root / 'tmp/council/p-stack-stack'
+    (ballot / 'attention.json').write_text(json.dumps([
+        attention_item(1, 'auth', 'changed after the run', 'yes'),
+    ]))
+    resume.log.write_text('')
+    second = resume.invoke('--per-pr', 'attention', '--no-reconcile')
+    rec = resume.record()
+    outcomes = [r['outcome'] for r in rec['prs']]
+    check(second.returncode == 0 and per_pr_launched(resume) == []
+          and outcomes[0].startswith('skipped:') and outcomes[1] == 'reused' and outcomes[2].startswith('skipped:')
+          and rec['attention']['source'] == 'stored'
+          and rec['attention']['decisions'][1]['why'] == stored['decisions'][1]['why']
+          and 'Reused the attention list stored in this run.' in rec['attention']['note'],
+          f'resume reuses the stored attention list ({outcomes} {per_pr_launched(resume)} {rec.get("attention")} {second.stderr.strip()})')
+
+    skipped = Fixture(tmp, 'attention-none')
+    skipped.reconcile_repo()
+    got = skipped.invoke('--per-pr', 'none')
+    text = (skipped.root / 'tmp/council/stack/reconcile-input.md').read_text()
+    check(got.returncode == 0 and per_pr_launched(skipped) == []
+          and skipped.record()['whole_stack'] == 'ok'
+          and text.count('skipped: --per-pr=none') == 3
+          and 'missing findings.json' not in text,
+          f'--per-pr=none skips per-PR ballots and reconcile lists the skips ({per_pr_launched(skipped)} {text})')
+    report = (skipped.root / 'tmp/council/stack/run.md').read_text()
+    check('#1 skipped: --per-pr=none' in report and '#3 skipped: --per-pr=none' in report,
+          f'--per-pr=none report lists each skip ({report})')
+
+
 def main() -> None:
     (ROOT / 'tmp').mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='stack-tests-', dir=ROOT / 'tmp') as raw:
@@ -2268,6 +2431,7 @@ def main() -> None:
         test_opus_session_limit(tmp, mod)
         test_shallow_repo(tmp)
         test_whole_stack(tmp, mod)
+        test_attention(tmp, mod)
         test_waves(tmp, mod)
         test_rolling(mod)
         test_max_cap_rolling(tmp, mod)
