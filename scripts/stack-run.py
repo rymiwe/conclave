@@ -2,6 +2,8 @@
 # Usage: scripts/stack-run.py --repo DIR --pr N --stack-id ID [--prs N,N,...]
 """Run one whole-stack ballot, then resumable per-PR review ballots with a capped number in flight, then reconcile findings at the stack top.
 
+--per-pr chooses which of those per-PR ballots run: all, the attention list, or none.
+
 Only chairs write review prose. The runner records each step, validates their
 receipts, and folds stack verdicts into existing decisions without posting.
 A finished per-PR ballot frees its slot at once, and the next one starts.
@@ -15,6 +17,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+import fnmatch
 import hashlib
 import importlib.util
 import json
@@ -84,6 +87,220 @@ def wave_cap(args: argparse.Namespace) -> tuple[int, str]:
     if raw.strip() not in ('1', '2', '3'):
         raise RuntimeError(f'CONCLAVE_WAVE_CAP must be 1, 2, or 3, not {raw!r}')
     return int(raw), 'CONCLAVE_WAVE_CAP'
+
+
+FLOOR_SEVERITIES = frozenset({'blocking', 'major'})
+
+
+def severity_key(value: object) -> str:
+    if not isinstance(value, str):
+        return ''
+    text = value.strip().lower()
+    if not text:
+        return ''
+    return re.sub(r'[\s_]+', '-', text)
+
+
+def attention_lines(plan: dict) -> list[str]:
+    lines = [f"Attention ({plan.get('mode', '')}, source {plan.get('source', '')})"]
+    note = plan.get('note') or ''
+    if note:
+        lines.append(note)
+    for decision in plan.get('decisions') or []:
+        lines.append(f"#{decision['pr']} {decision['action']}: {decision['why']}")
+    return lines
+
+
+def all_picked(numbers: list[int], source: str, note: str) -> dict:
+    return {'mode': 'attention', 'source': source, 'note': note,
+            'decisions': [{'pr': number, 'action': 'picked', 'why': note} for number in numbers]}
+
+
+def parse_attention(text: str, numbers: set[int]) -> tuple[list[dict] | None, str]:
+    """Parse attention.json. None plus a note means run every per-PR ballot."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None, 'attention.json unparseable; running all'
+    if not isinstance(data, list):
+        return None, 'attention.json invalid (expected a list); running all'
+    items = []
+    seen: set[int] = set()
+    for item in data:
+        if not isinstance(item, dict):
+            return None, 'attention.json invalid (entry is not an object); running all'
+        pr = item.get('pr')
+        if isinstance(pr, bool) or not isinstance(pr, int):
+            return None, 'attention.json invalid (pr is not an integer); running all'
+        if pr not in numbers:
+            return None, f'attention.json names PR #{pr}, which is not in the stack; running all'
+        if pr in seen:
+            return None, f'attention.json names PR #{pr} more than once; running all'
+        seen.add(pr)
+        area = item.get('area')
+        reason = item.get('reason')
+        deeper = item.get('deeper')
+        if not isinstance(area, str) or not area.strip():
+            return None, 'attention.json invalid (area must be a non-empty string); running all'
+        if not isinstance(reason, str) or not reason.strip():
+            return None, 'attention.json invalid (reason must be a non-empty string); running all'
+        if deeper not in ('yes', 'no'):
+            return None, 'attention.json invalid (deeper must be yes or no); running all'
+        items.append({'pr': pr, 'area': area.strip(), 'reason': reason.strip(), 'deeper': deeper})
+    return items, ''
+
+
+def attention_patterns(path: str | None, root: Path) -> tuple[list[str], str]:
+    """Forced-pick globs from a prefs file outside root. A missing file warns and matches nothing."""
+    if not path:
+        return [], ''
+    file = Path(path).expanduser()
+    if not file.is_file():
+        return [], f'attention prefs set but not found: {path}; no forced paths'
+    resolved = file.resolve()
+    root_resolved = root.resolve()
+    if resolved == root_resolved or root_resolved in resolved.parents:
+        raise RuntimeError('attention prefs must be outside the conclave repository')
+    patterns = []
+    for line in file.read_text(encoding='utf-8').splitlines():
+        item = line.strip()
+        if item and not item.startswith('#'):
+            patterns.append(item)
+    return patterns, ''
+
+
+def _finding_owners(finding: dict, anchors: dict, files_by_pr: dict[int, list[str]], numbers: set[int]) -> list[int]:
+    pr = finding.get('pr')
+    if isinstance(pr, int) and not isinstance(pr, bool) and pr in numbers:
+        return [pr]
+    anchor = anchors.get(str(finding.get('id')))
+    if isinstance(anchor, dict):
+        anchored = anchor.get('pr')
+        if isinstance(anchored, int) and not isinstance(anchored, bool) and anchored in numbers:
+            return [anchored]
+    path = finding.get('file')
+    if isinstance(path, str) and path:
+        return [number for number, paths in files_by_pr.items() if number in numbers and path in paths]
+    return []
+
+
+def floor_picks(findings: list[dict], anchors: dict, files_by_pr: dict[int, list[str]],
+                numbers: set[int]) -> tuple[dict[int, str], str]:
+    """PRs a blocking or major whole-stack finding always selects. A note means run all."""
+    forced: dict[int, list[str]] = {}
+    unplaced = []
+    for finding in findings:
+        severity = severity_key(finding.get('severity'))
+        if severity not in FLOOR_SEVERITIES:
+            continue
+        owners = _finding_owners(finding, anchors, files_by_pr, numbers)
+        ident = finding.get('id', '?')
+        if not owners:
+            unplaced.append(str(ident))
+            continue
+        for pr in owners:
+            forced.setdefault(pr, []).append(f'floor: finding {ident} severity {severity}')
+    if unplaced:
+        ident = ', '.join(unplaced)
+        return {}, f'whole-stack finding {ident} is blocking or major and names no stack PR; running all'
+    return {pr: '; '.join(reasons) for pr, reasons in forced.items()}, ''
+
+
+def prefs_picks(patterns: list[str], files_by_pr: dict[int, list[str]]) -> dict[int, str]:
+    forced = {}
+    for pr, paths in files_by_pr.items():
+        hits = []
+        for pattern in patterns:
+            for path in paths:
+                if fnmatch.fnmatchcase(path, pattern):
+                    hits.append(f'prefs: {pattern} matches {path}')
+                    break
+        if hits:
+            forced[pr] = '; '.join(hits)
+    return forced
+
+
+def load_findings(ballot: Path) -> tuple[list[dict], str]:
+    """Findings from a ballot. A note means the file is present and unusable, so run all."""
+    path = ballot / 'findings.json'
+    if not path.is_file():
+        return [], ''
+    try:
+        doc = json.loads(read(path))
+    except ValueError:
+        return [], 'whole-stack findings.json unparseable; running all'
+    if not isinstance(doc, dict) or not isinstance(doc.get('findings'), list):
+        return [], 'whole-stack findings.json invalid; running all'
+    return [item for item in doc['findings'] if isinstance(item, dict)], ''
+
+
+def load_anchors(ballot: Path) -> dict:
+    path = ballot / 'anchors.json'
+    if not path.is_file():
+        return {}
+    try:
+        doc = json.loads(read(path))
+    except ValueError:
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def resolve_attention(numbers: list[int], raw: str | None, findings: list[dict], anchors: dict,
+                      files_by_pr: dict[int, list[str]], patterns: list[str]) -> dict:
+    if raw is None:
+        return all_picked(numbers, 'fallback', 'attention.json missing; running all')
+    items, error = parse_attention(raw, set(numbers))
+    if items is None:
+        return all_picked(numbers, 'fallback', error)
+    floors, floor_note = floor_picks(findings, anchors, files_by_pr, set(numbers))
+    if floor_note:
+        return all_picked(numbers, 'fallback', floor_note)
+    forced_paths = prefs_picks(patterns, files_by_pr)
+    by_pr = {item['pr']: item for item in items}
+    decisions = []
+    for pr in numbers:
+        item = by_pr.get(pr)
+        reasons = []
+        if item and item['deeper'] == 'yes':
+            reasons.append(f"attention: {item['area']}: {item['reason']}")
+        if pr in floors:
+            reasons.append(floors[pr])
+        if pr in forced_paths:
+            reasons.append(forced_paths[pr])
+        if reasons:
+            decisions.append({'pr': pr, 'action': 'picked', 'why': '; '.join(reasons)})
+        elif item:
+            decisions.append({'pr': pr, 'action': 'skipped',
+                              'why': f"attention: {item['area']}: {item['reason']} (deeper no)"})
+        else:
+            decisions.append({'pr': pr, 'action': 'skipped', 'why': 'not named by attention.json'})
+    return {'mode': 'attention', 'source': 'attention.json', 'note': '', 'decisions': decisions}
+
+
+def stored_attention(previous: object, numbers: list[int]) -> dict | None:
+    if not isinstance(previous, dict):
+        return None
+    stored = previous.get('attention')
+    if not isinstance(stored, dict) or stored.get('mode') != 'attention':
+        return None
+    decisions = stored.get('decisions')
+    if not isinstance(decisions, list) or not decisions:
+        return None
+    got = []
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            return None
+        if decision.get('action') not in ('picked', 'skipped') or not isinstance(decision.get('why'), str):
+            return None
+        got.append(decision.get('pr'))
+    if got != numbers:
+        return None
+    note = stored.get('note') or ''
+    if not isinstance(note, str):
+        note = ''
+    return {'mode': 'attention', 'source': 'stored',
+            'note': (note + ' Reused the attention list stored in this run.').strip(),
+            'decisions': decisions}
 
 
 def outcome_class(outcome: object) -> str:
@@ -691,6 +908,9 @@ class Runner:
             posted = f"; POSTED?: {', '.join(hits)}" if hits else ''
             lines.append(f"\nWhole stack{(' ' + ballot) if ballot else ''}: {status}{posted}")
             lines.append(f"\nWave cap: {self.record.get('wave_cap', self.cap)}")
+            if self.record.get('attention'):
+                lines.append('')
+                lines.extend(attention_lines(self.record['attention']))
             for wave in self.record.get('waves', []):
                 lines.append(f"- wave {wave['wave']} ({', '.join(wave['ballots'])}): "
                              f"pre-check {wave['precheck']}; {wave['message']}")
@@ -970,6 +1190,12 @@ class Runner:
                 span = ('For each finding, name the PR that introduced the line (git log on the stack branches). '
                         'Note in decide.md any conflicted legs from the builder check. '
                         'Address each drafted comment to its PR. '
+                        f'Write {ballot / "attention.json"} as a JSON list before you finish. '
+                        'Each object has pr, area, reason, and deeper. '
+                        'pr is a pull request number in this stack. '
+                        'area and reason are short strings. '
+                        'deeper is yes when that pull request needs its own ballot, and no when it does not. '
+                        'Include only pull requests in this stack. '
                         'Your last message is the full report: judgment header, every gated finding with PR, '
                         'file:line, defect, legs, and Jev gate. ')
             prompt = (f"Round B. Ballot directory: {ballot}. Follow {ROOT / 'docs/review.md'} phases 2 to 4. "
@@ -1004,8 +1230,13 @@ class Runner:
         for pr in prs:
             lines.append(f"#{pr['number']} {pr['title']}\nhead_oid: {meta[pr['number']]['headRefOid']}\n"
                          f"base: {meta[pr['number']]['baseRefName']}\nfiles: {json.dumps(pr['files'])}\n")
+        outcomes = {row['pr']: str(row.get('outcome', '')) for row in self.record.get('prs', [])}
         for pr in prs:
             ballot = self.ballot(pr['number'])
+            outcome = outcomes.get(pr['number'], '')
+            if outcome.startswith('skipped:'):
+                lines.append(f'## {ballot.name}: {outcome}\n')
+                continue
             path = ballot / 'findings.json'
             if not path.exists():
                 lines.append(f'## {ballot.name}: missing findings.json\n')
@@ -1156,7 +1387,7 @@ class Runner:
         # (new or needs legs). A resume of finished, chair-only or blocked ballots spends no
         # seat, so a capped route must not stop its reuse, chair steps or reconcile.
         # With no stack (the walk failed) the ballots are unknown, so seats are still checked.
-        scheduled = [self.ballot(pr['number']) for pr in prs]
+        scheduled = [] if self.args.per_pr == 'none' else [self.ballot(pr['number']) for pr in prs]
         if prs and not self.args.no_whole_stack:
             scheduled.append(ROOT / 'tmp/council' / self.whole_ballot_name())
         if not prs or any(state(b) in ('new', 'needs legs') for b in scheduled):
@@ -1169,7 +1400,48 @@ class Runner:
         self.preflight_done = True
         return prs
 
+    def attention_prefs_path(self) -> str | None:
+        if getattr(self.args, 'attention_prefs', None):
+            return self.args.attention_prefs
+        return os.environ.get('CONCLAVE_ATTENTION_PREFS') or None
+
+    def apply_per_pr_selection(self, prs: list[dict]) -> None:
+        numbers = [pr['number'] for pr in prs]
+        mode = self.args.per_pr
+        if mode == 'all':
+            plan = {'mode': 'all', 'source': 'flag', 'note': '',
+                    'decisions': [{'pr': number, 'action': 'picked', 'why': '--per-pr=all'} for number in numbers]}
+        elif mode == 'none':
+            plan = {'mode': 'none', 'source': 'flag', 'note': '',
+                    'decisions': [{'pr': number, 'action': 'skipped', 'why': '--per-pr=none'} for number in numbers]}
+        else:
+            plan = stored_attention(self.previous, numbers)
+            if plan is None:
+                ballot = ROOT / 'tmp/council' / self.whole_ballot_name()
+                path = ballot / 'attention.json'
+                findings, findings_note = load_findings(ballot)
+                files_by_pr = {pr['number']: [p for p in pr.get('files') or [] if isinstance(p, str)] for pr in prs}
+                if findings_note:
+                    plan = all_picked(numbers, 'fallback', findings_note)
+                else:
+                    plan = resolve_attention(
+                        numbers, read(path) if path.is_file() else None, findings, load_anchors(ballot),
+                        files_by_pr, self.attention_patterns)
+        self.record['attention'] = plan
+        by_pr = {decision['pr']: decision for decision in plan['decisions']}
+        for row in self.record['prs']:
+            decision = by_pr.get(row['pr'])
+            if decision and decision['action'] == 'skipped':
+                row['outcome'] = 'skipped: ' + decision['why']
+        self.save()
+        print('\n'.join(attention_lines(plan)), flush=True)
+
     def run(self) -> int:
+        self.attention_patterns: list[str] = []
+        if self.args.per_pr == 'attention' and not self.args.dry_run and not self.args.reconcile_only:
+            self.attention_patterns, warning = attention_patterns(self.attention_prefs_path(), ROOT)
+            if warning:
+                print(f'stack-run: {warning}', file=sys.stderr)
         if self.args.dry_run or self.args.reconcile_only or not preflight.enabled():
             prs = self.stack()
         else:
@@ -1199,8 +1471,14 @@ class Runner:
             if not self.args.reconcile_only:
                 lines.append(f'in-flight cap: {self.cap} ({self.cap_source})')
                 first = f'{self.whole_ballot_name()} alone, then ' if whole else ''
-                lines.append(f"launch order: {first}{', '.join(r['ballot'] for r in self.record['prs'])} "
-                             'bottom up, refilled as slots free')
+                if self.args.per_pr == 'none':
+                    lines.append(f'launch order: {first}no per-PR ballots (--per-pr=none)')
+                elif self.args.per_pr == 'attention':
+                    lines.append(f'launch order: {first}per-PR ballots chosen from attention.json, '
+                                 'bottom up, refilled as slots free')
+                else:
+                    lines.append(f"launch order: {first}{', '.join(r['ballot'] for r in self.record['prs'])} "
+                                 'bottom up, refilled as slots free')
             if whole:
                 base, head = self.stack_refs(prs)
                 target = ['--base', base, '--head', head]
@@ -1209,6 +1487,14 @@ class Runner:
                 lines.append(f"{whole_name}: {status}; steps: {'; '.join(steps) or 'none'}; "
                              f"base: {base}; head: {head}; claude flags: {json.dumps(flags)}")
             for row in self.record['prs']:
+                if not self.args.reconcile_only and self.args.per_pr == 'none':
+                    lines.append(f"{row['ballot']}: {row['state']}; steps: none; skipped by --per-pr=none; "
+                                 f"claude flags: {json.dumps(flags)}")
+                    continue
+                if not self.args.reconcile_only and self.args.per_pr == 'attention':
+                    lines.append(f"{row['ballot']}: {row['state']}; steps: after the whole-stack attention list; "
+                                 f"claude flags: {json.dumps(flags)}")
+                    continue
                 steps = [] if self.args.reconcile_only else self.preview_steps(row['ballot'], row['state'], row['pr'], flags)
                 lines.append(f"{row['ballot']}: {row['state']}; steps: {'; '.join(steps) or 'none'}; claude flags: {json.dumps(flags)}")
             if not self.args.no_reconcile:
@@ -1252,6 +1538,7 @@ class Runner:
                 self.record['whole_stack'] = 'skipped'
                 stop = ''
             if not stop:
+                self.apply_per_pr_selection(prs)
                 stop = self.per_pr_waves()
         else:
             self.record['whole_stack'] = 'skipped'
@@ -1381,7 +1668,8 @@ class Runner:
         Once any phase 1 caps the Claude subscription no further ballot starts: in-flight ballots
         drain and every row not yet launched is closed as not started.
         """
-        queue = deque(self.record['prs'])
+        queue = deque(row for row in self.record['prs']
+                      if not str(row.get('outcome', '')).startswith('skipped:'))
         running: set = set()
         with ThreadPoolExecutor(max_workers=self.cap) as pool:
             while queue:
@@ -1489,6 +1777,11 @@ def main() -> int:
     group.add_argument('--no-reconcile', action='store_true')
     parser.add_argument('--no-whole-stack', action='store_true',
                         help='Skip the whole-stack ballot that runs before the per-PR ballots')
+    parser.add_argument('--per-pr', choices=('all', 'attention', 'none'), default='all',
+                        help='Which PRs get a per-PR ballot: all (default), attention, or none')
+    parser.add_argument('--attention-prefs',
+                        help='Forced-pick path globs in a file outside this repository. '
+                             'Overrides CONCLAVE_ATTENTION_PREFS')
     parser.add_argument('--detach', action='store_true',
                         help='Re-exec under setsid and nohup, then return after the first ballot step starts')
     args = parser.parse_args()
@@ -1496,6 +1789,8 @@ def main() -> int:
         parser.error('--pr and --chair-timeout must be positive')
     if args.wave_wait < 0:
         parser.error('--wave-wait must be zero or more seconds')
+    if args.per_pr == 'attention' and args.no_whole_stack:
+        parser.error('--per-pr=attention needs the whole-stack ballot; do not pass --no-whole-stack')
     if args.detach:
         return detach(args)
     runner = None

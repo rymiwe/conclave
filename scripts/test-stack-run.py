@@ -2261,15 +2261,14 @@ def test_local_config_stays_in_worktree(tmp: Path, mod) -> None:
 
 
 def per_pr_launched(f: Fixture) -> list[str]:
-    """Ballot ids that got a real per-PR conclave.sh run, in call order."""
-    names = []
+    names = set()
     for call in f.calls():
         if call[0] != 'council':
             continue
         args = call[1]
         if args[0] in ('p-1', 'p-2', 'p-3') and '--dry-run' not in args and '--findings' not in args:
-            names.append(args[0])
-    return names
+            names.add(args[0])
+    return sorted(names)
 
 
 def attention_item(pr: int, area: str, reason: str, deeper: str) -> dict:
@@ -2277,7 +2276,6 @@ def attention_item(pr: int, area: str, reason: str, deeper: str) -> dict:
 
 
 def test_attention(tmp: Path, mod) -> None:
-    """--per-pr selects which PRs get the existing per-PR ballot."""
     conflict = Fixture(tmp, 'attention-conflict')
     got = conflict.invoke('--per-pr', 'attention', '--no-whole-stack')
     check(got.returncode != 0 and 'needs the whole-stack ballot' in got.stderr
@@ -2355,8 +2353,8 @@ def test_attention(tmp: Path, mod) -> None:
     inside = Fixture(tmp, 'attention-prefs-inside')
     inside.reconcile_repo()
     inside.env['ATTENTION_JSON'] = '[]'
-    inside.env['CONCLAVE_ATTENTION_PREFS'] = str(inside.root / 'scripts/stack-run.py')
-    got = inside.invoke('--per-pr', 'attention', '--no-reconcile')
+    got = inside.invoke('--per-pr', 'attention', '--attention-prefs', str(inside.root / 'scripts/stack-run.py'),
+                        '--no-reconcile')
     check(got.returncode != 0 and 'outside the conclave repository' in got.stderr and not per_pr_launched(inside),
           f'an in-repo attention prefs path is refused before any per-PR ballot ({got.returncode} {got.stderr.strip()} {per_pr_launched(inside)})')
 
